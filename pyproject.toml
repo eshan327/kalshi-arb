@@ -1,0 +1,17 @@
+[project]
+name = "kalshi-arb"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=46.0.5",
+    "kalshi-python-async>=3.2.0",
+    "kalshi-python-sync>=3.2.0",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.2",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
+    "websockets>=16.0",
+]
