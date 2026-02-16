@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+# ! Will need this to format the data once we rebuild the UI for the live stream.
+
 def print_market_timing(open_time_str: str, close_time_str: str):
     """
     Calculates and prints the market window, current time, and a live countdown.

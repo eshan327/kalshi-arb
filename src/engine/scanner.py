@@ -3,6 +3,8 @@ from data.orderbook_math import parse_orderbook
 from core.display import print_orderbook_table, print_market_timing
 from execution.order_manager import execute_trade_decision
 
+# ! File is probably redundant, keep for reference.
+
 def run_market_scanner(client):
     """Displays active crypto markets and checks for execution signals."""
 

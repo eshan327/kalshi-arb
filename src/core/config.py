@@ -12,3 +12,8 @@ if KALSHI_ENV == "prod":
     API_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 else:
     API_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
+
+if KALSHI_ENV == "prod":
+    WS_BASE_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+else:
+    WS_BASE_URL = "wss://demo-api.kalshi.co/trade-api/ws/v2"
