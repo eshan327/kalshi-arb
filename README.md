@@ -81,11 +81,11 @@ We can't trade on isolated WebSocket messages (e.g., "someone canceled 5 contrac
 
 **Task 2: CF Benchmarks Data Ingestion**
 
-Kalshi Bitcoin markets settle on the CF Benchmarks Bitcoin Real Time Index (BRTI). Because settlement arb relies on knowing the exact numbers going into the final calculation, we must build a second, concurrent WebSocket connection to the CF Benchmarks API to stream the live spot price of Bitcoin alongside the Kalshi orderbook.
+Kalshi Bitcoin markets settle on the CF Benchmarks Bitcoin Real Time Index (BRTI). Because settlement arb relies on knowing the exact numbers going into the final calculation, we must build a second, concurrent WebSocket connection to the CF Benchmarks API to stream the live spot price of Bitcoin alongside the Kalshi orderbook. Based on an initial web search it's very possible we can't connect to the BRTI for free, so we might have to reconstruct it using the APIs of constituent exchanges like Coinbase, Gemini, and Kraken.
 
 **Task 3: TWAP Arbitrage Engine** (alpha)
 
-We need to maintain a rolling Time-Weighted Average Price of the BRTI over the final 60 seconds of the contract. The engine will constantly compare this running average against Kalshi's implied probabilities to mathematically flag when the market outcome becomes (at least near) deterministic. We'll need to look into mathematical pricing models.
+We need to maintain a rolling Time-Weighted Average Price of the BRTI over the final 60 seconds of the contract. The engine will constantly compare this running average against Kalshi's implied probabilities to mathematically flag when the market outcome becomes (at least near) deterministic. We'll need to look into mathematical pricing models. Look into Asian options - in this type of option, payoff is determined by the average price over a determined time period, not the price at expiration. Modifying some Asian option pricing model and constructing a probability distribution is probably where we should start.
 
 **Task 4: Paper Trading Simulator**
 
@@ -93,4 +93,4 @@ Kalshi's demo environment is very flawed so we need our own execution sim. Runni
 
 **Task 5: Live Deployment**
 
-If/when we prove that we have a low-latency replication of the BRTI and that the TWAP strategy is profitable and accounts, we can try live trading by connecting engine signals to the order manager.
+If/when we prove that we have a low-latency replication of the BRTI and that the TWAP strategy is profitable, we can try live trading by connecting engine signals to the order manager.
