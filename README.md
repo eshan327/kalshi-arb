@@ -73,7 +73,7 @@ Follow DRY (don't repeat yourself), SOLID (most important part is Single Respons
 
 ### What's Left
 
-Right now we're basically catching data without really understanding the market data. To execute the settlement strat we need to transition to actively calculating.
+Right now we're basically catching data without really understanding the market. To execute the settlement strat we need to transition to actively calculating.
 
 **Task 1: Orderbook Reconstruction** (high priority)
 
