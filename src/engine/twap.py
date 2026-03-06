@@ -34,6 +34,8 @@ class TwapCalculator:
         
         return (target_sum - current_sum) / rem_sec
 
+
+    # ! placeholder - remove & replace with proper modeling elsewhere
     def is_outcome_deterministic(self, max_realistic_move: float = 500.0) -> str:
         """
         How certain/uncertain is the outcome right now?
