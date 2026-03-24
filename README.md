@@ -1,18 +1,19 @@
 # kalshi-arb
 
----
-
 ## Setup
 
 ### Package Management
+
 - Use `uv` as your Python package manager (download if you don't have it)
-    - `pyproject.toml` contains all project dependencies
-    - Running `uv sync` will give you the needed dependencies ez
-    - Use `uv add [name]` if you need a new package (will update the .toml)
+- `pyproject.toml` contains all project dependencies
+- Running `uv sync` will give you the needed dependencies ez
+- Use `uv add [name]` if you need a new package (will update the `.toml`)
 
 ### Environment Variables
+
 Your `.env` file should look like this:
-```
+
+```env
 # defaults for our runs (real markets, no active trading yet)
 KALSHI_ENV=prod
 KALSHI_EXECUTION_MODE=OBSERVE
@@ -27,9 +28,10 @@ KALSHI_PROD_KEY_PATH=.secrets/prod.txt
 ```
 
 ### API Setup
+
 - Get both prod and demo keys in account/security settings (demo url: https://demo.kalshi.co)
-- Just nickname them prod and demo so your files are `prod.txt` and `demo.txt`
-- Put the .txt files under a gitignored folder called `.secrets`
+- Just nickname them `prod` and `demo` so your files are `prod.txt` and `demo.txt`
+- Put the `.txt` files under a gitignored folder called `.secrets`
 - The `KEY_ID` is copypasteable from Kalshi settings, put them in the `.env`
 - Pls make sure everything is gitignored properly or I lowk steal your bank account
 
@@ -38,18 +40,31 @@ KALSHI_PROD_KEY_PATH=.secrets/prod.txt
 ## Code Guidelines
 
 ### Structure
-- Everything that matters is under the `src` directory 
+
+- Everything that matters is under the `src` directory
 - We're modularizing everything into subdirectories for a reason, it's more maintainable and organized
-- Seperate & simplify components as much as you can, market-making project bloated to like a 1500-line `main.py` it was cooked
+- Separate & simplify components as much as you can, market-making project bloated to like a 1500-line `main.py` it was cooked
 
 ### Best Practices
+
 - It's best to leave brief comments under both functions & important code blocks so everyone understands your code and knows what does what (important for debugging)
 - LLMs are a second resort to reading docs. It's obv useful when on a leash but will bloat the codebase into a mess without clear guidance
 - Don't let tech debt accumulate. Read this: https://www.ibm.com/think/topics/technical-debt
 - Try to make small, iterative code changes and review/cleanup every change you make before continuing
 
 ### Principles
-Follow DRY (don't repeat yourself), SOLID (most important part is Single Responsibility), KISS (Keep It Short and Simple) principles, and the MVC pattern
+
+Follow **DRY** (don't repeat yourself), **SOLID** (most important part is Single Responsibility), **KISS** (Keep It Short and Simple) principles, and the **MVC** pattern
+
+---
+
+## Strategy
+
+Kalshi's 15m BTC contracts settle on a TWAP of the BRTI over the final 60 seconds. We are building a **Statistical Arbitrage bot**. This means:
+
+- **Convergence (Final 60s):** as previous prices get locked into the payout, the outcome becomes more certain
+- **Asian Options Pricing (Mins 1-14):** gives us a probabilistic estimate of where the TWAP will land at expiry given the current price and elapsed average.
+- **Orderbook Pressure (OBP):** tells us what the market believes and helps us filter/confirm model signals before the final minute.
 
 ---
 
@@ -57,40 +72,64 @@ Follow DRY (don't repeat yourself), SOLID (most important part is Single Respons
 
 ### What's Built
 
-**Authentication & Config**
-- `config.py` and `auth.py` are the source for environment variables and cryptographic signing to handle authentication
+**Authentication & Config (`src/core/`)**
+- `config.py` and `auth.py` are for environment variables and authentication
+- `display.py` handles terminal formatting right now (rework to visualize the live orderbook later)
 
-**Data Infrastructure**
-- `kalshi_rest.py` and `kalshi_ws.py` cover pulling snapshots (REST API) and the high-frequency streaming (WebSocket)
-- `streamer.py` and `main.py` form an asynchronous event loop to handle continuous data
-- `display.py` currently unused, will matter to reconstruct orderbook (`orderbook_math.py` supports this)
+**Data Infrastructure (`src/data/`)**
+- `kalshi_rest.py` pulls static JSON snapshots from market
+- `kalshi_ws.py` keeps the WebSocket tunnel open
+- `orderbook_math.py` handles pure math functions (e.g., implied asks)
 
-**Execution**
-- `order_manager.py` is a functional order routing system with safety valves (e.g. QT button mashing)
+**Engine & Math (`src/engine/`)**
+- `streamer.py` is an aysnc event loop routing WS traffic
+- `twap.py` tracks the rolling window, elapsed time, and required remaining average
 
-**Other**
-- `scanner.py` is probably not needed; leave it be for now to be safe
+**Execution (`src/execution/`)**
+- `order_manager.py` routes orders and has safety valves (QT button mashing simulator)
+
+---
 
 ### What's Left
 
-Right now we're basically catching data without really understanding the market. To execute the settlement strat we need to transition to actively calculating.
+Right now, we are catching data but the bot doesn't "see" the market state. Here is the build order. *Tasks 1 and 2 can be done in parallel.* **This plan is tentative and speculative; modify as needed.**
 
-**Task 1: Orderbook Reconstruction** (high priority)
+#### Task 1: Orderbook Reconstruction
 
-We can't trade on isolated WebSocket messages (e.g., "someone canceled 5 contracts at 10¢"). We need to know the whole state. We have to code an algorithm that fetches a REST snapshot of the orderbook, buffers incoming WebSocket events, filters out old sequence IDs, and updates the snapshot. This creates an actually accurate orderbook.
+We can't trade on isolated WebSocket messages. We need to build `src/engine/orderbook.py`. It needs to:
 
-**Task 2: CF Benchmarks Data Ingestion**
+1. Fetch a REST snapshot on startup.
+2. Buffer incoming WS delta events from `streamer.py`.
+3. Filter stale sequence IDs and apply deltas to the snapshot in order.
+4. Expose a clean `get_orderbook()` interface so our math engine can read the live state.
 
-Kalshi Bitcoin markets settle on the CF Benchmarks Bitcoin Real Time Index (BRTI). Because settlement arb relies on knowing the exact numbers going into the final calculation, we must build a second, concurrent WebSocket connection to the CF Benchmarks API to stream the live spot price of Bitcoin alongside the Kalshi orderbook. Based on an initial web search it's very possible we can't connect to the BRTI for free, so we might have to reconstruct it using the APIs of constituent exchanges like Coinbase, Gemini, and Kraken.
+#### Task 2: BRTI Proxy
 
-**Task 3: TWAP Arbitrage Engine** (alpha)
+Kalshi settles on the CF Benchmarks BRTI, and we need to synthesize the BRTI without direct API access.
 
-We need to maintain a rolling Time-Weighted Average Price of the BRTI over the final 60 seconds of the contract. The engine will constantly compare this running average against Kalshi's implied probabilities to mathematically flag when the market outcome becomes (at least near) deterministic. We'll need to look into mathematical pricing models. Look into Asian options - in this type of option, payoff is determined by the average price over a determined time period, not the price at expiration. Modifying some Asian option pricing model and constructing a probability distribution is probably where we should start.
+1. Create `src/feeds/` directory.
+2. Build WS connections to Coinbase, Kraken, and Gemini.
+3. Build `brti_aggregator.py` to collect trades in a rolling window and output a volume-weighted median price.
 
-**Task 4: Paper Trading Simulator**
+#### Task 3: Asian Options Pricer & Volatility
 
-Kalshi's demo environment is very flawed so we need our own execution sim. Running this should allow us to stream live production data and simulate our fills against the real orderbook slippage.
+We have the TWAP tracker but we need to price the uncertainty of the remaining time.
 
-**Task 5: Live Deployment**
+1. Build `asian_pricer.py`. We will use a model like the Levy approximation to calculate the lognormal probability distribution of the remaining 60-second average.
+2. Build `vol_estimator.py` to calculate realized vol from our BRTI proxy to feed into the pricer.
 
-If/when we prove that we have a low-latency replication of the BRTI and that the TWAP strategy is profitable, we can try live trading by connecting engine signals to the order manager.
+#### Task 4: OBP Signal
+
+Build `src/engine/obp.py` to quantify directional conviction. Calculate bid/ask imbalance at the top 5/10/etc levels and the size-weighted mid-price. This tells us if human traders are spoofing or actually moving a certain way.
+
+#### Task 5: Signal Combiner
+
+Build `src/engine/signal.py`. Merge the fair value from the Asian pricer with the conviction from the OBP. Calculate the edge minus taker fees. If `edge > min_edge` and `obp_aligned == True`, emit a `TradeSignal`.
+
+#### Task 6: Paper Trading Simulator
+
+Kalshi's demo markets are illiquid and useless for high-frequency testing. We need a local sim built into `order_manager.py` (or a dedicated `sim/` folder). It needs to walk the live reconstructed orderbook at the exact moment of our signal and apply realistic slippage to track PnL.
+
+#### Task 7: Live Deployment
+
+Gate live trading behind a verified paper trading edge. Add position limits and a max daily loss kill switch before ever flipping `EXECUTION_MODE=LIVE`.

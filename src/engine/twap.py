@@ -1,57 +1,84 @@
+import time
+import logging
+from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
+
+@dataclass
 class TwapCalculator:
-    
-    def __init__(self, strike_price: float, total_seconds: int = 60):
-        self.strike_price = strike_price
-        self.total_seconds = total_seconds
-        self.observed_prices = []
+
+    strike_price: float
+    total_seconds: int = 60
+    _prices: list[tuple[float, float]] = field(default_factory=list, repr=False)
+    _window_start: float | None = field(default=None, repr=False)
+    _last_known_price: float | None = field(default=None, repr=False)
+
+    def start_window(self):
+        """Triggers when the 60s settlement window begins."""
+
+        self._window_start = time.time()
+        self._prices.clear()
+        logger.info(f"TWAP {self.total_seconds}s settlement window started for strike {self.strike_price}")
 
     def add_price_tick(self, price: float):
-        if self.seconds_elapsed() < self.total_seconds:
-            self.observed_prices.append(price)
+        """
+        Records incoming spot price from WS; forward-fill any missing ticks.
+        """
+
+        self._last_known_price = price
+        if self._window_start is not None and self.seconds_elapsed() <= self.total_seconds:
+            self._prices.append((time.time(), price))
 
     def seconds_elapsed(self) -> int:
-        return len(self.observed_prices)
+        """How many seconds have passed since the window started?"""
 
-    def seconds_remaining(self) -> int:
-        return self.total_seconds - self.seconds_elapsed()
+        if self._window_start is None:
+            return 0
+        return min(int(time.time() - self._window_start), self.total_seconds)
 
-    def current_average(self) -> float:
-        if not self.observed_prices:
-            return 0.0
-        return sum(self.observed_prices) / self.seconds_elapsed()
-
-    def required_average(self) -> float:
+    def _get_discrete_samples(self) -> list[float]:
         """
-        Calculates the remaining average needed to hit the strike price.
+        Reconstructs Kalshi's discrete 1-second sampling array.
         """
 
-        rem_sec = self.seconds_remaining()
-        if rem_sec == 0:
-            return 0.0 # Window is closed
-
-        target_sum = self.strike_price * self.total_seconds
-        current_sum = sum(self.observed_prices)
-        
-        return (target_sum - current_sum) / rem_sec
-
-
-    # ! placeholder - remove & replace with proper modeling elsewhere
-    def is_outcome_deterministic(self, max_realistic_move: float = 500.0) -> str:
-        """
-        How certain/uncertain is the outcome right now?
-        """
-        if self.seconds_elapsed() == 0:
-            return "UNCERTAIN"
-
-        req_avg = self.required_average()
-        current_spot = self.observed_prices[-1]
-
-        # If required average is way above
-        if req_avg > (current_spot + max_realistic_move):
-            return "NO"  # Basically impossible to go above the strike
+        if self._window_start is None or not self._prices:
+            return []
             
-        # If required average is way lower
-        if req_avg < (current_spot - max_realistic_move):
-            return "YES" # Basically impossible to go below the strike
+        samples = []
+        elapsed = self.seconds_elapsed()
+        
+        for sec in range(1, elapsed + 1):
+            target_time = self._window_start + sec
+            
+            # Find the price exactly at target_time
+            valid_price = self._prices[0][1] 
+            for ts, p in self._prices:
+                if ts <= target_time:
+                    valid_price = p
+                else:
+                    break  # Stop searching after passing the target second
+            
+            samples.append(valid_price)
+            
+        return samples
 
-        return "UNCERTAIN"
+    def current_average(self) -> float | None:
+        """Resolution math."""
+
+        samples = self._get_discrete_samples()
+        if not samples:
+            return self._last_known_price # Fallback if haven't crossed 1s yet
+        return sum(samples) / len(samples)
+
+    def required_average(self) -> float | None:
+        """The needed average left to hit the strike price."""
+
+        elapsed = self.seconds_elapsed()
+        if elapsed >= self.total_seconds or self._window_start is None:
+            return None
+
+        rem_seconds = self.total_seconds - elapsed
+        current_sum = sum(self._get_discrete_samples())
+        target_sum = self.strike_price * self.total_seconds
+        
+        return (target_sum - current_sum) / rem_seconds
