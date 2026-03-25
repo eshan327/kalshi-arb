@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "cryptofeed>=2.4.1",
     "cryptography>=46.0.5",
     "kalshi-python-async>=3.2.0",
     "kalshi-python-sync>=3.2.0",
