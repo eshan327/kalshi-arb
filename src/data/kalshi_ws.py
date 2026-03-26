@@ -1,8 +1,10 @@
 import json
-import asyncio
 import websockets
 from core.config import WS_BASE_URL
 from core.auth import get_ws_auth_headers
+
+SUBSCRIBE_CMD_ID = 1
+SUBSCRIBE_CHANNELS = ["orderbook_delta", "ticker"]
 
 
 async def connect_and_subscribe(market_ticker: str):
@@ -15,10 +17,10 @@ async def connect_and_subscribe(market_ticker: str):
     ws = await websockets.connect(WS_BASE_URL, additional_headers=headers)
 
     subscribe_cmd = {
-        "id": 1,
+        "id": SUBSCRIBE_CMD_ID,
         "cmd": "subscribe",
         "params": {
-            "channels": ["orderbook_delta", "ticker"],
+            "channels": SUBSCRIBE_CHANNELS,
             "market_tickers": [market_ticker]
         }
     }

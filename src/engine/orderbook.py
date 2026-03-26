@@ -1,3 +1,10 @@
+import logging
+from threading import RLock
+
+
+logger = logging.getLogger(__name__)
+
+
 class OrderBook:
     """
     Maintains a live L2 orderbook for a single Kalshi market.
@@ -12,12 +19,13 @@ class OrderBook:
 
     def __init__(self, market_ticker):
         self.market_ticker = market_ticker
-        self.yes = {}  # {price_dollars_str: quantity_float}
+        self.yes = {}  # {price_cents_int: quantity_float}
         self.no = {}
         self.expected_seq = None
         self.initialized = False
         self.needs_resync = False
         self.qty_epsilon = 1e-6
+        self._lock = RLock()
 
     def _normalize_qty(self, qty_value):
         """Normalizes quantities and strips near-zero float residue."""
@@ -28,16 +36,21 @@ class OrderBook:
 
     @staticmethod
     def _to_cents(price_dollars_str):
-        """Converts dollars string to cents with decimal precision preserved."""
-        return round(float(price_dollars_str) * 100.0, 2)
+        """Converts REST/WS prices to cents (supports dollars or cents input)."""
+        value = float(price_dollars_str)
+        if value <= 1:
+            return round(value * 100.0, 2)
+        return round(value, 2)
 
     @staticmethod
     def _normalize_price(price_value):
-        """Normalizes REST/WS prices to dollars string format (e.g. '0.5100')."""
+        """Normalizes REST/WS prices to integer cents."""
         value = float(price_value)
-        if value > 1:
-            value = value / 100.0
-        return f"{value:.4f}"
+        if value <= 0:
+            return None
+
+        cents = value * 100.0 if value <= 1 else value
+        return int(round(cents))
 
     @staticmethod
     def _extract_seq(snapshot_msg):
@@ -56,25 +69,29 @@ class OrderBook:
                 continue
             price_raw, qty_raw = level[0], level[1]
             qty = self._normalize_qty(qty_raw)
+            price_cents = self._normalize_price(price_raw)
             if qty <= 0:
                 continue
-            destination[self._normalize_price(price_raw)] = qty
+            if price_cents is None:
+                continue
+            destination[price_cents] = qty
 
     def load_ws_snapshot(self, msg):
         """
         Loads the WS orderbook_snapshot message.
         msg keys: yes_dollars_fp, no_dollars_fp, market_ticker, market_id
         """
-        self._load_levels(msg.get("yes_dollars_fp", []), self.yes)
-        self._load_levels(msg.get("no_dollars_fp", []), self.no)
+        with self._lock:
+            self._load_levels(msg.get("yes_dollars_fp", []), self.yes)
+            self._load_levels(msg.get("no_dollars_fp", []), self.no)
 
-        seq = self._extract_seq(msg)
-        if isinstance(seq, int):
-            self.expected_seq = seq + 1
+            seq = self._extract_seq(msg)
+            if isinstance(seq, int):
+                self.expected_seq = seq + 1
 
-        self.initialized = True
-        self.needs_resync = False
-        print(f"  --> Snapshot loaded: {len(self.yes)} yes, {len(self.no)} no")
+            self.initialized = True
+            self.needs_resync = False
+            logger.info("Snapshot loaded: %s yes, %s no", len(self.yes), len(self.no))
 
     def load_rest_snapshot(self, snapshot):
         """
@@ -82,30 +99,34 @@ class OrderBook:
         Accepts both {yes,no} and {yes_dollars_fp,no_dollars_fp} structures.
         Returns snapshot sequence if available, else None.
         """
-        yes_levels = snapshot.get("yes")
-        no_levels = snapshot.get("no")
+        with self._lock:
+            yes_levels = snapshot.get("yes")
+            no_levels = snapshot.get("no")
 
-        if yes_levels is None or no_levels is None:
-            yes_levels = snapshot.get("yes_dollars_fp", [])
-            no_levels = snapshot.get("no_dollars_fp", [])
+            if yes_levels is None or no_levels is None:
+                yes_levels = snapshot.get("yes_dollars_fp", [])
+                no_levels = snapshot.get("no_dollars_fp", [])
 
-        self._load_levels(yes_levels or [], self.yes)
-        self._load_levels(no_levels or [], self.no)
+            self._load_levels(yes_levels or [], self.yes)
+            self._load_levels(no_levels or [], self.no)
 
-        self.initialized = True
-        self.needs_resync = False
+            self.initialized = True
+            self.needs_resync = False
 
-        seq = self._extract_seq(snapshot)
-        print(
-            f"  --> REST snapshot loaded: {len(self.yes)} yes, {len(self.no)} no"
-            + (f" | seq={seq}" if seq is not None else " | seq=n/a")
-        )
-        return seq
+            seq = self._extract_seq(snapshot)
+            logger.info(
+                "REST snapshot loaded: %s yes, %s no | seq=%s",
+                len(self.yes),
+                len(self.no),
+                seq if seq is not None else "n/a",
+            )
+            return seq
 
     def set_expected_seq(self, expected_seq):
         """Sets the next expected sequence id."""
-        if isinstance(expected_seq, int):
-            self.expected_seq = expected_seq
+        with self._lock:
+            if isinstance(expected_seq, int):
+                self.expected_seq = expected_seq
 
     def apply_delta(self, msg):
         """
@@ -113,69 +134,75 @@ class OrderBook:
         msg keys: price_dollars, delta_fp, side, ts
         delta_fp is the CHANGE in quantity (positive = add, negative = remove).
         """
-        side_str = msg.get("side")
-        price = self._normalize_price(msg.get("price_dollars"))
-        delta = self._normalize_qty(msg.get("delta_fp", 0))
+        with self._lock:
+            side_str = msg.get("side")
+            price = self._normalize_price(msg.get("price_dollars"))
+            delta = self._normalize_qty(msg.get("delta_fp", 0))
 
-        if side_str == "yes":
-            book = self.yes
-        elif side_str == "no":
-            book = self.no
-        else:
-            return
+            if price is None:
+                return
 
-        new_qty = self._normalize_qty(book.get(price, 0.0) + delta)
+            if side_str == "yes":
+                book = self.yes
+            elif side_str == "no":
+                book = self.no
+            else:
+                return
 
-        if new_qty <= 0:
-            book.pop(price, None)
-        else:
-            book[price] = new_qty
+            new_qty = self._normalize_qty(book.get(price, 0.0) + delta)
+
+            if new_qty <= 0:
+                book.pop(price, None)
+            else:
+                book[price] = new_qty
 
     def check_seq(self, seq):
         """
         Checks if the sequence number is what we expect.
         Returns True if OK, False if there's a gap (needs resync).
         """
-        if not isinstance(seq, int):
-            print(f"  --> Invalid seq value: {seq}")
-            self.needs_resync = True
-            return False
+        with self._lock:
+            if not isinstance(seq, int):
+                logger.warning("Invalid seq value: %s", seq)
+                self.needs_resync = True
+                return False
 
-        if self.expected_seq is None:
+            if self.expected_seq is None:
+                self.expected_seq = seq + 1
+                return True
+
+            if seq != self.expected_seq:
+                logger.warning("Seq gap detected: expected %s, got %s", self.expected_seq, seq)
+                self.needs_resync = True
+                return False
+
             self.expected_seq = seq + 1
             return True
-
-        if seq != self.expected_seq:
-            print(f"  --> Seq gap detected: expected {self.expected_seq}, got {seq}")
-            self.needs_resync = True
-            return False
-
-        self.expected_seq = seq + 1
-        return True
 
     def apply_delta_with_seq(self, seq, msg):
         """
         Applies a delta only when sequence is in-order.
         Returns True when applied, False when stale/invalid/gap.
         """
-        if not isinstance(seq, int):
-            self.needs_resync = True
-            return False
+        with self._lock:
+            if not isinstance(seq, int):
+                self.needs_resync = True
+                return False
 
-        if self.expected_seq is None:
-            self.expected_seq = seq
+            if self.expected_seq is None:
+                self.expected_seq = seq
 
-        if seq < self.expected_seq:
-            return False
+            if seq < self.expected_seq:
+                return False
 
-        if seq > self.expected_seq:
-            print(f"  --> Seq gap detected: expected {self.expected_seq}, got {seq}")
-            self.needs_resync = True
-            return False
+            if seq > self.expected_seq:
+                logger.warning("Seq gap detected: expected %s, got %s", self.expected_seq, seq)
+                self.needs_resync = True
+                return False
 
-        self.apply_delta(msg)
-        self.expected_seq = seq + 1
-        return True
+            self.apply_delta(msg)
+            self.expected_seq = seq + 1
+            return True
 
     def apply_buffered_deltas(self, buffered_deltas):
         """Replays buffered deltas in ascending sequence order."""
@@ -189,11 +216,12 @@ class OrderBook:
 
     def reset(self):
         """Clears all state for a fresh reconnect."""
-        self.yes.clear()
-        self.no.clear()
-        self.expected_seq = None
-        self.initialized = False
-        self.needs_resync = False
+        with self._lock:
+            self.yes.clear()
+            self.no.clear()
+            self.expected_seq = None
+            self.initialized = False
+            self.needs_resync = False
 
     def get_orderbook(self):
         """
@@ -203,19 +231,20 @@ class OrderBook:
         no_bids: [(price_cents, qty), ...] sorted descending
         no_asks: implied from yes_bids (100 - yes_price)
         """
-        yes_bids = sorted(
-            [(self._to_cents(p), self._normalize_qty(q)) for p, q in self.yes.items()],
-            key=lambda x: x[0], reverse=True
-        )
-        no_bids = sorted(
-            [(self._to_cents(p), self._normalize_qty(q)) for p, q in self.no.items()],
-            key=lambda x: x[0], reverse=True
-        )
+        with self._lock:
+            yes_bids = sorted(
+                [(self._to_cents(p), self._normalize_qty(q)) for p, q in self.yes.items()],
+                key=lambda x: x[0], reverse=True
+            )
+            no_bids = sorted(
+                [(self._to_cents(p), self._normalize_qty(q)) for p, q in self.no.items()],
+                key=lambda x: x[0], reverse=True
+            )
 
-        yes_asks = sorted([(round(100.0 - p, 2), q) for p, q in no_bids])
-        no_asks = sorted([(round(100.0 - p, 2), q) for p, q in yes_bids])
+            yes_asks = sorted([(round(100.0 - p, 2), q) for p, q in no_bids])
+            no_asks = sorted([(round(100.0 - p, 2), q) for p, q in yes_bids])
 
-        return yes_bids, yes_asks, no_bids, no_asks
+            return yes_bids, yes_asks, no_bids, no_asks
 
     def get_best_prices(self):
         """Returns (yes_best_bid, yes_best_ask, no_best_bid, no_best_ask) in cents."""

@@ -1,0 +1,223 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kalshi Arb Dashboard</title>
+  <style>
+    :root {
+      --bg: #0c1118;
+      --card: #141b25;
+      --line: #2a3647;
+      --text: #d8dfeb;
+      --muted: #93a6c4;
+      --ok: #4bd19a;
+      --warn: #ffcf72;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: "Avenir Next", "Segoe UI", sans-serif;
+    }
+    body {
+      margin: 0;
+      background: radial-gradient(70% 45% at 10% 0%, #1b2640 0%, var(--bg) 58%);
+      color: var(--text);
+      font-family: var(--sans);
+    }
+    .wrap {
+      max-width: 1380px;
+      margin: 18px auto;
+      padding: 0 14px;
+      display: grid;
+      gap: 14px;
+      grid-template-columns: 1.45fr 0.85fr;
+    }
+    .card {
+      background: linear-gradient(180deg, #182230 0%, var(--card) 100%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.22);
+    }
+    h2, h3 { margin: 0 0 10px; }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .summary-box {
+      border: 1px solid #31435e;
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: #121a25;
+    }
+    .summary-label {
+      font-size: 11px;
+      letter-spacing: 0.3px;
+      color: var(--muted);
+      margin-bottom: 3px;
+      font-family: var(--mono);
+    }
+    .summary-value {
+      font-size: 14px;
+      color: var(--text);
+      font-family: var(--mono);
+    }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .grid2 {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr 1fr;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    th, td {
+      border-bottom: 1px solid #243143;
+      padding: 5px 6px;
+      text-align: right;
+    }
+    th:first-child, td:first-child { text-align: left; }
+    .hero {
+      margin-top: 6px;
+      font-family: var(--mono);
+      font-size: clamp(34px, 5.4vw, 58px);
+      color: #d4ffe2;
+      line-height: 1;
+    }
+    .mono { font-family: var(--mono); color: var(--muted); }
+    .chart-wrap {
+      margin-top: 10px;
+      border: 1px solid #243143;
+      border-radius: 10px;
+      background: #0d1520;
+      padding: 8px;
+    }
+    .chart-title {
+      font-family: var(--mono);
+      color: var(--muted);
+      font-size: 12px;
+      margin: 0 0 6px;
+    }
+    #brtiChart,
+    #movingAvgChart {
+      width: 100%;
+      height: 220px;
+      display: block;
+    }
+    details { margin-top: 10px; }
+    summary {
+      cursor: pointer;
+      font-family: var(--mono);
+      color: #9fb1cf;
+      margin-bottom: 6px;
+    }
+    .log {
+      max-height: 34vh;
+      overflow: auto;
+      background: #0b1119;
+      border: 1px solid #223044;
+      border-radius: 10px;
+      padding: 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      white-space: pre-wrap;
+    }
+    .badge {
+      display: inline-block;
+      border: 1px solid #31435e;
+      border-radius: 999px;
+      padding: 3px 10px;
+      margin-right: 6px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .meta-list {
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+    @media (max-width: 980px) {
+      .wrap { grid-template-columns: 1fr; }
+      .summary-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h2>Kalshi Reconstructed Orderbook</h2>
+      <div class="summary-grid" id="summary"></div>
+
+      <div class="grid2">
+        <div>
+          <h3>YES Top 10</h3>
+          <table id="yesTable"></table>
+        </div>
+        <div>
+          <h3>NO Top 10</h3>
+          <table id="noTable"></table>
+        </div>
+      </div>
+
+      <h3 style="margin-top:14px">BRTI Synthesized Price</h3>
+      <div id="brti" class="hero">--</div>
+      <div id="brtiMeta" class="mono"></div>
+      <div id="settlementProxy" class="mono"></div>
+
+      <div class="chart-wrap">
+        <p class="chart-title">BRTI Spot</p>
+        <canvas id="brtiChart" width="1100" height="220"></canvas>
+      </div>
+
+      <div class="chart-wrap">
+        <p class="chart-title">Synthetic 60s Moving Average</p>
+        <canvas id="movingAvgChart" width="1100" height="220"></canvas>
+      </div>
+
+      <details>
+        <summary>Explain technical metrics</summary>
+        <div class="meta-list" id="metricHelp"></div>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>Verification Streams</h2>
+      <div class="badge">Kalshi messages tracked end-to-end</div>
+      <div class="badge">BRTI exchange messages tracked end-to-end</div>
+
+      <details>
+        <summary>Reconciliation Checks (REST vs WebSocket)</summary>
+        <div class="log" id="reconLog"></div>
+      </details>
+
+      <details>
+        <summary>BRTI Tick Stream</summary>
+        <div class="log" id="brtiTicks"></div>
+      </details>
+
+      <details>
+        <summary>Kalshi Top-10 Impact Events</summary>
+        <div class="log" id="impactLog"></div>
+      </details>
+
+      <details>
+        <summary>Kalshi Raw WebSocket Messages</summary>
+        <div class="log" id="rawLog"></div>
+      </details>
+
+      <details>
+        <summary>BRTI Raw Exchange WebSocket Messages</summary>
+        <div class="log" id="brtiRawLog"></div>
+      </details>
+    </section>
+  </div>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
+</body>
+</html>

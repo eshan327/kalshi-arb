@@ -1,111 +1,73 @@
 import asyncio
 import json
+import logging
 import time
-from collections import deque
-from threading import Lock
+from datetime import datetime
 from typing import Optional
 import websockets
 from core.config import (
-    ORDERBOOK_VIEW_DEPTH,
     RECONCILIATION_CONSECUTIVE_BREACHES,
     RECONCILIATION_TOP_N,
     SNAPSHOT_RECALIBRATION_SEC,
-    WS_LOG_DEFAULT_LIMIT,
-    WS_LOG_MAXLEN,
 )
 from data.kalshi_rest import get_market_orderbook, get_open_markets
 from data.kalshi_ws import connect_and_subscribe
 from engine.orderbook import OrderBook
 from engine.reconciliation import compare_levels, is_reconciliation_breach
+from engine.stream_metrics import (
+    _count_incoming_message,
+    _record_reconciliation,
+    _record_top10_impact,
+    _record_ws_event,
+    _top10_signature,
+    get_reconciliation_log,
+    get_top10_impact_log,
+    get_ws_message_log,
+    get_ws_message_log_size,
+    get_ws_processing_stats,
+)
+
+logger = logging.getLogger(__name__)
+RECONNECT_DELAY_SEC = 5
 
 # Live orderbook instance (accessible by other modules)
 live_book: Optional[OrderBook] = None
 _live_market_info = {}
-_ws_message_log = deque(maxlen=WS_LOG_MAXLEN)
-_ws_log_lock = Lock()
-_top10_impact_log = deque(maxlen=WS_LOG_MAXLEN)
-_reconciliation_log = deque(maxlen=WS_LOG_MAXLEN)
-_ws_stats = {
-    "total_received": 0,
-    "orderbook_delta_received": 0,
-    "orderbook_delta_buffered": 0,
-    "orderbook_delta_applied": 0,
-    "orderbook_delta_stale_ignored": 0,
-    "orderbook_delta_invalid_seq": 0,
-    "orderbook_delta_seq_gap": 0,
-    "ticker_received": 0,
-    "snapshot_anchor_seen": 0,
-}
+BufferedDelta = tuple[int, dict]
+MIN_ACTIONABLE_PRICE_CENTS = 1.0
+MAX_ACTIONABLE_PRICE_CENTS = 99.0
 
 
-def _count_incoming_message(msg_type: str) -> None:
-    with _ws_log_lock:
-        _ws_stats["total_received"] += 1
-        if msg_type == "orderbook_delta":
-            _ws_stats["orderbook_delta_received"] += 1
-        elif msg_type == "ticker":
-            _ws_stats["ticker_received"] += 1
+def _parse_iso8601_to_epoch(value: str | None) -> float | None:
+    """Converts ISO8601 timestamps from Kalshi payloads to epoch seconds."""
+    if not isinstance(value, str) or not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
-def _record_ws_event(event_type: str, seq, payload: dict, status: str) -> None:
-    entry = {
-        "ts": time.time(),
-        "type": event_type,
-        "seq": seq,
-        "status": status,
-        "payload": payload,
-    }
-    with _ws_log_lock:
-        _ws_message_log.append(entry)
+def _select_target_market(markets: list[dict]) -> dict:
+    """Selects the active market with the nearest future close time."""
+    now = time.time()
+    candidates = []
 
-        if event_type == "orderbook_delta":
-            if status == "buffered":
-                _ws_stats["orderbook_delta_buffered"] += 1
-            elif status in {"applied", "applied_from_buffer"}:
-                _ws_stats["orderbook_delta_applied"] += 1
-            elif status in {"stale_ignored", "stale_buffer_ignored"}:
-                _ws_stats["orderbook_delta_stale_ignored"] += 1
-            elif status == "invalid_seq_ignored":
-                _ws_stats["orderbook_delta_invalid_seq"] += 1
-            elif status in {"seq_gap", "buffer_replay_gap"}:
-                _ws_stats["orderbook_delta_seq_gap"] += 1
+    for market in markets:
+        close_ts = _parse_iso8601_to_epoch(market.get("close_time"))
+        if close_ts is None or close_ts > now:
+            rank = close_ts if close_ts is not None else float("inf")
+            candidates.append((rank, market))
 
-        if event_type == "orderbook_snapshot" and status == "anchor_seen":
-            _ws_stats["snapshot_anchor_seen"] += 1
+    if not candidates:
+        return markets[0]
+
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
 
 
-def _top10_signature(book: OrderBook) -> tuple:
-    yes_bids, yes_asks, no_bids, no_asks = book.get_orderbook()
-
-    def _norm(levels):
-        return tuple((round(float(px), 2), float(qty)) for px, qty in levels[:ORDERBOOK_VIEW_DEPTH])
-
-    return (
-        _norm(yes_bids),
-        _norm(yes_asks),
-        _norm(no_bids),
-        _norm(no_asks),
-    )
-
-
-def _record_top10_impact(seq: int, payload: dict, changed: bool) -> None:
-    with _ws_log_lock:
-        _top10_impact_log.append(
-            {
-                "ts": time.time(),
-                "seq": seq,
-                "changed": changed,
-                "payload": payload,
-            }
-        )
-
-
-def _record_reconciliation(event: dict) -> None:
-    with _ws_log_lock:
-        _reconciliation_log.append(event)
-
-
-def _levels_from_rest_snapshot(book: OrderBook, snapshot: dict):
+def _levels_from_rest_snapshot(book: OrderBook, snapshot: dict) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     yes_levels = snapshot.get("yes")
     no_levels = snapshot.get("no")
 
@@ -121,7 +83,7 @@ def _levels_from_rest_snapshot(book: OrderBook, snapshot: dict):
             continue
         px = book._normalize_price(level[0])
         qty = book._normalize_qty(level[1])
-        if qty > 0:
+        if qty > 0 and px is not None:
             yes_dict[px] = qty
 
     for level in no_levels or []:
@@ -129,20 +91,122 @@ def _levels_from_rest_snapshot(book: OrderBook, snapshot: dict):
             continue
         px = book._normalize_price(level[0])
         qty = book._normalize_qty(level[1])
-        if qty > 0:
+        if qty > 0 and px is not None:
             no_dict[px] = qty
 
-    yes_bids = sorted(
-        [(book._to_cents(p), q) for p, q in yes_dict.items()],
-        key=lambda x: x[0],
-        reverse=True,
-    )
-    no_bids = sorted(
-        [(book._to_cents(p), q) for p, q in no_dict.items()],
-        key=lambda x: x[0],
-        reverse=True,
-    )
+    yes_bids = sorted([(book._to_cents(p), q) for p, q in yes_dict.items()], key=lambda x: x[0], reverse=True)
+    no_bids = sorted([(book._to_cents(p), q) for p, q in no_dict.items()], key=lambda x: x[0], reverse=True)
     return yes_bids, no_bids
+
+
+def _is_market_closed(market_close_ts: float | None) -> bool:
+    return market_close_ts is not None and time.time() >= market_close_ts
+
+
+def _replay_buffered_deltas(book: OrderBook, buffered_deltas: list[BufferedDelta]) -> int:
+    applied = 0
+    for buffered_seq, buffered_msg in sorted(buffered_deltas, key=lambda x: x[0]):
+        before = _top10_signature(book)
+        if book.apply_delta_with_seq(buffered_seq, buffered_msg):
+            applied += 1
+            after = _top10_signature(book)
+            _record_top10_impact(buffered_seq, buffered_msg, before != after)
+            _record_ws_event("orderbook_delta", buffered_seq, buffered_msg, "applied_from_buffer")
+        elif buffered_seq < (book.expected_seq or 0):
+            _record_ws_event("orderbook_delta", buffered_seq, buffered_msg, "stale_buffer_ignored")
+        else:
+            _record_ws_event("orderbook_delta", buffered_seq, buffered_msg, "buffer_replay_gap")
+            break
+    return applied
+
+
+def _try_bootstrap_from_rest(
+    market_ticker: str,
+    book: OrderBook,
+    rest_snapshot_task: asyncio.Task,
+    ws_snapshot_seq: int | None,
+    buffered_deltas: list[BufferedDelta],
+) -> tuple[bool, bool, float]:
+    """Returns (bootstrapped, should_reconnect, recalibration_monotonic_ts)."""
+    if not rest_snapshot_task.done() or ws_snapshot_seq is None:
+        return False, False, time.monotonic()
+
+    try:
+        rest_snapshot = rest_snapshot_task.result()
+    except Exception as exc:
+        logger.warning("REST snapshot fetch failed (%s), reconnecting...", exc)
+        return False, True, time.monotonic()
+
+    rest_seq = book.load_rest_snapshot(rest_snapshot)
+    seq_anchor = rest_seq if isinstance(rest_seq, int) else ws_snapshot_seq
+    book.set_expected_seq(seq_anchor + 1)
+    _record_ws_event("bootstrap", seq_anchor, {}, "rest_snapshot_loaded")
+
+    applied = _replay_buffered_deltas(book, buffered_deltas)
+    recalibration_ts = time.monotonic()
+    logger.info(
+        "Bootstrap complete | anchor_seq=%s | buffered=%s | applied=%s",
+        seq_anchor,
+        len(buffered_deltas),
+        applied,
+    )
+
+    if book.needs_resync:
+        logger.warning("Bootstrap replay detected seq gap, reconnecting...")
+        return True, True, recalibration_ts
+
+    return True, False, recalibration_ts
+
+
+async def _run_recalibration(
+    market_ticker: str,
+    book: OrderBook,
+    consecutive_recon_breaches: int,
+) -> tuple[int, str]:
+    """Returns (updated_consecutive_breaches, action)."""
+    recal_snapshot = await asyncio.to_thread(get_market_orderbook, market_ticker)
+    rest_yes_bids, rest_no_bids = _levels_from_rest_snapshot(book, recal_snapshot)
+    live_yes_bids, _, live_no_bids, _ = book.get_orderbook()
+
+    metrics = {
+        "yes": compare_levels(live_yes_bids, rest_yes_bids, RECONCILIATION_TOP_N),
+        "no": compare_levels(live_no_bids, rest_no_bids, RECONCILIATION_TOP_N),
+    }
+
+    breach = is_reconciliation_breach(metrics)
+    if breach:
+        consecutive_recon_breaches += 1
+    else:
+        consecutive_recon_breaches = 0
+
+    action = "none"
+    if consecutive_recon_breaches >= RECONCILIATION_CONSECUTIVE_BREACHES:
+        action = "trigger_resync"
+        book.needs_resync = True
+
+    _record_reconciliation(
+        {
+            "ts": time.time(),
+            "market_ticker": market_ticker,
+            "breach": breach,
+            "consecutive_breaches": consecutive_recon_breaches,
+            "action": action,
+            "metrics": metrics,
+        }
+    )
+
+    _record_ws_event(
+        "recalibration",
+        recal_snapshot.get("seq", recal_snapshot.get("sequence")),
+        {
+            "breach": breach,
+            "consecutive_breaches": consecutive_recon_breaches,
+            "action": action,
+        },
+        "rest_snapshot_reconciled",
+    )
+
+    return consecutive_recon_breaches, action
 
 
 def get_live_book() -> Optional[OrderBook]:
@@ -153,6 +217,21 @@ def get_live_book() -> Optional[OrderBook]:
 def get_live_market_info() -> dict:
     """Returns metadata for the currently tracked Kalshi market."""
     return dict(_live_market_info)
+
+
+def _is_actionable_display_level(level: tuple[float, float]) -> bool:
+    price, _qty = level
+    return MIN_ACTIONABLE_PRICE_CENTS <= float(price) <= MAX_ACTIONABLE_PRICE_CENTS
+
+
+def _top_levels_for_display(levels: list[tuple[float, float]], depth: int) -> list[tuple[float, float]]:
+    """Prefers 1-99c levels for display, but falls back to raw levels when needed."""
+    if depth <= 0:
+        return []
+
+    filtered = [level for level in levels if _is_actionable_display_level(level)]
+    selected = filtered if filtered else levels
+    return selected[:depth]
 
 
 def get_live_orderbook_snapshot(depth: int = 10) -> dict:
@@ -174,50 +253,14 @@ def get_live_orderbook_snapshot(depth: int = 10) -> dict:
         "initialized": True,
         "market_ticker": book.market_ticker,
         "expected_seq": book.expected_seq,
-        "yes_bids": yes_bids[:depth],
-        "yes_asks": yes_asks[:depth],
-        "no_bids": no_bids[:depth],
-        "no_asks": no_asks[:depth],
+        "yes_bids": _top_levels_for_display(yes_bids, depth),
+        "yes_asks": _top_levels_for_display(yes_asks, depth),
+        "no_bids": _top_levels_for_display(no_bids, depth),
+        "no_asks": _top_levels_for_display(no_asks, depth),
     }
 
 
-def get_ws_message_log(limit: int = 200) -> list:
-    """Returns newest websocket events for debugging and validation."""
-    with _ws_log_lock:
-        if limit <= 0:
-            return []
-        return list(_ws_message_log)[-limit:]
-
-
-def get_top10_impact_log(limit: int = WS_LOG_DEFAULT_LIMIT) -> list:
-    """Returns newest top-10 impact records for orderbook-focused verification."""
-    with _ws_log_lock:
-        if limit <= 0:
-            return []
-        return list(_top10_impact_log)[-limit:]
-
-
-def get_ws_message_log_size() -> int:
-    """Returns current number of retained websocket log entries."""
-    with _ws_log_lock:
-        return len(_ws_message_log)
-
-
-def get_reconciliation_log(limit: int = WS_LOG_DEFAULT_LIMIT) -> list:
-    """Returns newest reconciliation checks and resync decisions."""
-    with _ws_log_lock:
-        if limit <= 0:
-            return []
-        return list(_reconciliation_log)[-limit:]
-
-
-def get_ws_processing_stats() -> dict:
-    """Returns aggregate counters proving websocket events are processed end-to-end."""
-    with _ws_log_lock:
-        return dict(_ws_stats)
-
-
-async def _stream_with_sync(market_ticker: str, book: OrderBook):
+async def _stream_with_sync(market_ticker: str, book: OrderBook, market_close_ts: float | None = None):
     """
     Connects WS, receives snapshot, then applies sequential deltas.
     On seq gap or disconnect: reconnect for a fresh snapshot.
@@ -230,30 +273,35 @@ async def _stream_with_sync(market_ticker: str, book: OrderBook):
     """
 
     while True:
+        if _is_market_closed(market_close_ts):
+            logger.info("Market %s reached close time; rotating stream target...", market_ticker)
+            return
+
         try:
             book.reset()
             buffered_deltas = []
             bootstrapped = False
             ws_snapshot_seq = None
-            delta_count = 0
             last_recalibration_at = time.monotonic()
             consecutive_recon_breaches = 0
 
-            rest_snapshot_task = asyncio.create_task(
-                asyncio.to_thread(get_market_orderbook, market_ticker)
-            )
+            rest_snapshot_task = asyncio.create_task(asyncio.to_thread(get_market_orderbook, market_ticker))
 
             ws = await connect_and_subscribe(market_ticker)
-            print(f"  --> Subscribed to {market_ticker}. Bootstrapping from REST snapshot...")
+            logger.info("Subscribed to %s. Bootstrapping from REST snapshot...", market_ticker)
 
             async for message in ws:
+                if _is_market_closed(market_close_ts):
+                    logger.info("Market %s reached close time; reconnect loop stopped.", market_ticker)
+                    await ws.close()
+                    return
+
                 data = json.loads(message)
                 msg_type = data.get("type")
                 seq = data.get("seq")
                 msg_payload = data.get("msg", {})
 
                 _count_incoming_message(msg_type or "unknown")
-
                 _record_ws_event(msg_type or "unknown", seq, msg_payload, "received")
 
                 if msg_type == "orderbook_snapshot":
@@ -262,7 +310,7 @@ async def _stream_with_sync(market_ticker: str, book: OrderBook):
                         _record_ws_event(msg_type, seq, msg_payload, "anchor_seen")
                     continue
 
-                elif msg_type == "orderbook_delta":
+                if msg_type == "orderbook_delta":
                     msg = msg_payload
 
                     if not isinstance(seq, int):
@@ -280,142 +328,82 @@ async def _stream_with_sync(market_ticker: str, book: OrderBook):
                             _record_ws_event(msg_type, seq, msg, "stale_ignored")
                             continue
                         _record_ws_event(msg_type, seq, msg, "seq_gap")
-                        break  # seq gap — reconnect
-
-                    _record_ws_event(msg_type, seq, msg, "applied")
-
-                    delta_count += 1
-                    after = _top10_signature(book)
-                    changed = before != after
-                    _record_top10_impact(seq, msg, changed)
-
-                elif msg_type == "ticker":
-                    pass
-
-                elif msg_type == "subscribed":
-                    print(f"  [SERVER] Subscription confirmed: {data.get('msg', {}).get('channel')}")
-
-                # Check if resync needed after processing
-                if book.needs_resync:
-                    print("  --> Resync triggered, reconnecting...")
-                    break
-
-                if not bootstrapped and rest_snapshot_task.done() and ws_snapshot_seq is not None:
-                    try:
-                        rest_snapshot = rest_snapshot_task.result()
-                    except Exception as e:
-                        print(f"  --> REST snapshot fetch failed ({e}), reconnecting...")
                         break
 
-                    rest_seq = book.load_rest_snapshot(rest_snapshot)
-                    seq_anchor = rest_seq if isinstance(rest_seq, int) else ws_snapshot_seq
-                    book.set_expected_seq(seq_anchor + 1)
-                    _record_ws_event("bootstrap", seq_anchor, {}, "rest_snapshot_loaded")
+                    _record_ws_event(msg_type, seq, msg, "applied")
+                    after = _top10_signature(book)
+                    _record_top10_impact(seq, msg, before != after)
 
-                    applied = 0
-                    for buffered_seq, buffered_msg in sorted(buffered_deltas, key=lambda x: x[0]):
-                        before = _top10_signature(book)
-                        if book.apply_delta_with_seq(buffered_seq, buffered_msg):
-                            applied += 1
-                            after = _top10_signature(book)
-                            _record_top10_impact(buffered_seq, buffered_msg, before != after)
-                            _record_ws_event(
-                                "orderbook_delta", buffered_seq, buffered_msg, "applied_from_buffer"
-                            )
-                        elif buffered_seq < (book.expected_seq or 0):
-                            _record_ws_event(
-                                "orderbook_delta", buffered_seq, buffered_msg, "stale_buffer_ignored"
-                            )
-                        else:
-                            _record_ws_event(
-                                "orderbook_delta", buffered_seq, buffered_msg, "buffer_replay_gap"
-                            )
-                            break
+                elif msg_type == "subscribed":
+                    logger.info("[SERVER] Subscription confirmed: %s", data.get("msg", {}).get("channel"))
 
-                    bootstrapped = True
-                    delta_count += applied
-                    last_recalibration_at = time.monotonic()
-                    print(
-                        f"  --> Bootstrap complete | anchor_seq={seq_anchor} | "
-                        f"buffered={len(buffered_deltas)} | applied={applied}"
+                if book.needs_resync:
+                    logger.warning("Resync triggered, reconnecting...")
+                    break
+
+                if not bootstrapped:
+                    bootstrapped, reconnect_now, last_recalibration_at = _try_bootstrap_from_rest(
+                        market_ticker,
+                        book,
+                        rest_snapshot_task,
+                        ws_snapshot_seq,
+                        buffered_deltas,
                     )
-
-                    if book.needs_resync:
-                        print("  --> Bootstrap replay detected seq gap, reconnecting...")
+                    if reconnect_now:
                         break
 
                 if bootstrapped and time.monotonic() - last_recalibration_at >= SNAPSHOT_RECALIBRATION_SEC:
-                    recal_snapshot = await asyncio.to_thread(get_market_orderbook, market_ticker)
-                    rest_yes_bids, rest_no_bids = _levels_from_rest_snapshot(book, recal_snapshot)
-                    live_yes_bids, _, live_no_bids, _ = book.get_orderbook()
-
-                    metrics = {
-                        "yes": compare_levels(live_yes_bids, rest_yes_bids, RECONCILIATION_TOP_N),
-                        "no": compare_levels(live_no_bids, rest_no_bids, RECONCILIATION_TOP_N),
-                    }
-
-                    breach = is_reconciliation_breach(metrics)
-                    if breach:
-                        consecutive_recon_breaches += 1
-                    else:
-                        consecutive_recon_breaches = 0
-
-                    action = "none"
-                    if consecutive_recon_breaches >= RECONCILIATION_CONSECUTIVE_BREACHES:
-                        action = "trigger_resync"
-                        book.needs_resync = True
-
-                    _record_reconciliation(
-                        {
-                            "ts": time.time(),
-                            "market_ticker": market_ticker,
-                            "breach": breach,
-                            "consecutive_breaches": consecutive_recon_breaches,
-                            "action": action,
-                            "metrics": metrics,
-                        }
-                    )
-
-                    _record_ws_event(
-                        "recalibration",
-                        recal_snapshot.get("seq", recal_snapshot.get("sequence")),
-                        {
-                            "breach": breach,
-                            "consecutive_breaches": consecutive_recon_breaches,
-                            "action": action,
-                        },
-                        "rest_snapshot_reconciled",
+                    consecutive_recon_breaches, action = await _run_recalibration(
+                        market_ticker,
+                        book,
+                        consecutive_recon_breaches,
                     )
                     last_recalibration_at = time.monotonic()
 
                     if action == "trigger_resync":
-                        print("  --> Reconciliation drift threshold breached; forcing resync...")
+                        logger.warning("Reconciliation drift threshold breached; forcing resync...")
                         break
 
             await ws.close()
             if not rest_snapshot_task.done():
                 rest_snapshot_task.cancel()
 
-        except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
-            print(f"  --> WebSocket dropped ({e}), reconnecting in 5s")
+        except (websockets.ConnectionClosed, ConnectionError, OSError) as exc:
+            logger.warning("WebSocket dropped (%s), reconnecting in %ss", exc, RECONNECT_DELAY_SEC)
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(RECONNECT_DELAY_SEC)
 
 
 async def run_market_streamer():
-    """Finds an active 15-minute crypto market and starts the sync loop."""
+    """Tracks the active 15-minute crypto market and rotates on close."""
     global live_book, _live_market_info
+    current_market = None
 
-    print("Fetching active KXBTC15M market to stream.")
-    markets = get_open_markets("KXBTC15M")
+    while True:
+        logger.info("Fetching active KXBTC15M market to stream.")
+        markets = get_open_markets("KXBTC15M")
 
-    if not markets:
-        print("No active markets found.")
-        return
+        if not markets:
+            logger.info("No active markets found. Retrying in %ss...", RECONNECT_DELAY_SEC)
+            await asyncio.sleep(RECONNECT_DELAY_SEC)
+            continue
 
-    target_market = markets[0]['ticker']
-    _live_market_info = dict(markets[0])
-    print(f"  --> Target market: {target_market}")
+        selected_market = _select_target_market(markets)
+        target_market = selected_market.get("ticker")
 
-    live_book = OrderBook(target_market)
-    await _stream_with_sync(target_market, live_book)
+        if not target_market:
+            logger.warning("No valid market ticker found. Retrying in %ss...", RECONNECT_DELAY_SEC)
+            await asyncio.sleep(RECONNECT_DELAY_SEC)
+            continue
+
+        if target_market != current_market:
+            logger.info("Target market: %s", target_market)
+            current_market = target_market
+
+        _live_market_info = dict(selected_market)
+        close_ts = _parse_iso8601_to_epoch(selected_market.get("close_time"))
+        live_book = OrderBook(target_market)
+        await _stream_with_sync(target_market, live_book, market_close_ts=close_ts)
+
+        # Stream exits on market close/rotation event; immediately discover the next one.
+        await asyncio.sleep(1)

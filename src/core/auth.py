@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from core.config import KALSHI_ENV, API_BASE_URL
 
-def _get_credentials():
+def _get_credentials() -> tuple[str, str]:
     """Helper to load keys."""
 
     load_dotenv()
@@ -23,11 +23,13 @@ def _get_credentials():
     if not key_id or not key_path:
         raise ValueError(f"Missing Kalshi {KALSHI_ENV} credentials.")
 
+    normalized_key_path = os.path.expanduser(key_path)
+
     try:
-        with open(key_path, "r") as f:
+        with open(normalized_key_path, "r", encoding="utf-8") as f:
             private_key_pem = f.read()
     except FileNotFoundError:
-        raise FileNotFoundError(f"Private key not found at {key_path}")
+        raise FileNotFoundError(f"Private key not found at {normalized_key_path}")
         
     return key_id, private_key_pem
 
@@ -38,7 +40,7 @@ def get_authenticated_client() -> KalshiClient:
     config.private_key_pem = private_key_pem
     return KalshiClient(config)
 
-def get_ws_auth_headers() -> dict:
+def get_ws_auth_headers() -> dict[str, str]:
     """Generates cryptographic headers needed to open the WebSocket."""
 
     key_id, private_key_pem = _get_credentials()
@@ -46,7 +48,8 @@ def get_ws_auth_headers() -> dict:
     private_key = serialization.load_pem_private_key(
         private_key_pem.encode('utf-8'), password=None
     )
-    assert isinstance(private_key, rsa.RSAPrivateKey)
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        raise TypeError("Expected RSA private key for Kalshi API signing.")
 
     timestamp = str(int(time.time() * 1000))
     message = f"{timestamp}GET/trade-api/ws/v2".encode('utf-8')

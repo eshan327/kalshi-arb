@@ -46,18 +46,18 @@ class TwapCalculator:
             
         samples = []
         elapsed = self.seconds_elapsed()
-        
+
+        # One forward pass avoids rescanning historical ticks for each second.
+        idx = 0
+        valid_price = self._prices[0][1]
+        price_count = len(self._prices)
+
         for sec in range(1, elapsed + 1):
             target_time = self._window_start + sec
-            
-            # Find the price exactly at target_time
-            valid_price = self._prices[0][1] 
-            for ts, p in self._prices:
-                if ts <= target_time:
-                    valid_price = p
-                else:
-                    break  # Stop searching after passing the target second
-            
+            while idx < price_count and self._prices[idx][0] <= target_time:
+                valid_price = self._prices[idx][1]
+                idx += 1
+
             samples.append(valid_price)
             
         return samples
