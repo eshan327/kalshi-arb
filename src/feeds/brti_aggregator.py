@@ -196,6 +196,47 @@ async def _stream_bitstamp():
             await asyncio.sleep(5)
 
 
+async def _stream_paxos():
+    """Paxos (itBit) L2 orderbook via public websocket."""
+    exchange = "PAXOS"
+    url = "wss://ws.paxos.com/marketdata/BTCUSD"
+
+    while True:
+        try:
+            _init_book(exchange)
+            async with websockets.connect(url, max_size=10_000_000, ping_interval=20, ping_timeout=10) as ws:
+                print(f"  --> {exchange} L2 connected")
+
+                async for message in ws:
+                    data = json.loads(message)
+                    msg_type = data.get("type")
+
+                    if msg_type == "SNAPSHOT":
+                        exchange_books[exchange]["bids"].clear()
+                        exchange_books[exchange]["asks"].clear()
+                        for level in data.get("bids", []):
+                            price = float(level["price"])
+                            amount = float(level["amount"])
+                            if amount > 0:
+                                exchange_books[exchange]["bids"][price] = amount
+                        for level in data.get("asks", []):
+                            price = float(level["price"])
+                            amount = float(level["amount"])
+                            if amount > 0:
+                                exchange_books[exchange]["asks"][price] = amount
+                        exchange_books[exchange]["last_update"] = time.time()
+
+                    elif msg_type == "UPDATE":
+                        side = "bids" if data.get("side") == "BUY" else "asks"
+                        price = float(data["price"])
+                        amount = float(data["amount"])
+                        _update_level(exchange, side, price, amount)
+
+        except (websockets.ConnectionClosed, ConnectionError, OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            print(f"  --> {exchange} dropped ({e}), reconnecting in 5s")
+            await asyncio.sleep(5)
+
+
 # ---- BRTI Recalculation Loop ----
 
 async def _recalculate_loop():
@@ -233,7 +274,8 @@ def run():
     loop.create_task(_stream_kraken())
     loop.create_task(_stream_gemini())
     loop.create_task(_stream_bitstamp())
+    loop.create_task(_stream_paxos())
     loop.create_task(_recalculate_loop())
 
-    print("  --> BRTI aggregator started (Coinbase, Kraken, Gemini, Bitstamp)")
+    print("  --> BRTI aggregator started (Coinbase, Kraken, Gemini, Bitstamp, Paxos)")
     loop.run_forever()
