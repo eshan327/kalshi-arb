@@ -412,10 +412,7 @@ def calculate_brti(exchange_books, current_time=None):
     ask_pv, bid_pv, mid_pv, mid_sv = compute_price_volume_curves(bids, asks)
 
     if not mid_pv:
-        best_bid = bids[0][0]
-        best_ask = asks[0][0]
-        midpoint = round((best_bid + best_ask) / 2, 2)
-        return midpoint, SPACING, len(final_books)
+        return None, 0, 0
 
     # --- Step 4: Utilized depth ---
     utilized_depth = compute_utilized_depth(mid_sv)

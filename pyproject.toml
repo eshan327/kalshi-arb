@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "cryptofeed>=2.4.1",
     "cryptography>=46.0.5",
+    "flask>=3.1.2",
     "kalshi-python-async>=3.2.0",
     "kalshi-python-sync>=3.2.0",
     "matplotlib>=3.10.8",

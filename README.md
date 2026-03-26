@@ -35,6 +35,14 @@ KALSHI_PROD_KEY_PATH=.secrets/prod.txt
 - The `KEY_ID` is copypasteable from Kalshi settings, put them in the `.env`
 - Pls make sure everything is gitignored properly or I lowk steal your bank account
 
+### Web Dashboard
+
+- Run `python src/main.py` and open `http://127.0.0.1:5000`.
+- The dashboard shows:
+  - Live reconstructed YES/NO top-10 orderbook tables (from in-memory state, not raw text).
+  - Big BRTI synthesized price display with depth and exchange coverage metadata.
+  - A collapsible verification panel with raw websocket logs and top-10 impact logs (`received`, `buffered`, `applied`, `stale_ignored`, etc.).
+
 ---
 
 ## Code Guidelines
@@ -92,9 +100,9 @@ Kalshi's 15m BTC contracts settle on a TWAP of the BRTI over the final 60 second
 
 ### What's Left
 
-Right now, we are catching data but the bot doesn't "see" the market state. Here is the build order. *Tasks 1 and 2 can be done in parallel.* **This plan is tentative and speculative; modify as needed.**
+Originally, we were catching data but the bot didn't "see" the market state. Here is the build order. *Tasks 1 and 2 can be done in parallel.* **This plan is speculative; modify as needed.**
 
-#### Task 1: Orderbook Reconstruction
+#### Task 1: Orderbook Reconstruction (done)
 
 We can't trade on isolated WebSocket messages. We need to build `src/engine/orderbook.py`. It needs to:
 
@@ -103,13 +111,17 @@ We can't trade on isolated WebSocket messages. We need to build `src/engine/orde
 3. Filter stale sequence IDs and apply deltas to the snapshot in order.
 4. Expose a clean `get_orderbook()` interface so our math engine can read the live state.
 
-#### Task 2: BRTI Proxy
+*This is tentatively finished*
+
+#### Task 2: BRTI Proxy (done)
 
 Kalshi settles on the CF Benchmarks BRTI, and we need to synthesize the BRTI without direct API access.
 
 1. Create `src/feeds/` directory.
 2. Build WS connections to Coinbase, Kraken, and Gemini.
-3. Build `brti_aggregator.py` to collect trades in a rolling window and output a volume-weighted median price.
+3. Build `brti_aggregator.py` to collect multi-exchange orderbook data and output a synthetic BRTI-style real-time index.
+
+*This is tentatively finished.*
 
 #### Task 3: Asian Options Pricer & Volatility
 

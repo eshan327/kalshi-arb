@@ -17,3 +17,22 @@ if KALSHI_ENV == "prod":
     WS_BASE_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 else:
     WS_BASE_URL = "wss://demo-api.kalshi.co/trade-api/ws/v2"
+
+# Flask app defaults
+WEB_HOST = "127.0.0.1"
+WEB_PORT = 5000
+
+# Dashboard/view defaults
+ORDERBOOK_VIEW_DEPTH = 10
+WS_LOG_MAXLEN = 5000
+WS_LOG_DEFAULT_LIMIT = 200
+
+# Data/compute cadence defaults
+BRTI_RECALC_INTERVAL_SEC = 1.0
+SNAPSHOT_RECALIBRATION_SEC = 30.0
+
+# Reconciliation policy defaults
+RECONCILIATION_TOP_N = 10
+RECONCILIATION_PRICE_TOL_CENTS = 0.01
+RECONCILIATION_QTY_TOL = 1.0
+RECONCILIATION_CONSECUTIVE_BREACHES = 3
