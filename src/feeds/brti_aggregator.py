@@ -128,7 +128,7 @@ async def _stream_gemini():
     while True:
         try:
             _init_book(exchange)
-            async with websockets.connect(url, max_size=10_000_000, ping_interval=20, ping_timeout=10) as ws:
+            async with websockets.connect(url, max_size=10_000_000, open_timeout=30, ping_interval=20, ping_timeout=10) as ws:
                 print(f"  --> {exchange} L2 connected")
 
                 async for message in ws:
