@@ -142,6 +142,78 @@
       line-height: 1.7;
       color: var(--muted);
     }
+    .phase3-bottom {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+    .phase3-bottom h3 {
+      color: #b8d4f0;
+    }
+    .phase3-readme {
+      margin-bottom: 14px;
+    }
+    .phase3-readme details {
+      margin-top: 0;
+    }
+    .phase3-readme summary {
+      color: #b8c9e8;
+    }
+    .phase3-readme .meta-list strong {
+      color: #d8e4f5;
+    }
+    .viz-row {
+      display: grid;
+      grid-template-columns: 120px 1fr 72px;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .viz-label { color: var(--muted); }
+    .viz-pct { text-align: right; color: #a8e6ff; font-weight: 600; }
+    .viz-track {
+      height: 22px;
+      border-radius: 8px;
+      background: #0d1520;
+      border: 1px solid #2a3a52;
+      overflow: hidden;
+    }
+    .viz-fill {
+      height: 100%;
+      border-radius: 7px;
+      transition: width 0.25s ease;
+      min-width: 0;
+    }
+    /* P(model) / P(book): green = YES (>50%), red = NO (<50%), gray = 50% */
+    .viz-fill-yes {
+      background: linear-gradient(90deg, #1a4d30, #3ecf7a);
+    }
+    .viz-fill-no {
+      background: linear-gradient(90deg, #6b1f24, #e85d5d);
+    }
+    .viz-fill-neutral {
+      background: linear-gradient(90deg, #3d4450, #7a8494);
+    }
+    .viz-pct-yes { color: #6ee7a8 !important; }
+    .viz-pct-no { color: #ff9a9a !important; }
+    .viz-pct-neutral { color: #b8c2d0 !important; }
+    .inner-calc-pre {
+      max-height: 42vh;
+      overflow: auto;
+      background: #0b1119;
+      border: 1px solid #223044;
+      border-radius: 10px;
+      padding: 10px;
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #a8c0e0;
+      margin: 0;
+    }
     @media (max-width: 980px) {
       .wrap { grid-template-columns: 1fr; }
       .summary-grid { grid-template-columns: 1fr; }
@@ -180,6 +252,41 @@
         <canvas id="movingAvgChart" width="1100" height="220"></canvas>
       </div>
 
+      <div class="phase3-bottom" id="phase3Section">
+        <h3>Asian pricer &amp; Realized Vol (Live)</h3>
+        <p class="meta-list" style="margin-bottom:12px">
+          <code>asian_pricer.py</code> + <code>vol_estimator.py</code>: lognormal / collapsed TWAP probability vs strike; σ from BRTI log returns. Bars update with <code>/api/state</code>. Green = YES (&gt;50%), red = NO (&lt;50%).
+        </p>
+
+        <div class="phase3-readme">
+          <details>
+            <summary>Read me — what P(model) and P(book) mean</summary>
+            <div class="meta-list" style="margin-top:8px">
+              <p style="margin-top:0"><strong>P(model)</strong> is the model’s estimate of the probability that the <strong>official 60-second BRTI time-weighted average</strong> (the one Kalshi uses over the final minute) finishes <strong>above the strike</strong> you see in the grid. It is <strong>not</strong> the same as the YES contract’s market price on Kalshi — it is our own math on synthetic BRTI and vol.</p>
+              <p><strong>How it’s computed:</strong> With <strong>more than 60 seconds left</strong> to expiry, we use a <strong>Levy-style</strong> lognormal approximation to the average of 60 future spot samples (Turnbull–Wakeman–style idea). <strong>Inside the last 60 seconds</strong>, we switch to a <strong>collapsed-variance</strong> update: seconds already observed are fixed; only the rest is uncertain. <strong>σ</strong> comes from <code>vol_estimator.py</code> (realized vol on BRTI log returns). The <strong>regime</strong> line in the status tells you which branch is active.</p>
+              <p><strong>What the percentage is:</strong> A value like <strong>63.2%</strong> means “the model assigns about a 63% chance the TWAP settles above the strike.” The <strong>bar width</strong> is the same number on a 0–100 scale. It is a probability, not a price in cents.</p>
+              <p><strong>Bar colors (50% rule):</strong> For both metrics, <strong>green</strong> when the shown probability is &gt; 50% (leans YES), <strong>red</strong> when &lt; 50% (leans NO), <strong>gray</strong> at 50% or when data isn’t available (e.g. pricer not ready, or no order-book snapshot yet for P(book)).</p>
+              <p><strong>P(book)</strong> is a separate signal from the <strong>Kalshi order book</strong> (and aggressor trades when wired): we combine <strong>OBI</strong> (resting bid vs ask imbalance), <strong>TFI</strong> (recent buy-yes vs sell-yes flow), and <strong>MPP</strong> (how much the mid moved vs the spread) into a <strong>logistic</strong> score in (0, 1), shown as a percent. It measures <strong>short-term pressure</strong> and liquidity, not the BRTI TWAP model. <strong>TFI</strong> may stay flat until public trade events are connected.</p>
+              <p><strong>Why both differ:</strong> P(model) is spot + vol + time structure; P(book) is what traders are doing on Kalshi right now. They can diverge — e.g. model says fair YES is high while the book is leaning NO, or the reverse.</p>
+              <p style="margin-bottom:0">For raw numbers (σ, <code>pricer_detail</code>, OBI/TFI/MPP, sigmoid <code>z</code>), open <strong>Asian Pricer and Realized Vol Calculations</strong> on the right.</p>
+            </div>
+          </details>
+        </div>
+
+        <div class="viz-row">
+          <span class="viz-label">P(model)</span>
+          <div class="viz-track"><div class="viz-fill viz-fill-neutral" id="pModelBar" style="width:0%"></div></div>
+          <span class="viz-pct viz-pct-neutral" id="pModelPctLabel">—</span>
+        </div>
+        <div class="viz-row">
+          <span class="viz-label">P(book)</span>
+          <div class="viz-track"><div class="viz-fill viz-fill-neutral" id="pBookBar" style="width:0%"></div></div>
+          <span class="viz-pct viz-pct-neutral" id="pBookPctLabel">—</span>
+        </div>
+        <div class="summary-grid" style="margin-top:8px" id="phase3Grid"></div>
+        <p class="mono" id="phase3Status" style="font-size:11px;margin-top:8px">—</p>
+      </div>
+
       <details>
         <summary>Explain technical metrics</summary>
         <div class="meta-list" id="metricHelp"></div>
@@ -190,6 +297,14 @@
       <h2>Verification Streams</h2>
       <div class="badge">Kalshi messages tracked end-to-end</div>
       <div class="badge">BRTI exchange messages tracked end-to-end</div>
+
+      <details style="margin-top:4px">
+        <summary>Asian Pricer and Realized Vol Calculations</summary>
+        <p class="meta-list" style="margin:6px 0 8px">
+          Raw <code>pricing</code> (vol path, <code>pricer_detail</code>, TWAP fields) and <code>microstructure</code> (OBI, TFI, MPP, sigmoid <code>z</code>) from each poll.
+        </p>
+        <pre class="inner-calc-pre" id="innerCalcJson">{}</pre>
+      </details>
 
       <details>
         <summary>Reconciliation Checks (REST vs WebSocket)</summary>

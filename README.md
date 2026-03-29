@@ -123,12 +123,15 @@ Kalshi settles on the CF Benchmarks BRTI, and we need to synthesize the BRTI wit
 
 *This is tentatively finished.*
 
-#### Task 3: Asian Options Pricer & Volatility
+#### Task 3: Asian Options Pricer & Volatility (done)
 
 We have the TWAP tracker but we need to price the uncertainty of the remaining time.
 
-1. Build `asian_pricer.py`. We will use a model like the Levy approximation to calculate the lognormal probability distribution of the remaining 60-second average.
-2. Build `vol_estimator.py` to calculate realized vol from our BRTI proxy to feed into the pricer.
+1. **`asian_pricer.py`** — Levy-style / collapsed-variance probability for the 60s TWAP vs strike (`N(d2)` / collapsed Gaussian branch).
+2. **`vol_estimator.py`** — realized annualized σ from BRTI log returns.
+3. **`live_pricing.py`** — combines BRTI, TWAP state, vol, and pricer for `GET /api/state`.
+
+**Dashboard:** below the BRTI / MA charts, **Asian pricer & Realized Vol (Live)** shows bar gauges for **P(model)** and **P(book)** (green when probability is above 50% YES, red below), plus a metric grid. In the **right** column, **Asian Pricer and Realized Vol Calculations** exposes `pricer_detail`, σ fields, and microstructure (`obi`, `tfi`, `mpp`, `z`) on every poll.
 
 #### Task 4: OBP Signal
 

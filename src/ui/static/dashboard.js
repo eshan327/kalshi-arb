@@ -11,6 +11,142 @@ function fmtPriceCent(value) {
   return `${n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}c`;
 }
 
+function fmtPct(value, decimals = 2) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  return `${Number(value).toFixed(decimals)}%`;
+}
+
+/** Probability in [0,1]: green YES if >50%, red NO if <50%, neutral at 50%. */
+function vizFillClass(p) {
+  if (p == null || !Number.isFinite(Number(p))) return "viz-fill-neutral";
+  const x = Number(p);
+  if (x > 0.5) return "viz-fill-yes";
+  if (x < 0.5) return "viz-fill-no";
+  return "viz-fill-neutral";
+}
+
+function vizPctClass(p) {
+  if (p == null || !Number.isFinite(Number(p))) return "viz-pct viz-pct-neutral";
+  const x = Number(p);
+  if (x > 0.5) return "viz-pct viz-pct-yes";
+  if (x < 0.5) return "viz-pct viz-pct-no";
+  return "viz-pct viz-pct-neutral";
+}
+
+function renderPhase3Section(pricing, micro) {
+  const barM = document.getElementById("pModelBar");
+  const barB = document.getElementById("pBookBar");
+  const labM = document.getElementById("pModelPctLabel");
+  const labB = document.getElementById("pBookPctLabel");
+  const grid = document.getElementById("phase3Grid");
+  const st = document.getElementById("phase3Status");
+  if (!barM || !grid) {
+    return;
+  }
+
+  if (!pricing || !pricing.ready) {
+    barM.style.width = "0%";
+    barM.className = `viz-fill ${vizFillClass(null)}`;
+    if (barB) {
+      barB.style.width = "0%";
+      barB.className = `viz-fill ${vizFillClass(null)}`;
+    }
+    if (labM) {
+      labM.textContent = "—";
+      labM.className = vizPctClass(null);
+    }
+    if (labB) {
+      labB.textContent = "—";
+      labB.className = vizPctClass(null);
+    }
+    grid.innerHTML = "";
+    if (st) {
+      st.textContent = pricing?.reason
+        ? `P(model) unavailable: ${pricing.reason}`
+        : "Waiting for BRTI, inferred strike, and market close time…";
+    }
+    return;
+  }
+
+  const pm = Number(pricing.p_model);
+  const pctModel = Number.isFinite(pm) ? Math.min(100, Math.max(0, pm * 100)) : 0;
+  barM.style.width = `${pctModel}%`;
+  barM.className = `viz-fill ${vizFillClass(pm)}`;
+  if (labM) {
+    labM.textContent = fmtPct(pricing.p_model_pct, 2);
+    labM.className = vizPctClass(pm);
+  }
+
+  if (micro && micro.p_book != null && Number.isFinite(Number(micro.p_book))) {
+    const pb = Number(micro.p_book);
+    const pbw = Math.min(100, Math.max(0, pb * 100));
+    if (barB) {
+      barB.style.width = `${pbw}%`;
+      barB.className = `viz-fill ${vizFillClass(pb)}`;
+    }
+    if (labB) {
+      labB.textContent = fmtPct(100 * pb, 2);
+      labB.className = vizPctClass(pb);
+    }
+  } else {
+    if (barB) {
+      barB.style.width = "0%";
+      barB.className = `viz-fill ${vizFillClass(null)}`;
+    }
+    if (labB) {
+      labB.textContent = "—";
+      labB.className = vizPctClass(null);
+    }
+  }
+
+  const sigNote = pricing.vol_is_fallback ? " (fallback σ)" : "";
+  if (st) {
+    st.textContent = `Regime: ${pricing.regime ?? "—"} · σ annual ${pricing.sigma_annual}${sigNote} · ${pricing.sigma_samples} BRTI prints`;
+  }
+
+  const req =
+    pricing.twap_required_avg != null
+      ? `<div class="summary-box"><div class="summary-label">Req. avg (rest)</div><div class="summary-value">$${Number(
+          pricing.twap_required_avg,
+        ).toLocaleString()}</div></div>`
+      : "";
+
+  const twapLine =
+    pricing.twap_partial_avg != null
+      ? `Partial avg $${Number(pricing.twap_partial_avg).toLocaleString()} · ${pricing.twap_seconds_elapsed}/60 s`
+      : Number(pricing.seconds_to_expiry) > 60
+        ? "Not in final minute yet"
+        : "Accumulating…";
+
+  grid.innerHTML =
+    `<div class="summary-box"><div class="summary-label">Sec to expiry</div><div class="summary-value">${
+      pricing.seconds_to_expiry != null ? Number(pricing.seconds_to_expiry).toFixed(1) : "—"
+    }</div></div>` +
+    `<div class="summary-box"><div class="summary-label">Strike (USD)</div><div class="summary-value">${
+      pricing.strike_usd != null ? "$" + Number(pricing.strike_usd).toLocaleString() : "—"
+    }</div></div>` +
+    `<div class="summary-box"><div class="summary-label">σ eff (pricer)</div><div class="summary-value">${
+      pricing.sigma_eff != null ? pricing.sigma_eff : "—"
+    }</div></div>` +
+    `<div class="summary-box"><div class="summary-label">Spot BRTI</div><div class="summary-value">${
+      pricing.spot_brti != null ? "$" + Number(pricing.spot_brti).toLocaleString() : "—"
+    }</div></div>` +
+    `<div class="summary-box" style="grid-column:1/-1"><div class="summary-label">TWAP / window</div><div class="summary-value" style="font-size:12px;line-height:1.4">${twapLine}</div></div>` +
+    req;
+}
+
+function renderInnerCalcJson(pricing, micro) {
+  const el = document.getElementById("innerCalcJson");
+  if (!el) {
+    return;
+  }
+  const payload = {
+    pricing: pricing ?? null,
+    microstructure: micro ?? null,
+  };
+  el.textContent = JSON.stringify(payload, null, 2);
+}
+
 function buildBookTable(el, bids, asks) {
   const asksDesc = [...asks].sort((a, b) => b[0] - a[0]);
   const bidsDesc = [...bids].sort((a, b) => b[0] - a[0]);
@@ -234,6 +370,9 @@ async function refreshState() {
   document.getElementById("settlementProxy").textContent =
     `Synthetic 60s RTI average (proxy): ${proxyAvg} | samples=${proxy.samples ?? 0}`;
 
+  renderPhase3Section(state.pricing, state.microstructure);
+  renderInnerCalcJson(state.pricing, state.microstructure);
+
   const help = document.getElementById("metricHelp");
   const k = state.kalshi_ws_stats || {};
   const b = state.brti_ws_stats || {};
@@ -245,6 +384,8 @@ async function refreshState() {
     "Latest depth used: BRTI utilized depth in BTC for price calculation.<br>" +
     "Exchanges included: number of clean, non-stale exchanges currently used by BRTI.<br><br>" +
     "Synthetic 60s RTI average: rolling average of valid synthetic BRTI prints over the last 60 seconds. This approximates settlement mechanics but is not the official CF value.<br><br>" +
+    "<strong>Asian pricer &amp; Realized Vol (below charts)</strong><br>" +
+    "P(model): Asian / collapsed-variance estimate from <code>asian_pricer.py</code> using σ from <code>vol_estimator.py</code>. P(book): order-book skew from <code>book_microstructure.py</code>. Bars: green = YES (&gt;50%), red = NO (&lt;50%). Inner JSON: right column → Asian Pricer and Realized Vol Calculations.<br><br>" +
     "<strong>Kalshi message processing counters</strong><br>" +
     `Incoming websocket messages: ${k.total_received ?? "n/a"}<br>` +
     `Orderbook deltas received: ${k.orderbook_delta_received ?? "n/a"}<br>` +
