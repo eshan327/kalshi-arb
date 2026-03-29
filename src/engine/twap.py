@@ -36,6 +36,13 @@ class TwapCalculator:
             return 0
         return min(int(time.time() - self._window_start), self.total_seconds)
 
+    def settlement_window_started(self) -> bool:
+        return self._window_start is not None
+
+    def discrete_samples(self) -> list[float]:
+        """1 Hz settlement samples observed so far (same as internal reconstruction)."""
+        return self._get_discrete_samples()
+
     def _get_discrete_samples(self) -> list[float]:
         """
         Reconstructs Kalshi's discrete 1-second sampling array.
