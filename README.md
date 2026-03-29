@@ -37,11 +37,54 @@ KALSHI_PROD_KEY_PATH=.secrets/prod.txt
 
 ### Web Dashboard
 
-- Run `python src/main.py` and open `http://127.0.0.1:5000`.
+- Run `python src/main.py` from the repo root and open `http://127.0.0.1:5000`.
+- **`src/ui/web_app.py`** — Flask app; **`GET /api/state`** returns orderbook, BRTI, **`pricing`** (Asian/collapsed pricer + vol) and **`microstructure`** (OBI / TFI / MPP / `P_book`).
+- **`src/ui/templates/dashboard.html`** + **`src/ui/static/dashboard.js`** — live UI.
 - The dashboard shows:
-  - Live reconstructed YES/NO top-10 orderbook tables (from in-memory state, not raw text).
-  - Big BRTI synthesized price display with depth and exchange coverage metadata.
-  - A collapsible verification panel with raw websocket logs and top-10 impact logs (`received`, `buffered`, `applied`, `stale_ignored`, etc.).
+  - Live reconstructed YES/NO top-10 orderbook tables (in-memory state).
+  - BRTI hero number, synthetic 60s settlement proxy, BRTI spot + 60s moving-average charts.
+  - **Asian pricer & Realized Vol (Live)** — `P(model)` and `P(book)` bar gauges (green if above 50% YES-lean, red if below 50% NO-lean), metric grid (time to expiry, strike, σ, spot, **TWAP / window**, optional **Req. avg (rest)**). **TWAP / window** describes progress inside Kalshi’s final 60s: not in the last minute yet, accumulating samples, or partial TWAP + `k/60` seconds locked in.
+  - Collapsible **Read me — what P(model) and P(book) mean** (plain-language readme).
+  - Right column: **Asian Pricer and Realized Vol Calculations** — pretty-printed JSON (`pricing`, `microstructure`) each poll.
+  - **Explain technical metrics** — websocket counters and notes.
+  - Verification streams: reconciliation, BRTI ticks, Kalshi raw logs, etc.
+
+---
+
+## Project layout (what lives where)
+
+```
+src/
+├── main.py                 # entry: starts Flask dashboard
+├── core/
+│   ├── config.py           # env, API/WS URLs, dashboard defaults
+│   └── auth.py             # Kalshi REST/WS auth
+├── data/
+│   ├── kalshi_rest.py      # markets, orderbook snapshots
+│   └── kalshi_ws.py        # subscribe to orderbook + ticker
+├── engine/
+│   ├── streamer.py         # KXBTC15M WS loop, REST bootstrap, seq sync, market rotation
+│   ├── orderbook.py        # Kalshi YES/NO L2 reconstruction
+│   ├── twap.py             # 60s settlement window, discrete samples, required avg
+│   ├── asian_pricer.py     # Levy branch + collapsed-variance binary TWAP vs strike
+│   ├── vol_estimator.py    # realized σ from BRTI ticks
+│   ├── live_pricing.py     # ties BRTI + TWAP + vol + pricer for /api/state
+│   ├── book_microstructure.py  # OBI, TFI, MPP → sigmoid P(book); trade hook for TFI
+│   ├── stream_metrics.py   # WS audit logs
+│   └── reconciliation.py   # REST vs WS level checks
+├── feeds/
+│   ├── brti_calc.py        # CME-style BRTI math (consolidation, curves, weighting)
+│   ├── brti_state.py       # exchange books, BRTI ticks deque, getters
+│   ├── brti_aggregator.py  # exchange WS tasks + 1 Hz BRTI recalc
+│   └── exchanges/          # Coinbase, Kraken, Gemini, Bitstamp, Paxos WS streams
+├── execution/
+│   └── order_manager.py    # place orders (paper/live hooks)
+└── ui/
+    ├── web_app.py          # Flask routes + background asyncio (streamer + BRTI)
+    ├── market_metadata.py  # infer strike from Kalshi market dict
+    ├── templates/dashboard.html
+    └── static/dashboard.js
+```
 
 ---
 
@@ -81,20 +124,34 @@ Kalshi's 15m BTC contracts settle on a TWAP of the BRTI over the final 60 second
 ### What's Built
 
 **Authentication & Config (`src/core/`)**
-- `config.py` and `auth.py` are for environment variables and authentication
-- `display.py` handles terminal formatting right now (rework to visualize the live orderbook later)
+- `config.py` and `auth.py` — environment variables and Kalshi authentication
 
 **Data Infrastructure (`src/data/`)**
-- `kalshi_rest.py` pulls static JSON snapshots from market
-- `kalshi_ws.py` keeps the WebSocket tunnel open
-- `orderbook_math.py` handles pure math functions (e.g., implied asks)
+- `kalshi_rest.py` — markets list, per-market orderbook snapshots
+- `kalshi_ws.py` — authenticated WebSocket subscribe (orderbook deltas + ticker)
 
-**Engine & Math (`src/engine/`)**
-- `streamer.py` is an aysnc event loop routing WS traffic
-- `twap.py` tracks the rolling window, elapsed time, and required remaining average
+**Engine (`src/engine/`)**
+- `streamer.py` — async loop for KXBTC15M: REST snapshot, delta replay, sequence reconciliation, rotate to next market on close. Thread-safe **`_live_market_info`** for Flask. On **new market ticker**: resets **`live_pricing`** TWAP session and **`book_microstructure`** so the next 15m window keeps calculating cleanly.
+- `orderbook.py` — Kalshi YES/NO book from snapshot + ordered deltas
+- `twap.py` — 60s settlement window alignment with discrete 1 Hz samples, partial average, required average for rest of window
+- `asian_pricer.py` — binary P(TWAP above K): Levy-style when more than 60s remain; collapsed-variance inside the last 60s
+- `vol_estimator.py` — realized (and optional EWMA) annualized σ from BRTI history
+- `live_pricing.py` — `compute_live_pricing_snapshot()` for API; TWAP key includes **`close_time`** so back-to-back contracts do not reuse state
+- `book_microstructure.py` — OBI, TFI, MPP, `P_book`; `on_live_orderbook_update` from streamer; `on_public_trade` for future trade feed
+- `stream_metrics.py`, `reconciliation.py` — logging and REST vs WS checks
+
+**Feeds (`src/feeds/`)**
+- `brti_calc.py` — BRTI pipeline per CME-style methodology
+- `brti_state.py` — global exchange books + BRTI tick history
+- `brti_aggregator.py` — multi-exchange asyncio tasks + periodic BRTI
+- `exchanges/*.py` — per-exchange websocket feeds
+
+**UI (`src/ui/`)**
+- `web_app.py` — Flask + background asyncio (streamer + BRTI aggregator)
+- `market_metadata.py` — `extract_suggested_strike()` from market payload
 
 **Execution (`src/execution/`)**
-- `order_manager.py` routes orders and has safety valves (QT button mashing simulator)
+- `order_manager.py` — order placement helpers
 
 ---
 
@@ -118,8 +175,8 @@ We can't trade on isolated WebSocket messages. We need to build `src/engine/orde
 Kalshi settles on the CF Benchmarks BRTI, and we need to synthesize the BRTI without direct API access.
 
 1. Create `src/feeds/` directory.
-2. Build WS connections to Coinbase, Kraken, and Gemini.
-3. Build `brti_aggregator.py` to collect multi-exchange orderbook data and output a synthetic BRTI-style real-time index.
+2. Build WS connections to Coinbase, Kraken, Gemini, Bitstamp, Paxos (see `feeds/exchanges/`).
+3. Build `brti_aggregator.py` to collect multi-exchange orderbook data and output a synthetic BRTI-style real-time index (`brti_calc.py`).
 
 *This is tentatively finished.*
 
@@ -135,7 +192,7 @@ We have the TWAP tracker but we need to price the uncertainty of the remaining t
 
 #### Task 4: OBP Signal
 
-Build `src/engine/obp.py` to quantify directional conviction. Calculate bid/ask imbalance at the top 5/10/etc levels and the size-weighted mid-price. This tells us if human traders are spoofing or actually moving a certain way.
+Build `src/engine/obp.py` to quantify directional conviction (bid/ask imbalance at the top levels, size-weighted mid, etc.). **Partial precursor:** `book_microstructure.py` already exposes top-N **OBI**, **TFI**, **MPP**, and **P(book)** on each orderbook update; a dedicated `obp.py` may consolidate or extend this.
 
 #### Task 5: Signal Combiner
 
