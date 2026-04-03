@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from typing import Optional
@@ -12,6 +13,8 @@ from core.config import (
 )
 from data.kalshi_rest import get_market_orderbook, get_open_markets
 from data.kalshi_ws import connect_and_subscribe
+from engine.book_microstructure import on_live_orderbook_update, reset_book_microstructure_for_new_market
+from engine.live_pricing import reset_live_pricing_for_new_market
 from engine.orderbook import OrderBook
 from engine.reconciliation import compare_levels, is_reconciliation_breach
 from engine.stream_metrics import (
@@ -32,7 +35,8 @@ RECONNECT_DELAY_SEC = 5
 
 # Live orderbook instance (accessible by other modules)
 live_book: Optional[OrderBook] = None
-_live_market_info = {}
+_live_market_info: dict = {}
+_live_market_info_lock = threading.Lock()
 BufferedDelta = tuple[int, dict]
 MIN_ACTIONABLE_PRICE_CENTS = 1.0
 MAX_ACTIONABLE_PRICE_CENTS = 99.0
@@ -111,6 +115,7 @@ def _replay_buffered_deltas(book: OrderBook, buffered_deltas: list[BufferedDelta
             applied += 1
             after = _top10_signature(book)
             _record_top10_impact(buffered_seq, buffered_msg, before != after)
+            on_live_orderbook_update(book)
             _record_ws_event("orderbook_delta", buffered_seq, buffered_msg, "applied_from_buffer")
         elif buffered_seq < (book.expected_seq or 0):
             _record_ws_event("orderbook_delta", buffered_seq, buffered_msg, "stale_buffer_ignored")
@@ -144,6 +149,7 @@ def _try_bootstrap_from_rest(
 
     applied = _replay_buffered_deltas(book, buffered_deltas)
     recalibration_ts = time.monotonic()
+    on_live_orderbook_update(book)
     logger.info(
         "Bootstrap complete | anchor_seq=%s | buffered=%s | applied=%s",
         seq_anchor,
@@ -216,7 +222,8 @@ def get_live_book() -> Optional[OrderBook]:
 
 def get_live_market_info() -> dict:
     """Returns metadata for the currently tracked Kalshi market."""
-    return dict(_live_market_info)
+    with _live_market_info_lock:
+        return dict(_live_market_info)
 
 
 def _is_actionable_display_level(level: tuple[float, float]) -> bool:
@@ -333,6 +340,7 @@ async def _stream_with_sync(market_ticker: str, book: OrderBook, market_close_ts
                     _record_ws_event(msg_type, seq, msg, "applied")
                     after = _top10_signature(book)
                     _record_top10_impact(seq, msg, before != after)
+                    on_live_orderbook_update(book)
 
                 elif msg_type == "subscribed":
                     logger.info("[SERVER] Subscription confirmed: %s", data.get("msg", {}).get("channel"))
@@ -385,6 +393,8 @@ async def run_market_streamer():
 
         if not markets:
             logger.info("No active markets found. Retrying in %ss...", RECONNECT_DELAY_SEC)
+            with _live_market_info_lock:
+                _live_market_info.clear()
             await asyncio.sleep(RECONNECT_DELAY_SEC)
             continue
 
@@ -393,14 +403,20 @@ async def run_market_streamer():
 
         if not target_market:
             logger.warning("No valid market ticker found. Retrying in %ss...", RECONNECT_DELAY_SEC)
+            with _live_market_info_lock:
+                _live_market_info.clear()
             await asyncio.sleep(RECONNECT_DELAY_SEC)
             continue
 
         if target_market != current_market:
             logger.info("Target market: %s", target_market)
+            reset_live_pricing_for_new_market()
+            reset_book_microstructure_for_new_market()
             current_market = target_market
 
-        _live_market_info = dict(selected_market)
+        with _live_market_info_lock:
+            _live_market_info.clear()
+            _live_market_info.update(dict(selected_market))
         close_ts = _parse_iso8601_to_epoch(selected_market.get("close_time"))
         live_book = OrderBook(target_market)
         await _stream_with_sync(target_market, live_book, market_close_ts=close_ts)

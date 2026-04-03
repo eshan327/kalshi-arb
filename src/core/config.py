@@ -8,15 +8,20 @@ EXECUTION_MODE = os.getenv("KALSHI_EXECUTION_MODE", "OBSERVE").upper()
 
 KALSHI_ENV = os.getenv("KALSHI_ENV", "demo").lower()
 
+# Optional overrides if Kalshi changes hosts (must include /trade-api/v2 for REST)
+_DEFAULT_PROD_API = "https://api.elections.kalshi.com/trade-api/v2"
+_DEFAULT_DEMO_API = "https://demo-api.kalshi.co/trade-api/v2"
 if KALSHI_ENV == "prod":
-    API_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+    API_BASE_URL = os.getenv("KALSHI_API_BASE_URL", _DEFAULT_PROD_API)
 else:
-    API_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
+    API_BASE_URL = os.getenv("KALSHI_API_BASE_URL", _DEFAULT_DEMO_API)
 
+_DEFAULT_PROD_WS = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+_DEFAULT_DEMO_WS = "wss://demo-api.kalshi.co/trade-api/ws/v2"
 if KALSHI_ENV == "prod":
-    WS_BASE_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    WS_BASE_URL = os.getenv("KALSHI_WS_BASE_URL", _DEFAULT_PROD_WS)
 else:
-    WS_BASE_URL = "wss://demo-api.kalshi.co/trade-api/ws/v2"
+    WS_BASE_URL = os.getenv("KALSHI_WS_BASE_URL", _DEFAULT_DEMO_WS)
 
 # Flask app defaults
 WEB_HOST = "127.0.0.1"

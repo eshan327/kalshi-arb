@@ -2,6 +2,8 @@ import asyncio
 import logging
 import threading
 from flask import Flask, jsonify, render_template, request
+from kalshi_python_sync.exceptions import UnauthorizedException
+
 from core.auth import get_authenticated_client
 from core.config import (
     BRTI_RECALC_INTERVAL_SEC,
@@ -10,6 +12,8 @@ from core.config import (
     WEB_PORT,
     WS_LOG_DEFAULT_LIMIT,
 )
+from engine.book_microstructure import get_last_p_book_snapshot
+from engine.live_pricing import compute_live_pricing_snapshot
 from engine.streamer import (
     get_live_market_info,
     get_live_orderbook_snapshot,
@@ -85,6 +89,14 @@ def api_state():
     settlement_proxy = get_brti_settlement_proxy(window_seconds=60)
     market_info = get_live_market_info()
     suggested_strike = extract_suggested_strike(market_info)
+    close_iso = market_info.get("close_time") if isinstance(market_info.get("close_time"), str) else None
+    mt = market_info.get("ticker") if isinstance(market_info.get("ticker"), str) else None
+    pricing = compute_live_pricing_snapshot(
+        strike=suggested_strike,
+        market_ticker=mt,
+        close_time_iso=close_iso,
+    )
+    microstructure = get_last_p_book_snapshot()
 
     return jsonify(
         {
@@ -96,6 +108,8 @@ def api_state():
             "brti_ws_stats": brti_stats,
             "market_info": market_info,
             "suggested_strike": suggested_strike,
+            "pricing": pricing,
+            "microstructure": microstructure,
         }
     )
 
@@ -140,6 +154,15 @@ def run_web_app() -> None:
         client = get_authenticated_client()
         balance_res = client.get_balance()
         logger.info("Balance: $%s", f"{balance_res.balance / 100:,.2f}")
+    except UnauthorizedException:
+        logger.error(
+            "Kalshi returned 401 Unauthorized. Most often: "
+            "KALSHI_ENV does not match where the API key was created "
+            "(demo keys from demo.kalshi.co require KALSHI_ENV=demo; "
+            "production keys from kalshi.com require KALSHI_ENV=prod), "
+            "or KALSHI_*_KEY_ID does not belong to that private key file."
+        )
+        raise SystemExit(1)
     except Exception as exc:
         logger.exception("Authentication failed: %s", exc)
         raise SystemExit(1)
