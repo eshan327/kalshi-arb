@@ -1,5 +1,5 @@
 """
-Binary fair value for “BTC TWAP over the last 60s vs strike K” (Kalshi-style settlement).
+Binary fair value for index TWAP over the last 60s versus strike K (Kalshi-style settlement).
 
 - **More than 60s to expiry:** Levy moment-matching (lognormal approximation to the arithmetic
   average of 60 future spots) — equivalent in spirit to Turnbull–Wakeman / industry Asian

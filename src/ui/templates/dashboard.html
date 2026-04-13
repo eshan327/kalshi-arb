@@ -44,6 +44,27 @@
       gap: 8px;
       margin-bottom: 12px;
     }
+    .asset-selector-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .asset-select {
+      background: #0f1724;
+      color: var(--text);
+      border: 1px solid #31435e;
+      border-radius: 8px;
+      padding: 4px 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .asset-status {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
     .summary-box {
       border: 1px solid #31435e;
       border-radius: 10px;
@@ -224,6 +245,14 @@
   <div class="wrap">
     <section class="card">
       <h2>Kalshi Reconstructed Orderbook</h2>
+      <div class="asset-selector-row">
+        <label class="mono" for="assetSelector">15m Market Asset</label>
+        <select id="assetSelector" class="asset-select">
+          <option value="BTC">Bitcoin</option>
+          <option value="ETH">Ethereum</option>
+        </select>
+        <span id="assetSelectorStatus" class="asset-status">Loading market selection...</span>
+      </div>
       <div class="summary-grid" id="summary"></div>
 
       <div class="grid2">
@@ -237,13 +266,14 @@
         </div>
       </div>
 
-      <h3 style="margin-top:14px">BRTI Synthesized Price</h3>
+      <h3 style="margin-top:14px">Index Synthesized Price</h3>
       <div id="brti" class="hero">--</div>
       <div id="brtiMeta" class="mono"></div>
       <div id="settlementProxy" class="mono"></div>
+      <div id="settlementRuleText" class="mono"></div>
 
       <div class="chart-wrap">
-        <p class="chart-title">BRTI Spot</p>
+        <p class="chart-title">Index Spot</p>
         <canvas id="brtiChart" width="1100" height="220"></canvas>
       </div>
 
@@ -255,18 +285,18 @@
       <div class="phase3-bottom" id="phase3Section">
         <h3>Asian pricer &amp; Realized Vol (Live)</h3>
         <p class="meta-list" style="margin-bottom:12px">
-          <code>asian_pricer.py</code> + <code>vol_estimator.py</code>: lognormal / collapsed TWAP probability vs strike; σ from BRTI log returns. Bars update with <code>/api/state</code>. Green = YES (&gt;50%), red = NO (&lt;50%).
+          <code>asian_pricer.py</code> + <code>vol_estimator.py</code>: lognormal / collapsed TWAP probability vs strike; σ from index log returns. Bars update with <code>/api/state</code>. Green = YES (&gt;50%), red = NO (&lt;50%).
         </p>
 
         <div class="phase3-readme">
           <details>
             <summary>Read me — what P(model) and P(book) mean</summary>
             <div class="meta-list" style="margin-top:8px">
-              <p style="margin-top:0"><strong>P(model)</strong> is the model’s estimate of the probability that the <strong>official 60-second BRTI time-weighted average</strong> (the one Kalshi uses over the final minute) finishes <strong>above the strike</strong> you see in the grid. It is <strong>not</strong> the same as the YES contract’s market price on Kalshi — it is our own math on synthetic BRTI and vol.</p>
-              <p><strong>How it’s computed:</strong> With <strong>more than 60 seconds left</strong> to expiry, we use a <strong>Levy-style</strong> lognormal approximation to the average of 60 future spot samples (Turnbull–Wakeman–style idea). <strong>Inside the last 60 seconds</strong>, we switch to a <strong>collapsed-variance</strong> update: seconds already observed are fixed; only the rest is uncertain. <strong>σ</strong> comes from <code>vol_estimator.py</code> (realized vol on BRTI log returns). The <strong>regime</strong> line in the status tells you which branch is active.</p>
+              <p style="margin-top:0"><strong>P(model)</strong> is the model’s estimate of the probability that the <strong>official 60-second benchmark index average</strong> (the one Kalshi uses over the final minute) finishes <strong>above the strike</strong> you see in the grid. It is <strong>not</strong> the same as the YES contract’s market price on Kalshi — it is our own math on synthetic index proxy and vol.</p>
+              <p><strong>How it’s computed:</strong> With <strong>more than 60 seconds left</strong> to expiry, we use a <strong>Levy-style</strong> lognormal approximation to the average of 60 future spot samples (Turnbull–Wakeman–style idea). <strong>Inside the last 60 seconds</strong>, we switch to a <strong>collapsed-variance</strong> update: seconds already observed are fixed; only the rest is uncertain. <strong>σ</strong> comes from <code>vol_estimator.py</code> (realized vol on index log returns). The <strong>regime</strong> line in the status tells you which branch is active.</p>
               <p><strong>What the percentage is:</strong> A value like <strong>63.2%</strong> means “the model assigns about a 63% chance the TWAP settles above the strike.” The <strong>bar width</strong> is the same number on a 0–100 scale. It is a probability, not a price in cents.</p>
               <p><strong>Bar colors (50% rule):</strong> For both metrics, <strong>green</strong> when the shown probability is &gt; 50% (leans YES), <strong>red</strong> when &lt; 50% (leans NO), <strong>gray</strong> at 50% or when data isn’t available (e.g. pricer not ready, or no order-book snapshot yet for P(book)).</p>
-              <p><strong>P(book)</strong> is a separate signal from the <strong>Kalshi order book</strong> (and aggressor trades when wired): we combine <strong>OBI</strong> (resting bid vs ask imbalance), <strong>TFI</strong> (recent buy-yes vs sell-yes flow), and <strong>MPP</strong> (how much the mid moved vs the spread) into a <strong>logistic</strong> score in (0, 1), shown as a percent. It measures <strong>short-term pressure</strong> and liquidity, not the BRTI TWAP model. <strong>TFI</strong> may stay flat until public trade events are connected.</p>
+              <p><strong>P(book)</strong> is a separate signal from the <strong>Kalshi order book</strong> (and aggressor trades when wired): we combine <strong>OBI</strong> (resting bid vs ask imbalance), <strong>TFI</strong> (recent buy-yes vs sell-yes flow), and <strong>MPP</strong> (how much the mid moved vs the spread) into a <strong>logistic</strong> score in (0, 1), shown as a percent. It measures <strong>short-term pressure</strong> and liquidity, not the index TWAP model. <strong>TFI</strong> may stay flat until public trade events are connected.</p>
               <p><strong>Why both differ:</strong> P(model) is spot + vol + time structure; P(book) is what traders are doing on Kalshi right now. They can diverge — e.g. model says fair YES is high while the book is leaning NO, or the reverse.</p>
               <p style="margin-bottom:0">For raw numbers (σ, <code>pricer_detail</code>, OBI/TFI/MPP, sigmoid <code>z</code>), open <strong>Asian Pricer and Realized Vol Calculations</strong> on the right.</p>
             </div>
@@ -296,7 +326,7 @@
     <section class="card">
       <h2>Verification Streams</h2>
       <div class="badge">Kalshi messages tracked end-to-end</div>
-      <div class="badge">BRTI exchange messages tracked end-to-end</div>
+      <div class="badge">Index exchange messages tracked end-to-end</div>
 
       <details style="margin-top:4px">
         <summary>Asian Pricer and Realized Vol Calculations</summary>
@@ -312,7 +342,7 @@
       </details>
 
       <details>
-        <summary>BRTI Tick Stream</summary>
+        <summary>Index Tick Stream</summary>
         <div class="log" id="brtiTicks"></div>
       </details>
 
@@ -327,12 +357,17 @@
       </details>
 
       <details>
-        <summary>BRTI Raw Exchange WebSocket Messages</summary>
+        <summary>Index Raw Exchange WebSocket Messages</summary>
         <div class="log" id="brtiRawLog"></div>
       </details>
     </section>
   </div>
 
-  <script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='dashboard/format.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='dashboard/asset_selection.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='dashboard/charts.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='dashboard/renderers.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='dashboard/logs.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='dashboard/app.js') }}" defer></script>
 </body>
 </html>

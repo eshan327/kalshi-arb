@@ -1,4 +1,5 @@
 import logging
+import heapq
 from threading import RLock
 
 
@@ -75,6 +76,15 @@ class OrderBook:
             if price_cents is None:
                 continue
             destination[price_cents] = qty
+
+    def _top_n_levels(self, side_book, depth):
+        """Returns top-N descending bid levels from an internal side map."""
+        if depth <= 0 or not side_book:
+            return []
+
+        # Internal keys are integer cents; nlargest avoids sorting the full book.
+        top_items = heapq.nlargest(depth, side_book.items(), key=lambda item: item[0])
+        return [(float(price_cents), self._normalize_qty(qty)) for price_cents, qty in top_items]
 
     def load_ws_snapshot(self, msg):
         """
@@ -246,9 +256,20 @@ class OrderBook:
 
             return yes_bids, yes_asks, no_bids, no_asks
 
+    def get_orderbook_top_n(self, depth):
+        """Returns top-N slices of the current orderbook in cents for low-latency read paths."""
+        with self._lock:
+            depth = max(0, int(depth))
+            yes_bids = self._top_n_levels(self.yes, depth)
+            no_bids = self._top_n_levels(self.no, depth)
+
+            yes_asks = sorted([(round(100.0 - p, 2), q) for p, q in no_bids])
+            no_asks = sorted([(round(100.0 - p, 2), q) for p, q in yes_bids])
+            return yes_bids, yes_asks, no_bids, no_asks
+
     def get_best_prices(self):
         """Returns (yes_best_bid, yes_best_ask, no_best_bid, no_best_ask) in cents."""
-        yes_bids, yes_asks, no_bids, no_asks = self.get_orderbook()
+        yes_bids, yes_asks, no_bids, no_asks = self.get_orderbook_top_n(1)
         return (
             yes_bids[0][0] if yes_bids else None,
             yes_asks[0][0] if yes_asks else None,

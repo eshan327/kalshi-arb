@@ -3,9 +3,9 @@ import statistics
 import time
 from typing import TypedDict
 
-# --- BRTI Parameters (from CME CF Methodology v16.5, 22 Feb 2026) ---
-# Section 6.2: CME CF Bitcoin Real Time Index
-SPACING = 1                          # s = 1 BTC
+# --- Index Methodology Parameters (from CME CF RTI methodology family) ---
+# Section 6.2 style depth-walk parameters; applied to the active profile's spot orderbooks.
+SPACING = 1                          # Volume spacing in base-asset units (e.g., 1 BTC / 1 ETH)
 DEVIATION_THRESHOLD = 0.005          # D = 0.5%
 POTENTIALLY_ERRONEOUS_PARAM = 0.05   # 5%
 STALE_THRESHOLD = 30                 # Discard exchange if data >30s old
@@ -22,6 +22,11 @@ class ExchangeBook(TypedDict):
 
 ExchangeBooks = dict[str, ExchangeBook]
 Levels = list[tuple[float, float]]
+
+
+def reset_brti_calc_state() -> None:
+    """Clears cross-run hysteresis flags (used when switching between BTC and ETH)."""
+    _flagged_exchanges.clear()
 
 
 # ---- Section 4.1.3: Dynamic Order Size Cap (Eq. 4a-5) ----
@@ -135,7 +140,10 @@ def filter_erroneous_prices(book_side: dict[float, float]) -> dict[float, float]
 
 # ---- Section 5.3: Potentially Erroneous Data ----
 
-def screen_potentially_erroneous(exchange_mids: dict[str, float]) -> set[str]:
+def screen_potentially_erroneous(
+    exchange_mids: dict[str, float],
+    threshold: float = POTENTIALLY_ERRONEOUS_PARAM,
+) -> set[str]:
     """
     Flag exchanges whose mid deviates > POTENTIALLY_ERRONEOUS_PARAM from median.
     Implements hysteresis (Section 5.3 step 4): once flagged, stays flagged until
@@ -157,13 +165,13 @@ def screen_potentially_erroneous(exchange_mids: dict[str, float]) -> set[str]:
 
         if exchange in _flagged_exchanges:
             # Step 4: reinstate only if deviation < 50% of threshold
-            if deviation < POTENTIALLY_ERRONEOUS_PARAM * 0.5:
+            if deviation < threshold * 0.5:
                 _flagged_exchanges.discard(exchange)
             else:
                 currently_flagged.add(exchange)
         else:
             # Step 3: flag if deviation exceeds threshold
-            if deviation > POTENTIALLY_ERRONEOUS_PARAM:
+            if deviation > threshold:
                 _flagged_exchanges.add(exchange)
                 currently_flagged.add(exchange)
 
@@ -260,7 +268,7 @@ def compute_price_volume_curves(
     Step 3: Build askPV, bidPV, midPV, midSV at spacing granularity.
     Eq 1c: askPV(v) = raw_askPV(s * ceil(v/s))
     Eq 1d: bidPV(v) = raw_bidPV(s * ceil(v/s))
-    For BTC spacing=1, ceil(v/1) = v, so askPV = raw_askPV.
+    For spacing=1, ceil(v/1) = v, so askPV = raw_askPV.
     """
     raw_ask = _walk_raw_curve(asks)
     raw_bid = _walk_raw_curve(bids)
@@ -302,7 +310,11 @@ def compute_price_volume_curves(
 
 # ---- Step 4: Utilized Depth (Eq. 2) ----
 
-def compute_utilized_depth(mid_sv: dict[int, float], spacing: int = SPACING) -> int:
+def compute_utilized_depth(
+    mid_sv: dict[int, float],
+    spacing: int = SPACING,
+    deviation_threshold: float = DEVIATION_THRESHOLD,
+) -> int:
     """
     v̄_T = max(v_i where midSV(v_i) <= D and midSV(v_{i+1}) > D, s)
     """
@@ -313,7 +325,7 @@ def compute_utilized_depth(mid_sv: dict[int, float], spacing: int = SPACING) -> 
     utilized = 0
 
     for i, v in enumerate(volumes):
-        if mid_sv[v] <= DEVIATION_THRESHOLD:
+        if mid_sv[v] <= deviation_threshold:
             utilized = v
         else:
             break
@@ -360,11 +372,15 @@ def compute_brti(mid_pv: dict[int, float], utilized_depth: int, spacing: int = S
 
 # ---- Full Pipeline ----
 
-def _filter_stale_books(exchange_books: ExchangeBooks, current_time: float) -> ExchangeBooks:
+def _filter_stale_books(
+    exchange_books: ExchangeBooks,
+    current_time: float,
+    stale_threshold: float = STALE_THRESHOLD,
+) -> ExchangeBooks:
     return {
         name: book
         for name, book in exchange_books.items()
-        if (current_time - book.get("last_update", 0)) < STALE_THRESHOLD
+        if (current_time - book.get("last_update", 0)) < stale_threshold
     }
 
 
@@ -387,19 +403,30 @@ def _drop_erroneous_books(exchange_books: ExchangeBooks) -> ExchangeBooks:
     return clean_books
 
 
-def _drop_potentially_erroneous_books(exchange_books: ExchangeBooks) -> ExchangeBooks:
+def _drop_potentially_erroneous_books(
+    exchange_books: ExchangeBooks,
+    potentially_erroneous_param: float = POTENTIALLY_ERRONEOUS_PARAM,
+) -> ExchangeBooks:
     exchange_mids: dict[str, float] = {}
     for name, book in exchange_books.items():
         mid = get_exchange_mid(book["bids"], book["asks"])
         if mid is not None:
             exchange_mids[name] = mid
 
-    flagged = screen_potentially_erroneous(exchange_mids)
+    flagged = screen_potentially_erroneous(
+        exchange_mids,
+        threshold=potentially_erroneous_param,
+    )
     return {name: book for name, book in exchange_books.items() if name not in flagged}
 
 def calculate_brti(
     exchange_books: ExchangeBooks,
     current_time: float | None = None,
+    *,
+    spacing: int = SPACING,
+    deviation_threshold: float = DEVIATION_THRESHOLD,
+    potentially_erroneous_param: float = POTENTIALLY_ERRONEOUS_PARAM,
+    stale_threshold: float = STALE_THRESHOLD,
 ) -> tuple[float | None, int, int]:
     """
     Full BRTI calculation per CME CF Methodology v16.5.
@@ -408,8 +435,31 @@ def calculate_brti(
     if current_time is None:
         current_time = time.time()
 
+    spacing = max(1, int(spacing))
+
+    try:
+        deviation_threshold = float(deviation_threshold)
+    except (TypeError, ValueError):
+        deviation_threshold = DEVIATION_THRESHOLD
+    if deviation_threshold <= 0:
+        deviation_threshold = DEVIATION_THRESHOLD
+
+    try:
+        potentially_erroneous_param = float(potentially_erroneous_param)
+    except (TypeError, ValueError):
+        potentially_erroneous_param = POTENTIALLY_ERRONEOUS_PARAM
+    if potentially_erroneous_param <= 0:
+        potentially_erroneous_param = POTENTIALLY_ERRONEOUS_PARAM
+
+    try:
+        stale_threshold = float(stale_threshold)
+    except (TypeError, ValueError):
+        stale_threshold = STALE_THRESHOLD
+    if stale_threshold <= 0:
+        stale_threshold = STALE_THRESHOLD
+
     # --- Section 5.1: Stale data ---
-    valid_books = _filter_stale_books(exchange_books, current_time)
+    valid_books = _filter_stale_books(exchange_books, current_time, stale_threshold=stale_threshold)
 
     if not valid_books:
         return None, 0, 0
@@ -424,7 +474,10 @@ def calculate_brti(
         return None, 0, 0
 
     # --- Section 5.3: Potentially erroneous data (with hysteresis) ---
-    final_books = _drop_potentially_erroneous_books(clean_books)
+    final_books = _drop_potentially_erroneous_books(
+        clean_books,
+        potentially_erroneous_param=potentially_erroneous_param,
+    )
 
     if not final_books:
         return None, 0, 0
@@ -440,15 +493,19 @@ def calculate_brti(
         return None, 0, 0
 
     # --- Step 3: Price-volume curves ---
-    ask_pv, bid_pv, mid_pv, mid_sv = compute_price_volume_curves(bids, asks)
+    ask_pv, bid_pv, mid_pv, mid_sv = compute_price_volume_curves(bids, asks, spacing=spacing)
 
     if not mid_pv:
         return None, 0, 0
 
     # --- Step 4: Utilized depth ---
-    utilized_depth = compute_utilized_depth(mid_sv)
+    utilized_depth = compute_utilized_depth(
+        mid_sv,
+        spacing=spacing,
+        deviation_threshold=deviation_threshold,
+    )
 
     # --- Steps 5-6: Exponential weighting ---
-    brti = compute_brti(mid_pv, utilized_depth)
+    brti = compute_brti(mid_pv, utilized_depth, spacing=spacing)
 
     return brti, utilized_depth, len(final_books)

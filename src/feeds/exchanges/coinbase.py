@@ -1,13 +1,9 @@
 from feeds.brti_state import mark_book_update_applied, replace_full_book, safe_float, update_level
-from feeds.exchanges.runtime import run_exchange_stream
+from core.market_profiles import MarketProfile
+from feeds.exchanges.base import ExchangeAdapter
 
 EXCHANGE = "COINBASE"
 URL = "wss://advanced-trade-ws.coinbase.com"
-SUBSCRIBE = {
-    "type": "subscribe",
-    "product_ids": ["BTC-USD"],
-    "channel": "level2",
-}
 CONNECT_KWARGS = {
     "max_size": 50_000_000,
     "compression": None,
@@ -16,56 +12,64 @@ CONNECT_KWARGS = {
 }
 
 
-def _handle_message(data: dict) -> bool:
-    if data.get("channel") != "l2_data":
-        return False
+class CoinbaseAdapter(ExchangeAdapter):
+    exchange = EXCHANGE
+    connect_kwargs = CONNECT_KWARGS
 
-    parsed = False
-    for event in data.get("events", []):
-        event_type = event.get("type")
+    def build_url(self) -> str:
+        return URL
 
-        if event_type == "snapshot":
-            snapshot_bids = {}
-            snapshot_asks = {}
+    def build_subscribe_message(self) -> dict:
+        return {
+            "type": "subscribe",
+            "product_ids": [self.profile.coinbase_product_id],
+            "channel": "level2",
+        }
+
+    def handle_message(self, data: dict) -> bool:
+        if data.get("channel") != "l2_data":
+            return False
+
+        parsed = False
+        for event in data.get("events", []):
+            event_type = event.get("type")
+
+            if event_type == "snapshot":
+                snapshot_bids = {}
+                snapshot_asks = {}
+                for update in event.get("updates", []):
+                    side_raw = update.get("side")
+                    if side_raw not in {"bid", "ask", "offer"}:
+                        continue
+
+                    side = snapshot_bids if side_raw == "bid" else snapshot_asks
+                    price = safe_float(update.get("price_level"))
+                    qty = safe_float(update.get("new_quantity"))
+                    if price is None or qty is None or price <= 0 or qty <= 0:
+                        continue
+                    side[price] = qty
+
+                replace_full_book(EXCHANGE, snapshot_bids, snapshot_asks)
+                parsed = True
+                continue
+
             for update in event.get("updates", []):
                 side_raw = update.get("side")
                 if side_raw not in {"bid", "ask", "offer"}:
                     continue
 
-                side = snapshot_bids if side_raw == "bid" else snapshot_asks
+                side = "bids" if side_raw == "bid" else "asks"
                 price = safe_float(update.get("price_level"))
                 qty = safe_float(update.get("new_quantity"))
-                if price is None or qty is None or price <= 0 or qty <= 0:
+                if price is None or qty is None or price <= 0:
                     continue
-                side[price] = qty
 
-            replace_full_book(EXCHANGE, snapshot_bids, snapshot_asks)
-            parsed = True
-            continue
+                update_level(EXCHANGE, side, price, qty)
+                mark_book_update_applied()
+                parsed = True
 
-        for update in event.get("updates", []):
-            side_raw = update.get("side")
-            if side_raw not in {"bid", "ask", "offer"}:
-                continue
-
-            side = "bids" if side_raw == "bid" else "asks"
-            price = safe_float(update.get("price_level"))
-            qty = safe_float(update.get("new_quantity"))
-            if price is None or qty is None or price <= 0:
-                continue
-
-            update_level(EXCHANGE, side, price, qty)
-            mark_book_update_applied()
-            parsed = True
-
-    return parsed
+        return parsed
 
 
-async def stream() -> None:
-    await run_exchange_stream(
-        exchange=EXCHANGE,
-        url=URL,
-        handle_message=_handle_message,
-        subscribe_message=SUBSCRIBE,
-        connect_kwargs=CONNECT_KWARGS,
-    )
+async def stream(profile: MarketProfile) -> None:
+    await CoinbaseAdapter(profile).stream()

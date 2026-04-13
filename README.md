@@ -39,7 +39,7 @@ KALSHI_PROD_KEY_PATH=.secrets/prod.txt
 
 - Run `python src/main.py` from the repo root and open `http://127.0.0.1:5000`.
 - **`src/ui/web_app.py`** — Flask app; **`GET /api/state`** returns orderbook, BRTI, **`pricing`** (Asian/collapsed pricer + vol) and **`microstructure`** (OBI / TFI / MPP / `P_book`).
-- **`src/ui/templates/dashboard.html`** + **`src/ui/static/dashboard.js`** — live UI.
+- **`src/ui/templates/dashboard.html`** + **`src/ui/static/dashboard/`** modules — live UI.
 - The dashboard shows:
   - Live reconstructed YES/NO top-10 orderbook tables (in-memory state).
   - BRTI hero number, synthetic 60s settlement proxy, BRTI spot + 60s moving-average charts.
@@ -58,32 +58,60 @@ src/
 ├── main.py                 # entry: starts Flask dashboard
 ├── core/
 │   ├── config.py           # env, API/WS URLs, dashboard defaults
-│   └── auth.py             # Kalshi REST/WS auth
+│   ├── auth.py             # Kalshi REST/WS auth
+│   ├── market_profiles.py  # BTC/ETH market profile registry
+│   ├── market_selection.py # persisted active/requested asset switch state
+│   ├── asset_context.py    # normalized active profile context helpers
+│   └── settlement.py       # settlement rule/window metadata helpers
 ├── data/
 │   ├── kalshi_rest.py      # markets, orderbook snapshots
 │   └── kalshi_ws.py        # subscribe to orderbook + ticker
 ├── engine/
-│   ├── streamer.py         # KXBTC15M WS loop, REST bootstrap, seq sync, market rotation
+│   ├── streamer.py         # stream orchestrator + public state accessors
 │   ├── orderbook.py        # Kalshi YES/NO L2 reconstruction
 │   ├── twap.py             # 60s settlement window, discrete samples, required avg
 │   ├── asian_pricer.py     # Levy branch + collapsed-variance binary TWAP vs strike
 │   ├── vol_estimator.py    # realized σ from BRTI ticks
-│   ├── live_pricing.py     # ties BRTI + TWAP + vol + pricer for /api/state
+│   ├── live_pricing.py     # compatibility wrapper for pricing pipeline
+│   ├── settlement_sampling.py # shared deterministic 1Hz sample reconstruction
+│   ├── pricing/
+│   │   └── pipeline.py     # pricing pipeline stages and snapshot assembly
+│   ├── market_stream/
+│   │   ├── discovery.py    # market close parsing/selection
+│   │   ├── bootstrap.py    # REST bootstrap + delta replay helpers
+│   │   ├── display.py      # actionable display-level filtering
+│   │   └── reconciliation_runner.py # reconciliation routine
 │   ├── book_microstructure.py  # OBI, TFI, MPP → sigmoid P(book); trade hook for TFI
 │   ├── stream_metrics.py   # WS audit logs
 │   └── reconciliation.py   # REST vs WS level checks
 ├── feeds/
-│   ├── brti_calc.py        # CME-style BRTI math (consolidation, curves, weighting)
-│   ├── brti_state.py       # exchange books, BRTI ticks deque, getters
-│   ├── brti_aggregator.py  # exchange WS tasks + 1 Hz BRTI recalc
-│   └── exchanges/          # Coinbase, Kraken, Gemini, Bitstamp, Paxos WS streams
+│   ├── brti_calc.py        # compatibility BRTI math entrypoint
+│   ├── brti_state.py       # compatibility state facade (re-exports modular stores)
+│   ├── brti_aggregator.py  # feed runtime orchestrator
+│   ├── context.py          # explicit feed runtime context
+│   ├── calc/
+│   │   └── rti_pipeline.py # profile-aware BRTI calculator wrapper
+│   ├── state/
+│   │   ├── book_store.py   # per-exchange L2 book state
+│   │   ├── tick_store.py   # index tick/state snapshots + settlement proxy
+│   │   ├── diagnostics_store.py # feed diagnostics logs/counters
+│   │   └── runtime_state.py # atomic feed-state reset helpers
+│   └── exchanges/          # adapter-based Coinbase/Kraken/Gemini/Bitstamp/Paxos streams
 ├── execution/
 │   └── order_manager.py    # place orders (paper/live hooks)
 └── ui/
-    ├── web_app.py          # Flask routes + background asyncio (streamer + BRTI)
+  ├── web_app.py          # Flask app bootstrap + route registration
+  ├── contracts.py        # API response contract keys/shapes
+  ├── routes/
+  │   ├── state_routes.py
+  │   ├── selection_routes.py
+  │   └── log_routes.py
+  ├── services/
+  │   ├── dashboard_state_service.py
+  │   └── runtime_services.py
     ├── market_metadata.py  # infer strike from Kalshi market dict
     ├── templates/dashboard.html
-    └── static/dashboard.js
+  └── static/dashboard/   # format, selector, charts, renderers, logs, app coordinator
 ```
 
 ---
