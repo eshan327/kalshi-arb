@@ -7,18 +7,15 @@ from dataclasses import dataclass
 
 from core.market_profiles import MarketProfile, get_market_profile
 from feeds.calc.rti_pipeline import RTIPipeline
-from feeds.brti_state import (
-    get_exchange_books_ref,
-    record_brti_tick,
-    reset_brti_runtime_state,
-    set_brti_state,
-)
+from feeds.state.book_store import get_exchange_books_ref
+from feeds.state.runtime_state import reset_brti_runtime_state
+from feeds.state.tick_store import record_brti_tick, set_brti_state
 from feeds.exchanges import (
-    stream_bitstamp,
-    stream_coinbase,
-    stream_gemini,
-    stream_kraken,
-    stream_paxos,
+    BitstampAdapter,
+    CoinbaseAdapter,
+    GeminiAdapter,
+    KrakenAdapter,
+    PaxosAdapter,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,11 +63,13 @@ class FeedsRuntimeContext:
     def spawn_tasks(self, recalc_interval: float) -> list[asyncio.Task]:
         self.reset_state()
         profile = self.profile
-        return [
-            asyncio.create_task(stream_coinbase(profile)),
-            asyncio.create_task(stream_kraken(profile)),
-            asyncio.create_task(stream_gemini(profile)),
-            asyncio.create_task(stream_bitstamp(profile)),
-            asyncio.create_task(stream_paxos(profile)),
-            asyncio.create_task(self.recalculate_loop(recalc_interval=recalc_interval)),
-        ]
+        adapters = (
+            CoinbaseAdapter(profile),
+            KrakenAdapter(profile),
+            GeminiAdapter(profile),
+            BitstampAdapter(profile),
+            PaxosAdapter(profile),
+        )
+        tasks = [asyncio.create_task(adapter.stream()) for adapter in adapters]
+        tasks.append(asyncio.create_task(self.recalculate_loop(recalc_interval=recalc_interval)))
+        return tasks

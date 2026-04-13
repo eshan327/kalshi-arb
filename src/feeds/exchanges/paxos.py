@@ -1,6 +1,5 @@
-from feeds.brti_state import mark_book_update_applied, replace_full_book, safe_float, update_level
-from core.market_profiles import MarketProfile
-from feeds.exchanges.base import ExchangeAdapter
+from feeds.state.book_store import replace_full_book
+from feeds.exchanges.base import ExchangeAdapter, add_snapshot_level, apply_book_update
 
 EXCHANGE = "PAXOS"
 CONNECT_KWARGS = {
@@ -25,18 +24,10 @@ class PaxosAdapter(ExchangeAdapter):
             snapshot_asks = {}
 
             for level in data.get("bids", []):
-                price = safe_float(level.get("price"))
-                amount = safe_float(level.get("amount"))
-                if price is None or amount is None or price <= 0 or amount <= 0:
-                    continue
-                snapshot_bids[price] = amount
+                add_snapshot_level(snapshot_bids, level.get("price"), level.get("amount"))
 
             for level in data.get("asks", []):
-                price = safe_float(level.get("price"))
-                amount = safe_float(level.get("amount"))
-                if price is None or amount is None or price <= 0 or amount <= 0:
-                    continue
-                snapshot_asks[price] = amount
+                add_snapshot_level(snapshot_asks, level.get("price"), level.get("amount"))
 
             replace_full_book(EXCHANGE, snapshot_bids, snapshot_asks)
             return True
@@ -47,17 +38,6 @@ class PaxosAdapter(ExchangeAdapter):
                 return False
 
             side = "bids" if side_raw == "BUY" else "asks"
-            price = safe_float(data.get("price"))
-            amount = safe_float(data.get("amount"))
-            if price is None or amount is None or price <= 0:
-                return False
-
-            update_level(EXCHANGE, side, price, amount)
-            mark_book_update_applied()
-            return True
+            return apply_book_update(EXCHANGE, side, data.get("price"), data.get("amount"))
 
         return False
-
-
-async def stream(profile: MarketProfile) -> None:
-    await PaxosAdapter(profile).stream()

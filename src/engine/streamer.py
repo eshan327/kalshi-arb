@@ -56,6 +56,20 @@ def get_live_market_info() -> dict:
         return dict(_live_market_info)
 
 
+def _set_live_market_info(profile, market: dict | None = None) -> None:
+    with _live_market_info_lock:
+        _live_market_info.clear()
+        if isinstance(market, dict):
+            _live_market_info.update(dict(market))
+        _live_market_info.update(
+            {
+                "active_asset": profile.asset,
+                "active_asset_display": profile.display_name,
+                "active_series": profile.kalshi_series_ticker,
+            }
+        )
+
+
 def get_live_orderbook_snapshot(depth: int = 10) -> dict:
     """Returns a JSON-serializable orderbook snapshot for UI/API consumers."""
     book = live_book
@@ -73,10 +87,7 @@ def get_live_orderbook_snapshot(depth: int = 10) -> dict:
     read_depth = max(1, int(depth))
     # Pull a wider top-N slice, then apply actionable filtering for display.
     raw_depth = max(read_depth * 4, read_depth)
-    if hasattr(book, "get_orderbook_top_n"):
-        yes_bids, yes_asks, no_bids, no_asks = book.get_orderbook_top_n(raw_depth)
-    else:
-        yes_bids, yes_asks, no_bids, no_asks = book.get_orderbook()
+    yes_bids, yes_asks, no_bids, no_asks = book.get_orderbook_top_n(raw_depth)
     return {
         "initialized": True,
         "market_ticker": book.market_ticker,
@@ -216,15 +227,7 @@ async def run_market_streamer() -> None:
 
         if not markets:
             logger.info("No active markets found. Retrying in %ss...", RECONNECT_DELAY_SEC)
-            with _live_market_info_lock:
-                _live_market_info.clear()
-                _live_market_info.update(
-                    {
-                        "active_asset": profile.asset,
-                        "active_asset_display": profile.display_name,
-                        "active_series": profile.kalshi_series_ticker,
-                    }
-                )
+            _set_live_market_info(profile)
             await asyncio.sleep(RECONNECT_DELAY_SEC)
             continue
 
@@ -233,15 +236,7 @@ async def run_market_streamer() -> None:
 
         if not target_market:
             logger.warning("No valid market ticker found. Retrying in %ss...", RECONNECT_DELAY_SEC)
-            with _live_market_info_lock:
-                _live_market_info.clear()
-                _live_market_info.update(
-                    {
-                        "active_asset": profile.asset,
-                        "active_asset_display": profile.display_name,
-                        "active_series": profile.kalshi_series_ticker,
-                    }
-                )
+            _set_live_market_info(profile)
             await asyncio.sleep(RECONNECT_DELAY_SEC)
             continue
 
@@ -251,16 +246,7 @@ async def run_market_streamer() -> None:
             reset_book_microstructure_for_new_market()
             current_market = target_market
 
-        with _live_market_info_lock:
-            _live_market_info.clear()
-            _live_market_info.update(dict(selected_market))
-            _live_market_info.update(
-                {
-                    "active_asset": profile.asset,
-                    "active_asset_display": profile.display_name,
-                    "active_series": profile.kalshi_series_ticker,
-                }
-            )
+        _set_live_market_info(profile, selected_market)
 
         close_ts = parse_iso8601_to_epoch(selected_market.get("close_time"))
         live_book = OrderBook(target_market)

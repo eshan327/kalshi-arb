@@ -1,6 +1,5 @@
-from feeds.brti_state import mark_book_update_applied, replace_full_book, safe_float, update_level
-from core.market_profiles import MarketProfile
-from feeds.exchanges.base import ExchangeAdapter
+from feeds.state.book_store import replace_full_book
+from feeds.exchanges.base import ExchangeAdapter, add_snapshot_level, apply_book_update
 
 EXCHANGE = "KRAKEN"
 URL = "wss://ws.kraken.com/v2"
@@ -33,54 +32,33 @@ class KrakenAdapter(ExchangeAdapter):
             return False
 
         msg_type = data.get("type")
-        parsed = False
+        entries = data.get("data", [])
 
         if msg_type == "snapshot":
             snapshot_bids = {}
             snapshot_asks = {}
 
-            for entry in data.get("data", []):
+            for entry in entries:
                 for level in entry.get("bids", []):
-                    price = safe_float(level.get("price"))
-                    qty = safe_float(level.get("qty"))
-                    if price is None or qty is None or price <= 0 or qty <= 0:
-                        continue
-                    snapshot_bids[price] = qty
+                    add_snapshot_level(snapshot_bids, level.get("price"), level.get("qty"))
 
                 for level in entry.get("asks", []):
-                    price = safe_float(level.get("price"))
-                    qty = safe_float(level.get("qty"))
-                    if price is None or qty is None or price <= 0 or qty <= 0:
-                        continue
-                    snapshot_asks[price] = qty
+                    add_snapshot_level(snapshot_asks, level.get("price"), level.get("qty"))
 
             replace_full_book(EXCHANGE, snapshot_bids, snapshot_asks)
-            parsed = bool(snapshot_bids or snapshot_asks)
+            return bool(snapshot_bids or snapshot_asks)
 
-        for entry in data.get("data", []):
+        parsed = False
+        for entry in entries:
             if msg_type == "snapshot":
                 continue
 
             for level in entry.get("bids", []):
-                price = safe_float(level.get("price"))
-                qty = safe_float(level.get("qty"))
-                if price is None or qty is None or price <= 0:
-                    continue
-                update_level(EXCHANGE, "bids", price, qty)
-                mark_book_update_applied()
-                parsed = True
+                if apply_book_update(EXCHANGE, "bids", level.get("price"), level.get("qty")):
+                    parsed = True
 
             for level in entry.get("asks", []):
-                price = safe_float(level.get("price"))
-                qty = safe_float(level.get("qty"))
-                if price is None or qty is None or price <= 0:
-                    continue
-                update_level(EXCHANGE, "asks", price, qty)
-                mark_book_update_applied()
-                parsed = True
+                if apply_book_update(EXCHANGE, "asks", level.get("price"), level.get("qty")):
+                    parsed = True
 
         return parsed
-
-
-async def stream(profile: MarketProfile) -> None:
-    await KrakenAdapter(profile).stream()

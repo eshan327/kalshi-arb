@@ -3,9 +3,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Valid modes: 'OBSERVE', 'PAPER', 'LIVE'
-EXECUTION_MODE = os.getenv("KALSHI_EXECUTION_MODE", "OBSERVE").upper()
-
 KALSHI_ENV = os.getenv("KALSHI_ENV", "demo").lower()
 
 # Optional overrides if Kalshi changes hosts (must include /trade-api/v2 for REST)

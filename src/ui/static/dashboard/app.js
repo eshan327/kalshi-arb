@@ -69,15 +69,7 @@
     };
   }
 
-  function bindDetailsToggleRefreshes() {
-    const onOpenRefreshMap = {
-      rawLog: () => refreshRawLog(200),
-      impactLog: () => refreshImpactLog(200),
-      reconLog: () => refreshReconLog(200),
-      brtiRawLog: () => refreshBrtiRawLog(200),
-      brtiTicks: () => refreshBrtiTicks(200),
-    };
-
+  function bindDetailsToggleRefreshes(onOpenRefreshMap) {
     Object.entries(onOpenRefreshMap).forEach(([contentId, refreshFn]) => {
       const contentEl = document.getElementById(contentId);
       const detailsEl = contentEl ? contentEl.closest("details") : null;
@@ -179,51 +171,39 @@
       `Bitstamp parsed: ${b.bitstamp_parsed ?? "n/a"} | Paxos parsed: ${b.paxos_parsed ?? "n/a"}`;
   }
 
-  bindDetailsToggleRefreshes();
+  const detailsRefreshers = {
+    rawLog: () => refreshRawLog(200),
+    impactLog: () => refreshImpactLog(200),
+    reconLog: () => refreshReconLog(200),
+    brtiRawLog: () => refreshBrtiRawLog(200),
+    brtiTicks: () => refreshBrtiTicks(200),
+  };
 
-  createAdaptivePoller(() => refreshState(), {
-    visibleMs: 600,
-    hiddenMs: 3000,
-    runWhenHidden: false,
-    immediate: true,
-  });
+  bindDetailsToggleRefreshes(detailsRefreshers);
 
-  createAdaptivePoller(() => refreshBrtiTicks(isDetailsPanelOpen("brtiTicks") ? 200 : 120), {
-    visibleMs: 1200,
-    hiddenMs: 6000,
-    runWhenHidden: false,
-    immediate: true,
-  });
+  [
+    {
+      task: refreshState,
+      options: { visibleMs: 600, hiddenMs: 3000, runWhenHidden: false, immediate: true },
+    },
+    {
+      task: () => refreshBrtiTicks(isDetailsPanelOpen("brtiTicks") ? 200 : 120),
+      options: { visibleMs: 1200, hiddenMs: 6000, runWhenHidden: false, immediate: true },
+    },
+  ].forEach(({ task, options }) => createAdaptivePoller(task, options));
 
-  createAdaptivePoller(() => refreshRawLog(200), {
-    visibleMs: 1400,
-    hiddenMs: 7000,
-    runWhenHidden: false,
-    onlyWhen: () => isDetailsPanelOpen("rawLog"),
-    immediate: false,
-  });
-
-  createAdaptivePoller(() => refreshImpactLog(200), {
-    visibleMs: 1400,
-    hiddenMs: 7000,
-    runWhenHidden: false,
-    onlyWhen: () => isDetailsPanelOpen("impactLog"),
-    immediate: false,
-  });
-
-  createAdaptivePoller(() => refreshBrtiRawLog(200), {
-    visibleMs: 1600,
-    hiddenMs: 7000,
-    runWhenHidden: false,
-    onlyWhen: () => isDetailsPanelOpen("brtiRawLog"),
-    immediate: false,
-  });
-
-  createAdaptivePoller(() => refreshReconLog(200), {
-    visibleMs: 1800,
-    hiddenMs: 7000,
-    runWhenHidden: false,
-    onlyWhen: () => isDetailsPanelOpen("reconLog"),
-    immediate: false,
+  [
+    { contentId: "rawLog", refresh: refreshRawLog, visibleMs: 1400 },
+    { contentId: "impactLog", refresh: refreshImpactLog, visibleMs: 1400 },
+    { contentId: "brtiRawLog", refresh: refreshBrtiRawLog, visibleMs: 1600 },
+    { contentId: "reconLog", refresh: refreshReconLog, visibleMs: 1800 },
+  ].forEach(({ contentId, refresh, visibleMs }) => {
+    createAdaptivePoller(() => refresh(200), {
+      visibleMs,
+      hiddenMs: 7000,
+      runWhenHidden: false,
+      onlyWhen: () => isDetailsPanelOpen(contentId),
+      immediate: false,
+    });
   });
 })();

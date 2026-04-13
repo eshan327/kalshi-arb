@@ -1,6 +1,5 @@
-from feeds.brti_state import replace_full_book, safe_float
-from core.market_profiles import MarketProfile
-from feeds.exchanges.base import ExchangeAdapter
+from feeds.state.book_store import replace_full_book
+from feeds.exchanges.base import ExchangeAdapter, add_snapshot_level
 
 EXCHANGE = "BITSTAMP"
 URL = "wss://ws.bitstamp.net"
@@ -32,22 +31,10 @@ class BitstampAdapter(ExchangeAdapter):
         snapshot_asks = {}
 
         for price_str, size_str in orderbook.get("bids", []):
-            price = safe_float(price_str)
-            size = safe_float(size_str)
-            if price is None or size is None or price <= 0 or size <= 0:
-                continue
-            snapshot_bids[price] = size
+            add_snapshot_level(snapshot_bids, price_str, size_str)
 
         for price_str, size_str in orderbook.get("asks", []):
-            price = safe_float(price_str)
-            size = safe_float(size_str)
-            if price is None or size is None or price <= 0 or size <= 0:
-                continue
-            snapshot_asks[price] = size
+            add_snapshot_level(snapshot_asks, price_str, size_str)
 
         replace_full_book(EXCHANGE, snapshot_bids, snapshot_asks)
         return True
-
-
-async def stream(profile: MarketProfile) -> None:
-    await BitstampAdapter(profile).stream()

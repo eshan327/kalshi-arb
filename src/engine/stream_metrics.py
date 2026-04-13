@@ -58,10 +58,7 @@ def _record_ws_event(event_type: str, seq: int | None, payload: dict[str, Any], 
 
 
 def _top10_signature(book) -> tuple:
-    if hasattr(book, "get_orderbook_top_n"):
-        yes_bids, yes_asks, no_bids, no_asks = book.get_orderbook_top_n(ORDERBOOK_VIEW_DEPTH)
-    else:
-        yes_bids, yes_asks, no_bids, no_asks = book.get_orderbook()
+    yes_bids, yes_asks, no_bids, no_asks = book.get_orderbook_top_n(ORDERBOOK_VIEW_DEPTH)
 
     def _norm(levels):
         return tuple((round(float(px), 2), float(qty)) for px, qty in levels[:ORDERBOOK_VIEW_DEPTH])

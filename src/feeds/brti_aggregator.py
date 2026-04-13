@@ -1,14 +1,9 @@
 import asyncio
 import logging
 from core.asset_context import get_active_asset_context
-from feeds.brti_state import (
-    get_brti_settlement_proxy,
-    get_brti_state,
-    get_brti_ticks,
-    get_brti_ws_log,
-    get_brti_ws_stats,
-)
 from feeds.context import FeedsRuntimeContext
+from feeds.state.diagnostics_store import get_brti_ws_log, get_brti_ws_stats
+from feeds.state.tick_store import get_brti_settlement_proxy, get_brti_state, get_brti_ticks
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,4 @@
-from feeds.brti_state import mark_book_update_applied, safe_float, update_level
-from core.market_profiles import MarketProfile
-from feeds.exchanges.base import ExchangeAdapter
+from feeds.exchanges.base import ExchangeAdapter, apply_book_update
 
 EXCHANGE = "GEMINI"
 CONNECT_KWARGS = {
@@ -32,17 +30,7 @@ class GeminiAdapter(ExchangeAdapter):
                 continue
 
             side = "bids" if side_raw == "bid" else "asks"
-            price = safe_float(event.get("price"))
-            remaining = safe_float(event.get("remaining"))
-            if price is None or remaining is None or price <= 0:
-                continue
-
-            update_level(EXCHANGE, side, price, remaining)
-            mark_book_update_applied()
-            parsed = True
+            if apply_book_update(EXCHANGE, side, event.get("price"), event.get("remaining")):
+                parsed = True
 
         return parsed
-
-
-async def stream(profile: MarketProfile) -> None:
-    await GeminiAdapter(profile).stream()

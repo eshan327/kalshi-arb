@@ -8,7 +8,7 @@ from typing import Any
 
 from core.asset_context import get_active_asset_context
 from engine.pricing.pipeline import compute_pricing_snapshot
-from feeds.brti_state import get_brti_state, get_brti_tick_version, get_brti_ticks
+from feeds.state.tick_store import get_brti_state, get_brti_tick_version, get_brti_ticks
 
 _BRTI_TICK_LOOKBACK = 4000
 _snapshot_cache_lock = Lock()

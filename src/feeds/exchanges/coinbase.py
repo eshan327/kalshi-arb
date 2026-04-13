@@ -1,6 +1,5 @@
-from feeds.brti_state import mark_book_update_applied, replace_full_book, safe_float, update_level
-from core.market_profiles import MarketProfile
-from feeds.exchanges.base import ExchangeAdapter
+from feeds.state.book_store import replace_full_book
+from feeds.exchanges.base import ExchangeAdapter, add_snapshot_level, apply_book_update
 
 EXCHANGE = "COINBASE"
 URL = "wss://advanced-trade-ws.coinbase.com"
@@ -33,43 +32,30 @@ class CoinbaseAdapter(ExchangeAdapter):
         parsed = False
         for event in data.get("events", []):
             event_type = event.get("type")
+            updates = event.get("updates", [])
 
             if event_type == "snapshot":
                 snapshot_bids = {}
                 snapshot_asks = {}
-                for update in event.get("updates", []):
+                for update in updates:
                     side_raw = update.get("side")
                     if side_raw not in {"bid", "ask", "offer"}:
                         continue
 
                     side = snapshot_bids if side_raw == "bid" else snapshot_asks
-                    price = safe_float(update.get("price_level"))
-                    qty = safe_float(update.get("new_quantity"))
-                    if price is None or qty is None or price <= 0 or qty <= 0:
-                        continue
-                    side[price] = qty
+                    add_snapshot_level(side, update.get("price_level"), update.get("new_quantity"))
 
                 replace_full_book(EXCHANGE, snapshot_bids, snapshot_asks)
                 parsed = True
                 continue
 
-            for update in event.get("updates", []):
+            for update in updates:
                 side_raw = update.get("side")
                 if side_raw not in {"bid", "ask", "offer"}:
                     continue
 
                 side = "bids" if side_raw == "bid" else "asks"
-                price = safe_float(update.get("price_level"))
-                qty = safe_float(update.get("new_quantity"))
-                if price is None or qty is None or price <= 0:
-                    continue
-
-                update_level(EXCHANGE, side, price, qty)
-                mark_book_update_applied()
-                parsed = True
+                if apply_book_update(EXCHANGE, side, update.get("price_level"), update.get("new_quantity")):
+                    parsed = True
 
         return parsed
-
-
-async def stream(profile: MarketProfile) -> None:
-    await CoinbaseAdapter(profile).stream()
