@@ -3,8 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from core.asset_context import get_active_asset_context
+from core.market_metadata import extract_suggested_strike
 from core.market_selection import get_market_selection_state, request_asset_switch
 from engine.book_microstructure import get_last_p_book_snapshot
+from engine.execution.metrics import get_runtime_stats_snapshot
+from engine.execution.runtime import get_execution_state_snapshot
 from engine.live_pricing import compute_live_pricing_snapshot
 from engine.streamer import (
     get_live_market_info,
@@ -19,7 +22,6 @@ from ui.contracts import (
     STATE_PAYLOAD_KEYS,
     enforce_payload_contract,
 )
-from ui.market_metadata import extract_suggested_strike
 
 
 def clamped_limit(raw_limit: int | None, default: int, max_limit: int) -> int:
@@ -55,6 +57,8 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         close_time_iso=close_iso,
     )
     microstructure = get_last_p_book_snapshot()
+    execution_state = get_execution_state_snapshot()
+    runtime_stats = get_runtime_stats_snapshot(window_seconds=profile.settlement_window_seconds * 15)
 
     payload = {
         "orderbook": snapshot,
@@ -77,6 +81,8 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         "suggested_strike": suggested_strike,
         "pricing": pricing,
         "microstructure": microstructure,
+        "execution_state": execution_state,
+        "runtime_stats": runtime_stats,
     }
     return enforce_payload_contract(payload, STATE_PAYLOAD_KEYS)
 

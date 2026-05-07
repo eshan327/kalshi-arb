@@ -23,6 +23,8 @@ STATE_PAYLOAD_KEYS: tuple[str, ...] = (
     "suggested_strike",
     "pricing",
     "microstructure",
+    "execution_state",
+    "runtime_stats",
 )
 
 MARKET_SELECTION_PAYLOAD_KEYS: tuple[str, ...] = (

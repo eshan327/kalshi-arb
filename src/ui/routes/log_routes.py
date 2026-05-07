@@ -6,6 +6,7 @@ from typing import Any
 from flask import Flask, jsonify, request
 
 from core.config import WS_LOG_DEFAULT_LIMIT
+from engine.execution.metrics import get_execution_events, get_fill_events
 from engine.streamer import get_reconciliation_log, get_top10_impact_log, get_ws_message_log
 from feeds.brti_aggregator import get_brti_ticks, get_brti_ws_log
 from ui.services.dashboard_state_service import clamped_limit
@@ -38,6 +39,8 @@ def register_log_routes(app: Flask) -> None:
         ("/api/brti-ticks", "api_brti_ticks", get_brti_ticks),
         ("/api/brti-ws-log", "api_brti_ws_log", get_brti_ws_log),
         ("/api/reconciliation-log", "api_reconciliation_log", get_reconciliation_log),
+        ("/api/execution-events", "api_execution_events", get_execution_events),
+        ("/api/fill-events", "api_fill_events", get_fill_events),
     )
 
     for route, endpoint, fetcher in route_specs:

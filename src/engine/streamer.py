@@ -17,7 +17,11 @@ from core.config import (
 )
 from data.kalshi_rest import get_market_orderbook, get_open_markets
 from data.kalshi_ws import connect_and_subscribe
-from engine.book_microstructure import on_live_orderbook_update, reset_book_microstructure_for_new_market
+from engine.book_microstructure import (
+    on_live_orderbook_update,
+    on_public_trade,
+    reset_book_microstructure_for_new_market,
+)
 from engine.live_pricing import reset_live_pricing_for_new_market
 from engine.market_stream.bootstrap import BufferedDelta, try_bootstrap_from_rest
 from engine.market_stream.discovery import is_market_closed, parse_iso8601_to_epoch, select_target_market
@@ -29,11 +33,11 @@ from engine.stream_metrics import (
     _record_top10_impact,
     _record_ws_event,
     _top10_signature,
-    get_reconciliation_log,
-    get_top10_impact_log,
-    get_ws_message_log,
-    get_ws_message_log_size,
-    get_ws_processing_stats,
+    get_reconciliation_log as _get_reconciliation_log,
+    get_top10_impact_log as _get_top10_impact_log,
+    get_ws_message_log as _get_ws_message_log,
+    get_ws_message_log_size as _get_ws_message_log_size,
+    get_ws_processing_stats as _get_ws_processing_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +60,26 @@ def get_live_market_info() -> dict:
         return dict(_live_market_info)
 
 
+def get_ws_message_log(limit: int = 200) -> list[dict]:
+    return _get_ws_message_log(limit=limit)
+
+
+def get_top10_impact_log(limit: int = 200) -> list[dict]:
+    return _get_top10_impact_log(limit=limit)
+
+
+def get_reconciliation_log(limit: int = 200) -> list[dict]:
+    return _get_reconciliation_log(limit=limit)
+
+
+def get_ws_message_log_size() -> int:
+    return _get_ws_message_log_size()
+
+
+def get_ws_processing_stats() -> dict[str, int]:
+    return _get_ws_processing_stats()
+
+
 def _set_live_market_info(profile, market: dict | None = None) -> None:
     with _live_market_info_lock:
         _live_market_info.clear()
@@ -68,6 +92,44 @@ def _set_live_market_info(profile, market: dict | None = None) -> None:
                 "active_series": profile.kalshi_series_ticker,
             }
         )
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_public_trade(message: dict[str, object]) -> tuple[str, float, float | None] | None:
+    side_raw = str(message.get("taker_side") or "").strip().lower()
+    if side_raw not in {"yes", "no"}:
+        return None
+
+    count_candidates = (
+        message.get("count"),
+        message.get("size"),
+        message.get("quantity"),
+        message.get("delta"),
+    )
+    count = None
+    for candidate in count_candidates:
+        count = _as_float(candidate)
+        if count is not None:
+            break
+    if count is None or count <= 0:
+        return None
+
+    ts_raw = message.get("ts")
+    ts = _as_float(ts_raw)
+    if ts is not None and ts > 10_000_000_000:
+        ts = ts / 1000.0
+
+    return side_raw, float(count), ts
 
 
 def get_live_orderbook_snapshot(depth: int = 10) -> dict:
@@ -163,6 +225,27 @@ async def _stream_with_sync(market_ticker: str, book: OrderBook, market_close_ts
                     after = _top10_signature(book)
                     _record_top10_impact(seq, msg, before != after)
                     on_live_orderbook_update(book)
+
+                elif msg_type == "ticker":
+                    msg = msg_payload if isinstance(msg_payload, dict) else {}
+                    trade = _extract_public_trade(msg)
+                    if trade is None:
+                        _record_ws_event(msg_type, seq, msg, "ticker_ignored")
+                        continue
+
+                    side, count, trade_ts = trade
+                    on_public_trade(side, count, ts=trade_ts)
+                    on_live_orderbook_update(book)
+                    _record_ws_event(
+                        msg_type,
+                        seq,
+                        {
+                            "taker_side": side,
+                            "count": count,
+                            "ts": trade_ts,
+                        },
+                        "ticker_ingested",
+                    )
 
                 elif msg_type == "subscribed":
                     logger.info("[SERVER] Subscription confirmed: %s", data.get("msg", {}).get("channel"))
