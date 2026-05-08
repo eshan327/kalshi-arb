@@ -7,6 +7,8 @@ from flask import Flask
 from core.config import WEB_HOST, WEB_PORT
 from ui.routes.log_routes import register_log_routes
 from ui.routes.selection_routes import register_selection_routes
+from ui.routes.settings_routes import register_settings_routes
+from ui.routes.simulation_routes import register_simulation_routes
 from ui.routes.state_routes import register_state_routes
 from ui.services.runtime_services import start_background_services_once, validate_auth_or_exit
 
@@ -18,6 +20,8 @@ def create_app() -> Flask:
     register_state_routes(app)
     register_selection_routes(app)
     register_log_routes(app)
+    register_settings_routes(app)
+    register_simulation_routes(app)
     return app
 
 

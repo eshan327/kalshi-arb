@@ -8,6 +8,7 @@ from kalshi_python_sync.exceptions import UnauthorizedException
 
 from core.auth import get_authenticated_client
 from core.config import BRTI_RECALC_INTERVAL_SEC
+from engine.shadow import run_shadow_trading_loop
 from engine.streamer import run_market_streamer
 from feeds.brti_aggregator import run_brti_aggregator
 
@@ -21,6 +22,7 @@ async def _run_services() -> None:
     await asyncio.gather(
         asyncio.create_task(run_market_streamer()),
         asyncio.create_task(run_brti_aggregator(recalc_interval=BRTI_RECALC_INTERVAL_SEC)),
+        asyncio.create_task(run_shadow_trading_loop()),
     )
 
 

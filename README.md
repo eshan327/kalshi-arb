@@ -2,82 +2,141 @@
 
 ## Setup
 
-### Package Management
+### 1) Install dependencies
 
-- Use `uv` as your Python package manager (download if you don't have it)
-- `pyproject.toml` contains all project dependencies
-- Running `uv sync` will give you the needed dependencies ez
-- Use `uv add [name]` if you need a new package (will update the `.toml`)
+- Install `uv` if needed.
+- Run `uv sync` from repo root.
+- Add packages with `uv add <package_name>` when needed.
 
-### Environment Variables
+### 2) Create credentials
 
-Create a `.env` file in the repo root. Runtime config is loaded from `src/core/config.py` and credentials from `src/core/auth.py`.
+- Create demo keys on `https://demo.kalshi.co` and production keys on `https://kalshi.com`.
+- Store private keys in a gitignored folder, for example: `.secrets/demo.txt` and `.secrets/prod.txt`.
 
-Required variables:
+### 3) Create `.env`
 
-- `KALSHI_ENV` - `demo` or `prod` (default: `demo`)
-- `KALSHI_DEMO_KEY_ID` and `KALSHI_DEMO_KEY_PATH` - required when `KALSHI_ENV=demo`
-- `KALSHI_PROD_KEY_ID` and `KALSHI_PROD_KEY_PATH` - required when `KALSHI_ENV=prod`
+Create a `.env` in repo root. Runtime settings are loaded from `src/core/config.py`, and auth values are loaded from `src/core/auth.py`.
 
-Optional overrides:
+Bootstrap from the committed template:
 
-- `KALSHI_API_BASE_URL` - overrides REST base URL
-- `KALSHI_WS_BASE_URL` - overrides WS base URL
-- `KALSHI_MARKET_ASSET` - initial active asset (`BTC` or `ETH`, default `BTC`)
-- `KALSHI_MARKET_SELECTION_STATE_PATH` - persisted market-selection state path (default `.runtime/market_selection.json`)
+```bash
+cp .env.example .env
+```
 
-Notes:
+Template source: `.env.example`
 
-- Relative key paths are resolved from the repo root (not shell cwd).
-- Only the credential pair matching `KALSHI_ENV` is used at runtime.
-
-Example `.env`:
+Recommended `.env` values:
 
 ```env
+# -----------------------------
+# Required auth/env
+# -----------------------------
 KALSHI_ENV=demo
 
-# demo credentials (used when KALSHI_ENV=demo)
+# used when KALSHI_ENV=demo
 KALSHI_DEMO_KEY_ID=demo_key_id_here
 KALSHI_DEMO_KEY_PATH=.secrets/demo.txt
 
-# production credentials (used when KALSHI_ENV=prod)
+# used when KALSHI_ENV=prod
 KALSHI_PROD_KEY_ID=prod_key_id_here
 KALSHI_PROD_KEY_PATH=.secrets/prod.txt
 
-# optional overrides
+# optional API/WS overrides
 # KALSHI_API_BASE_URL=https://demo-api.kalshi.co/trade-api/v2
 # KALSHI_WS_BASE_URL=wss://demo-api.kalshi.co/trade-api/ws/v2
-# KALSHI_MARKET_ASSET=BTC
-# KALSHI_MARKET_SELECTION_STATE_PATH=.runtime/market_selection.json
+
+# -----------------------------
+# Market selection defaults
+# -----------------------------
+KALSHI_MARKET_ASSET=BTC
+KALSHI_MARKET_SELECTION_STATE_PATH=.runtime/market_selection.json
+
+# -----------------------------
+# Execution gate defaults
+# -----------------------------
+# observe | paper | live
+KALSHI_EXECUTION_MODE=paper
+KALSHI_EXECUTION_ENABLED=true
+KALSHI_EXECUTION_ALLOW_LIVE_IN_DEMO_ENV=false
+KALSHI_EXECUTION_LOOP_INTERVAL_SEC=0.25
+
+# -----------------------------
+# EV + paper defaults
+# -----------------------------
+KALSHI_EXECUTION_MIN_EDGE_CENTS=0.5
+KALSHI_PAPER_SIM_STARTING_CASH_CENTS=100000
+
+# -----------------------------
+# Simulation defaults
+# -----------------------------
+KALSHI_SIMULATION_OUTPUT_DIR=output
+KALSHI_SIMULATION_DEFAULT_N_PATHS=5000
+KALSHI_SIMULATION_HORIZON_SECONDS=900
+KALSHI_SIMULATION_DEFAULT_STEPS=900
 ```
 
-### API Setup
+Notes:
 
-- Create demo keys at `https://demo.kalshi.co` and production keys at `https://kalshi.com`.
-- Store private keys in a gitignored folder (for example: `.secrets/demo.txt`, `.secrets/prod.txt`).
-- Put the matching key IDs and paths in `.env`.
-- Start the app with `uv run src/main.py`; startup validates auth with a balance check.
+- Relative key paths are resolved from repo root.
+- Only the credential pair for the active `KALSHI_ENV` is used.
+- `KALSHI_EXECUTION_MODE` is the environment gate. UI/API can toggle `observe/paper` dynamically, but `live` is only effective when env mode is also `live`.
 
-### Web Dashboard
+### 4) Run the app
 
-- Run `uv run src/main.py` from repo root and open `http://127.0.0.1:5000`.
-- Startup launches both background services:
-  - Kalshi market streamer (`engine/streamer.py`)
-  - Synthetic index aggregator (`feeds/brti_aggregator.py`)
-- Dashboard/API endpoints:
-  - `GET /` - dashboard UI
-  - `GET /api/state` - deterministic payload with orderbook, pricing, microstructure, market metadata, and diagnostics
-  - `GET /api/market-selection` - active/requested asset state
-  - `POST /api/market-selection` - queue BTC/ETH switch (applies on market rotation)
-  - `GET /api/ws-log`, `GET /api/top10-impact`, `GET /api/reconciliation-log`, `GET /api/brti-ticks`, `GET /api/brti-ws-log`
-- Current dashboard modules (`src/ui/static/dashboard/`):
-  - `app.js` adaptive poll scheduling + page orchestration
-  - `asset_selection.js` BTC/ETH selection UX
-  - `charts.js` index + moving-average charts
-  - `renderers.js` orderbook and pricing/microstructure rendering
-  - `logs.js` verification stream fetching/rendering
-  - `format.js` shared formatting helpers
-- Polling behavior is visibility-aware and details-panel-aware to reduce unnecessary load.
+- Start with `uv run src/main.py`.
+- Open `http://127.0.0.1:5000`.
+- Startup validates auth and launches background services:
+  - market streamer
+  - synthetic index aggregator
+  - shadow execution loop
+
+### 5) Operator checklist (what to do on your end)
+
+1. Start app and confirm no auth failure on boot.
+2. Open dashboard and verify state is updating.
+3. Go to Settings tab and click Save Settings once.
+4. Confirm mode behavior in runtime status:
+   - requested mode is what you selected
+   - effective mode respects env gate for live
+5. In paper mode, wait for a signal/fill cycle and verify:
+   - runtime transitions to `paper_filled` or a clear rejection reason
+   - paper ledger equity/unrealized updates
+6. Optionally reset ledger with Reset Paper Ledger button.
+7. Switch to Simulation tab and click Generate Monte Carlo.
+8. Verify interactive charts render and PNG links open.
+9. Confirm generated artifacts are written under `output/`.
+10. If preparing live execution, set `KALSHI_EXECUTION_MODE=live`, restart app, then set mode to live in Settings.
+
+### API endpoints
+
+Core:
+
+- `GET /` dashboard UI
+- `GET /api/state` deterministic aggregate state
+- `GET /api/market-selection`
+- `POST /api/market-selection`
+
+Logs:
+
+- `GET /api/ws-log`
+- `GET /api/top10-impact`
+- `GET /api/reconciliation-log`
+- `GET /api/brti-ticks`
+- `GET /api/brti-ws-log`
+
+Shadow execution + settings:
+
+- `GET /api/settings`
+- `POST /api/settings`
+- `GET /api/shadow/runtime`
+- `GET /api/shadow/events`
+- `POST /api/shadow/ledger/reset`
+
+Simulation:
+
+- `POST /api/simulation/generate`
+- `GET /api/simulation/latest`
+- `GET /output/<path:artifact_path>`
 
 ---
 
@@ -90,11 +149,13 @@ src/
 │   ├── asset_context.py        # active profile context helpers
 │   ├── auth.py                 # Kalshi REST/WS auth + key loading
 │   ├── config.py               # env + runtime defaults
+│   ├── market_metadata.py      # strike extraction helpers
 │   ├── market_profiles.py      # BTC/ETH profile registry
 │   ├── market_selection.py     # persisted active/requested switch state
 │   └── settlement.py           # settlement metadata helpers
 ├── data/
 │   ├── kalshi_rest.py          # markets/orderbook REST calls
+│   ├── kalshi_trading.py       # order placement adapter
 │   └── kalshi_ws.py            # authenticated WS subscription stream
 ├── engine/
 │   ├── asian_pricer.py         # Asian-style TWAP probability model
@@ -107,6 +168,20 @@ src/
 │   ├── streamer.py             # market stream runtime + rotation/re-sync
 │   ├── twap.py                 # settlement-window tracking + req avg
 │   ├── vol_estimator.py        # realized sigma estimation
+│   ├── shadow/
+│   │   ├── runtime.py          # strict mode execution loop (observe/paper/live)
+│   │   ├── signal_engine.py    # EV-primary, fee-aware trade signals
+│   │   ├── fee_model.py        # taker-fee and EV computations
+│   │   ├── fill_model.py       # paper fills crossing live spread + slippage
+│   │   ├── paper_ledger.py     # ephemeral paper PnL/accounting
+│   │   ├── settings_state.py   # dynamic mutable settings state
+│   │   ├── events.py           # event payload builder
+│   │   └── models.py
+│   ├── simulation/
+│   │   ├── gbm_engine.py       # GBM path generation
+│   │   ├── replay.py           # Monte Carlo replay through pricing assumptions
+│   │   ├── visuals.py          # Plotly HTML + PNG exports
+│   │   └── service.py          # simulation orchestrator + payload cache
 │   ├── pricing/
 │   │   └── pipeline.py         # pricing pipeline stages
 │   ├── market_stream/
@@ -140,6 +215,8 @@ src/
     ├── routes/
     │   ├── log_routes.py
     │   ├── selection_routes.py
+    │   ├── settings_routes.py
+    │   ├── simulation_routes.py
     │   └── state_routes.py
     ├── services/
     │   ├── dashboard_state_service.py
@@ -150,6 +227,8 @@ src/
     │   ├── charts.js
     │   ├── format.js
     │   ├── logs.js
+    │   ├── settings.js
+    │   ├── simulation.js
     │   └── renderers.js
     ├── templates/dashboard.html
     └── web_app.py
@@ -188,35 +267,21 @@ Kalshi 15m BTC/ETH contracts settle on a final-minute benchmark average (BRTI/ET
 
 ---
 
-## Roadmap
+## Status (May 2026)
 
-### Current State (April 2026)
+### Implemented
 
-- Runtime architecture is modular and live:
-  - Kalshi market stream + reconstructed YES/NO L2 orderbook
-  - Multi-exchange synthetic index stream (Coinbase/Kraken/Gemini/Bitstamp/Paxos)
-  - Pricing pipeline (`P(model)`) + microstructure signal (`P(book)`) exposed in API/dashboard
-- Multi-asset support is active (`BTC`, `ETH`) with queued market switching that applies on market rotation.
-- Dashboard/API payloads are deterministic via explicit contracts in `src/ui/contracts.py`.
-- Legacy compatibility layers were removed in favor of direct state modules and adapter classes.
+- Strict execution-mode runtime (`observe`, `paper`, `live`) with environment-gated live behavior.
+- EV-primary signal engine that emits only when model-vs-market edge remains positive after taker-fee adjustment.
+- No default hard liquidity gate; optional `P(book)` hard gate can be enabled dynamically.
+- Realistic paper fill model that crosses live spread and applies slippage ticks.
+- Ephemeral paper ledger for open positions, average entry, realized/unrealized PnL, equity curve.
+- Dynamic settings API (`POST /api/settings`) and Settings panel in dashboard.
+- Monte Carlo simulation engine (GBM + replay), Plotly interactive charts, and PNG artifact export under `output/`.
+- Simulation tab in dashboard with manual generation and latest-run loading.
+- Initial tests for settings-mode resolution, EV signal thresholding, and replay metrics contract.
 
-### Near-Term Milestones
+### Open work
 
-1. Signal policy layer
-  - Define explicit trade policy from `P(model)`, `P(book)`, fees, and risk buffers.
-2. Simulation layer
-  - Add a local paper simulator/backtester using reconstructed orderbook liquidity and slippage.
-3. Risk and execution gate
-  - Reintroduce execution only behind hard risk controls and kill-switches.
-4. Test coverage and quality gates
-  - Add unit/integration tests for stream lifecycle, pricing invariants, and API contracts.
-5. Production hardening
-  - Service orchestration, persistence strategy, and monitoring/alerting for unattended runtime.
-
-### What's Left
-
-- No live order placement module is currently present (intentional during refactor/cleanup).
-- No dedicated signal combiner module yet (`engine/signal.py` equivalent still pending).
-- No local paper-trading simulator module yet.
-- No automated test suite in-repo yet for streamer/pricing/dashboard payload contracts.
-- No production deployment package (process supervision, metrics export, alerting, runbook).
+- Expand unit/integration coverage around runtime event sequencing and ledger settlement edge-cases.
+- Add richer production hardening: process supervision, alerting, and persistence policy for long unattended runs.

@@ -6,12 +6,14 @@ from core.asset_context import get_active_asset_context
 from core.market_selection import get_market_selection_state, request_asset_switch
 from engine.book_microstructure import get_last_p_book_snapshot
 from engine.live_pricing import compute_live_pricing_snapshot
+from engine.shadow import get_shadow_runtime_snapshot, get_shadow_settings_snapshot
 from engine.streamer import (
     get_live_market_info,
     get_live_orderbook_snapshot,
     get_ws_message_log_size,
     get_ws_processing_stats,
 )
+from engine.simulation import get_latest_simulation_payload
 from feeds.brti_aggregator import get_brti_settlement_proxy, get_brti_state, get_brti_ws_stats
 from ui.contracts import (
     MARKET_SELECTION_PAYLOAD_KEYS,
@@ -55,6 +57,15 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         close_time_iso=close_iso,
     )
     microstructure = get_last_p_book_snapshot()
+    shadow_runtime = get_shadow_runtime_snapshot()
+    shadow_settings = get_shadow_settings_snapshot()
+
+    simulation_latest = get_latest_simulation_payload()
+    simulation_summary = {
+        "ok": bool(simulation_latest.get("ok")),
+        "generated_ts": simulation_latest.get("generated_ts"),
+        "metrics": simulation_latest.get("metrics") if isinstance(simulation_latest.get("metrics"), dict) else {},
+    }
 
     payload = {
         "orderbook": snapshot,
@@ -77,6 +88,9 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         "suggested_strike": suggested_strike,
         "pricing": pricing,
         "microstructure": microstructure,
+        "shadow_settings": shadow_settings,
+        "shadow_runtime": shadow_runtime,
+        "simulation_summary": simulation_summary,
     }
     return enforce_payload_contract(payload, STATE_PAYLOAD_KEYS)
 

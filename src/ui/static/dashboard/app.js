@@ -169,6 +169,13 @@
       `Gemini messages: ${b.gemini_received ?? "n/a"} | Bitstamp messages: ${b.bitstamp_received ?? "n/a"} | Paxos messages: ${b.paxos_received ?? "n/a"}<br>` +
       `Coinbase parsed: ${b.coinbase_parsed ?? "n/a"} | Kraken parsed: ${b.kraken_parsed ?? "n/a"} | Gemini parsed: ${b.gemini_parsed ?? "n/a"}<br>` +
       `Bitstamp parsed: ${b.bitstamp_parsed ?? "n/a"} | Paxos parsed: ${b.paxos_parsed ?? "n/a"}`;
+
+    if (window.DashboardSettings && typeof window.DashboardSettings.onState === "function") {
+      window.DashboardSettings.onState(state);
+    }
+    if (window.DashboardSimulation && typeof window.DashboardSimulation.onState === "function") {
+      window.DashboardSimulation.onState(state);
+    }
   }
 
   const detailsRefreshers = {
