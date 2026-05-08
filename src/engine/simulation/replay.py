@@ -20,6 +20,28 @@ def _max_drawdown_pct(equity_values: np.ndarray) -> float:
     return float(np.max(drawdowns)) if drawdowns.size else 0.0
 
 
+def _decision_time_seconds(rng: np.random.Generator, horizon_seconds: int) -> int:
+    horizon = max(60, int(horizon_seconds))
+
+    # Requested behavior for 15-minute contracts: choose a decision point in minute 5..13.
+    if horizon >= 13 * 60:
+        low = 5 * 60
+        high = min(13 * 60, horizon - 60)
+    else:
+        low = max(20, int(round(horizon * 0.33)))
+        high = max(low + 1, min(horizon - 20, int(round(horizon * 0.86))))
+
+    if high <= low:
+        return max(1, min(horizon - 1, horizon // 2))
+    return int(rng.integers(low, high + 1))
+
+
+def _simulate_market_yes_prob(rng: np.random.Generator, p_model: float) -> float:
+    # Creates realistic market disagreement around model fair value.
+    shift = float(rng.normal(loc=0.0, scale=0.06))
+    return float(np.clip(p_model + shift, 0.02, 0.98))
+
+
 def run_monte_carlo_replay(
     paths: np.ndarray,
     *,
@@ -56,32 +78,40 @@ def run_monte_carlo_replay(
     trade_returns: list[float] = []
     model_probs: list[float] = []
     market_probs: list[float] = []
+    decision_times_sec: list[int] = []
+    pnl_samples_cents: list[float] = []
 
     total_trades = 0
     wins = 0
+    losses = 0
 
-    inefficiency_samples = rng.normal(loc=min_edge + 0.9, scale=0.55, size=n_paths)
+    n_steps = max(1, int(paths.shape[1] - 1))
+    seconds_per_step = float(horizon_seconds) / float(n_steps)
+    settlement_steps = max(2, int(round(float(settlement_window_seconds) / max(seconds_per_step, 1e-6))))
 
     for idx in range(n_paths):
         path = paths[idx]
-        s0 = float(path[0])
+        decision_sec = _decision_time_seconds(rng, int(horizon_seconds))
+        decision_idx = int(round((float(decision_sec) / float(horizon_seconds)) * float(n_steps)))
+        decision_idx = max(1, min(n_steps - 1, decision_idx))
+
+        spot_decision = float(path[decision_idx])
+        remaining_seconds = max(60.0, float(horizon_seconds) - float(decision_sec))
 
         pricer = prob_levy_tw_binary(
-            S0=s0,
+            S0=spot_decision,
             strike=strike,
             sigma_annual=sigma,
-            seconds_to_expiry=float(horizon_seconds),
+            seconds_to_expiry=remaining_seconds,
             n_fixes=max(10, int(settlement_window_seconds)),
         )
         p_model = float(pricer.p_model)
+        decision_times_sec.append(int(decision_sec))
 
-        ineff = float(inefficiency_samples[idx])
-        if p_model >= 0.5:
-            yes_ask = _clip_price((p_model * 100.0) - ineff)
-            no_ask = _clip_price((1.0 - p_model) * 100.0 + 0.35)
-        else:
-            no_ask = _clip_price((1.0 - p_model) * 100.0 - ineff)
-            yes_ask = _clip_price(p_model * 100.0 + 0.35)
+        market_yes_prob = _simulate_market_yes_prob(rng, p_model)
+        spread_ticks = int(rng.integers(1, 5))
+        yes_ask = _clip_price((market_yes_prob * 100.0) + (spread_ticks / 2.0))
+        no_ask = _clip_price(((1.0 - market_yes_prob) * 100.0) + (spread_ticks / 2.0))
 
         effective_yes = _clip_price(float(yes_ask) + float(slip_ticks))
         effective_no = _clip_price(float(no_ask) + float(slip_ticks))
@@ -118,7 +148,7 @@ def run_monte_carlo_replay(
             equity_curve_cents.append(bankroll_cents)
             continue
 
-        settlement_tail = path[-max(2, int(settlement_window_seconds)):]
+        settlement_tail = path[-settlement_steps:]
         settlement_avg = float(np.mean(settlement_tail))
         yes_wins = settlement_avg >= strike
 
@@ -133,10 +163,13 @@ def run_monte_carlo_replay(
         total_trades += 1
         if trade_pnl > 0:
             wins += 1
+        elif trade_pnl < 0:
+            losses += 1
 
         edge_samples.append(edge)
         model_probs.append(p_model)
         market_probs.append(market_prob)
+        pnl_samples_cents.append(trade_pnl)
 
         notional = float(contracts) * float(entry_price)
         if notional > 0:
@@ -153,11 +186,15 @@ def run_monte_carlo_replay(
     sharpe = (mean_return / std_return) * (len(trade_returns) ** 0.5) if std_return > 1e-12 else 0.0
 
     metrics = {
+        "total_markets_evaluated": int(n_paths),
         "total_trades_executed": int(total_trades),
+        "trade_participation_pct": round((float(total_trades) / float(n_paths)) * 100.0, 4),
         "win_rate_pct": round((float(wins) / float(total_trades) * 100.0) if total_trades > 0 else 0.0, 4),
+        "loss_rate_pct": round((float(losses) / float(total_trades) * 100.0) if total_trades > 0 else 0.0, 4),
         "average_edge_captured_cents": round(float(np.mean(edge_samples)) if edge_samples else 0.0, 6),
         "max_drawdown_pct": round(_max_drawdown_pct(equity_np) * 100.0, 4),
         "sharpe_ratio": round(float(sharpe), 6),
+        "average_decision_time_min": round((float(np.mean(decision_times_sec)) / 60.0) if decision_times_sec else 0.0, 4),
         "ending_bankroll_usd": round(float(bankroll_cents) / 100.0, 6),
         "starting_bankroll_usd": round(float(equity_np[0]) / 100.0, 6),
     }
@@ -169,4 +206,6 @@ def run_monte_carlo_replay(
         "edge_samples_cents": [float(x) for x in edge_samples],
         "model_probs": [float(x) for x in model_probs],
         "market_probs": [float(x) for x in market_probs],
+        "decision_time_seconds": [int(x) for x in decision_times_sec],
+        "trade_pnl_cents": [float(x) for x in pnl_samples_cents],
     }

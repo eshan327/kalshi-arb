@@ -25,6 +25,8 @@ STATE_PAYLOAD_KEYS: tuple[str, ...] = (
     "microstructure",
     "shadow_settings",
     "shadow_runtime",
+    "paper_ledger",
+    "signal_monologue",
     "simulation_summary",
 )
 

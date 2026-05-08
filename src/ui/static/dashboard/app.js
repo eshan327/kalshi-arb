@@ -176,6 +176,22 @@
     if (window.DashboardSimulation && typeof window.DashboardSimulation.onState === "function") {
       window.DashboardSimulation.onState(state);
     }
+
+    const monologue = state.signal_monologue || state.shadow_runtime?.signal_monologue || {};
+    const ticker = document.getElementById("signalIntentTicker");
+    if (ticker && monologue.action_intent) {
+      ticker.textContent = String(monologue.action_intent);
+    }
+
+    const ledger = state.paper_ledger || state.shadow_runtime?.paper_ledger || {};
+    const liveLedgerSummary = document.getElementById("liveLedgerSummary");
+    if (liveLedgerSummary && ledger) {
+      const cash = Number(ledger.cash_cents || 0) / 100;
+      const equity = Number(ledger.equity_cents || 0) / 100;
+      const unrealized = Number(ledger.unrealized_pnl_cents || 0) / 100;
+      liveLedgerSummary.textContent =
+        `Cash: $${cash.toFixed(2)} | Equity: $${equity.toFixed(2)} | Unrealized: $${unrealized.toFixed(2)}`;
+    }
   }
 
   const detailsRefreshers = {

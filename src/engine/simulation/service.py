@@ -121,6 +121,7 @@ def run_monte_carlo_simulation(overrides: dict[str, Any] | None = None) -> dict[
 
     gbm_config = GBMConfig(
         start_price=float(inputs["start_price"]),
+        strike_price=float(inputs["strike_usd"]),
         sigma_annual=max(0.01, float(inputs["sigma_annual"])),
         horizon_seconds=int(inputs["horizon_seconds"]),
         n_paths=int(inputs["n_paths"]),

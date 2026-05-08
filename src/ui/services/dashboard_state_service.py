@@ -59,6 +59,10 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
     microstructure = get_last_p_book_snapshot()
     shadow_runtime = get_shadow_runtime_snapshot()
     shadow_settings = get_shadow_settings_snapshot()
+    paper_ledger = shadow_runtime.get("paper_ledger") if isinstance(shadow_runtime.get("paper_ledger"), dict) else {}
+    signal_monologue = (
+        shadow_runtime.get("signal_monologue") if isinstance(shadow_runtime.get("signal_monologue"), dict) else {}
+    )
 
     simulation_latest = get_latest_simulation_payload()
     simulation_summary = {
@@ -90,6 +94,8 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         "microstructure": microstructure,
         "shadow_settings": shadow_settings,
         "shadow_runtime": shadow_runtime,
+        "paper_ledger": paper_ledger,
+        "signal_monologue": signal_monologue,
         "simulation_summary": simulation_summary,
     }
     return enforce_payload_contract(payload, STATE_PAYLOAD_KEYS)

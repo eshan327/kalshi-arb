@@ -57,7 +57,7 @@
     const pbookGate = byId("settingPbookGate");
 
     if (mode) mode.value = settings.execution_mode || "observe";
-    if (minEdge) minEdge.value = String(settings.min_edge_cents ?? 0.5);
+    if (minEdge) minEdge.value = String(settings.min_edge_cents ?? 0.1);
     if (slippage) slippage.value = String(settings.slippage_ticks ?? 1);
     if (tradePct) tradePct.value = String(settings.trade_size_pct ?? 0.05);
     if (maxPosition) maxPosition.value = String(settings.max_position_usd ?? 50);
@@ -71,7 +71,7 @@
   function collectSettingsFromForm() {
     return {
       execution_mode: (byId("settingExecutionMode")?.value || "observe").toLowerCase(),
-      min_edge_cents: asNumber(byId("settingMinEdge")?.value, 0.5),
+      min_edge_cents: asNumber(byId("settingMinEdge")?.value, 0.1),
       slippage_ticks: Math.max(0, Math.round(asNumber(byId("settingSlippage")?.value, 1))),
       trade_size_pct: asNumber(byId("settingTradePct")?.value, 0.05),
       max_position_usd: asNumber(byId("settingMaxPosition")?.value, 50),
@@ -82,6 +82,96 @@
       levy_responsiveness: asNumber(byId("settingLevyResponsiveness")?.value, 1.35),
       use_p_book_hard_gate: (byId("settingPbookGate")?.value || "false") === "true",
     };
+  }
+
+  function formatCents(cents) {
+    if (typeof cents !== "number" || !Number.isFinite(cents)) {
+      return "--";
+    }
+    return `${cents.toFixed(2)}c`;
+  }
+
+  function formatProbability(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return "--";
+    }
+    return `${(value * 100).toFixed(2)}%`;
+  }
+
+  function renderSignalMonologue(monologue) {
+    const ticker = byId("signalIntentTicker");
+    if (ticker) {
+      ticker.textContent =
+        monologue?.action_intent || monologue?.decision_reason || "Signal engine evaluating market...";
+    }
+
+    const fairValue = byId("signalFairValue");
+    if (fairValue) {
+      fairValue.textContent = formatCents(Number(monologue?.model_fair_value_cents));
+    }
+
+    const implied = byId("signalImpliedProb");
+    if (implied) {
+      implied.textContent = formatProbability(Number(monologue?.market_implied_probability));
+    }
+
+    const lean = byId("signalLeanSide");
+    if (lean) {
+      lean.textContent = (monologue?.lean_side || "--").toString().toUpperCase();
+    }
+
+    const edge = byId("signalBestEdge");
+    if (edge) {
+      edge.textContent = formatCents(Number(monologue?.best_edge_cents));
+    }
+  }
+
+  function renderLedger(ledger) {
+    const summary = byId("liveLedgerSummary");
+    const table = byId("liveLedgerTable");
+    const positions = Array.isArray(ledger?.open_positions) ? ledger.open_positions : [];
+
+    const cash = Number(ledger?.cash_cents || 0) / 100;
+    const equity = Number(ledger?.equity_cents || 0) / 100;
+    const realized = Number(ledger?.realized_pnl_cents || 0) / 100;
+    const unrealized = Number(ledger?.unrealized_pnl_cents || 0) / 100;
+    const fills = Number(ledger?.fills_total || 0);
+
+    if (summary) {
+      summary.textContent =
+        `Cash: $${cash.toFixed(2)} | Equity: $${equity.toFixed(2)} | ` +
+        `Realized: $${realized.toFixed(2)} | Unrealized: $${unrealized.toFixed(2)} | Fills: ${fills}`;
+    }
+
+    if (!table) {
+      return;
+    }
+    const body = table.querySelector("tbody");
+    if (!body) {
+      return;
+    }
+
+    if (!positions.length) {
+      body.innerHTML = "<tr><td colspan='6'>No open positions.</td></tr>";
+      return;
+    }
+
+    body.innerHTML = positions
+      .map((pos) => {
+        const upnl = Number(pos?.unrealized_pnl_cents || 0) / 100;
+        const pnlClass = upnl >= 0 ? "pos-up" : "pos-down";
+        return (
+          `<tr>` +
+          `<td>${pos?.market_ticker || "n/a"}</td>` +
+          `<td>${(pos?.side || "").toString().toUpperCase()}</td>` +
+          `<td>${Number(pos?.contracts || 0)}</td>` +
+          `<td>${Number(pos?.avg_entry_cents || 0).toFixed(2)}c</td>` +
+          `<td>${Number(pos?.mark_cents || 0).toFixed(2)}c</td>` +
+          `<td class='${pnlClass}'>$${upnl.toFixed(2)}</td>` +
+          `</tr>`
+        );
+      })
+      .join("");
   }
 
   async function loadSettings() {
@@ -159,7 +249,8 @@
   function onState(state) {
     const runtime = state?.shadow_runtime || {};
     const settings = state?.shadow_settings || {};
-    const ledger = runtime?.paper_ledger || {};
+    const ledger = state?.paper_ledger || runtime?.paper_ledger || {};
+    const monologue = state?.signal_monologue || runtime?.signal_monologue || {};
 
     const runtimeStatus = byId("runtimeStatus");
     if (runtimeStatus) {
@@ -174,6 +265,9 @@
         `Mode req/eff: ${modeReq}/${modeEff} (${modeReason}) | Runtime: ${status} | Market: ${ticker} | ` +
         `Equity: $${equity.toFixed(2)} | Unrealized: $${unrealized.toFixed(2)}`;
     }
+
+    renderSignalMonologue(monologue);
+    renderLedger(ledger);
   }
 
   function init() {

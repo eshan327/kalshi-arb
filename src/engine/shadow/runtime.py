@@ -48,6 +48,15 @@ _runtime_state: dict[str, Any] = {
     "settings": get_shadow_settings_snapshot(),
     "last_signal": None,
     "last_event": None,
+    "signal_monologue": {
+        "ts": time.time(),
+        "action_intent": "Booting signal engine...",
+        "model_fair_value_cents": None,
+        "model_probability": None,
+        "market_implied_probability": None,
+        "lean_side": None,
+        "best_edge_cents": None,
+    },
     "paper_ledger": _ledger.snapshot(curve_limit=300),
 }
 
@@ -82,6 +91,86 @@ def _signal_payload(signal: Any) -> dict[str, Any] | None:
         "reason": signal.reason,
         "diagnostics": dict(signal.diagnostics),
     }
+
+
+def _build_signal_monologue(
+    *,
+    signal: Any,
+    decision_reason: str,
+    pricing: dict[str, Any] | None,
+    diagnostics: dict[str, Any] | None,
+    settings: Any,
+    now_ts: float,
+) -> dict[str, Any]:
+    diag = diagnostics if isinstance(diagnostics, dict) else {}
+    pricing_dict = pricing if isinstance(pricing, dict) else {}
+
+    p_model = _safe_float(pricing_dict.get("p_model"))
+    fair_value = (float(p_model) * 100.0) if p_model is not None else None
+
+    edge_yes = _safe_float(diag.get("edge_yes_cents"))
+    edge_no = _safe_float(diag.get("edge_no_cents"))
+    yes_ask = _safe_float(diag.get("yes_ask_cents"))
+    no_ask = _safe_float(diag.get("no_ask_cents"))
+
+    if edge_yes is None and edge_no is None and signal is not None:
+        lean_side = str(signal.side)
+        best_edge = _safe_float(getattr(signal, "edge_cents", None))
+    elif edge_yes is not None and (edge_no is None or edge_yes >= edge_no):
+        lean_side = "yes"
+        best_edge = edge_yes
+    elif edge_no is not None:
+        lean_side = "no"
+        best_edge = edge_no
+    else:
+        lean_side = None
+        best_edge = None
+
+    implied_prob = None
+    if lean_side == "yes" and yes_ask is not None:
+        implied_prob = float(yes_ask) / 100.0
+    elif lean_side == "no" and no_ask is not None:
+        implied_prob = float(no_ask) / 100.0
+
+    min_edge = _safe_float(getattr(settings, "min_edge_cents", None)) or 0.0
+
+    if signal is not None:
+        base_intent = f"EV favorable, attempting fill on {str(signal.side).upper()}."
+    elif decision_reason == "edge_below_threshold" and lean_side is not None and best_edge is not None:
+        base_intent = (
+            f"Leans {lean_side.upper()}, but edge too small "
+            f"({best_edge:.3f}c < {float(min_edge):.3f}c)."
+        )
+    elif decision_reason == "pricing_not_ready":
+        base_intent = "Pricing not ready yet; waiting for valid model inputs."
+    elif decision_reason == "missing_best_quotes":
+        base_intent = "Model ready, waiting for top-of-book quotes."
+    elif decision_reason == "strategy_disabled":
+        base_intent = "Strategy disabled by settings."
+    elif decision_reason and lean_side is not None:
+        base_intent = f"Leans {lean_side.upper()}, but blocked: {decision_reason}."
+    elif decision_reason:
+        base_intent = f"Waiting: {decision_reason}."
+    else:
+        base_intent = "Evaluating signal..."
+
+    return {
+        "ts": float(now_ts),
+        "action_intent": base_intent,
+        "decision_reason": decision_reason,
+        "model_fair_value_cents": None if fair_value is None else round(float(fair_value), 6),
+        "model_probability": None if p_model is None else round(float(p_model), 8),
+        "market_implied_probability": None if implied_prob is None else round(float(implied_prob), 8),
+        "lean_side": lean_side,
+        "best_edge_cents": None if best_edge is None else round(float(best_edge), 6),
+    }
+
+
+def _monologue_with_intent(monologue: dict[str, Any], intent_text: str, *, now_ts: float) -> dict[str, Any]:
+    out = dict(monologue)
+    out["ts"] = float(now_ts)
+    out["action_intent"] = str(intent_text)
+    return out
 
 
 def _emit_event(event: dict[str, Any]) -> None:
@@ -170,12 +259,23 @@ async def _run_single_cycle() -> None:
     close_time_iso = market_info.get("close_time") if isinstance(market_info.get("close_time"), str) else None
 
     if market_ticker is None:
+        monologue = {
+            "ts": cycle_ts,
+            "action_intent": "Waiting for active market ticker.",
+            "decision_reason": "no_active_market",
+            "model_fair_value_cents": None,
+            "model_probability": None,
+            "market_implied_probability": None,
+            "lean_side": None,
+            "best_edge_cents": None,
+        }
         _set_state(
             status="waiting_market",
             last_reason="no_active_market",
             requested_mode=settings.execution_mode,
             effective_mode=effective_mode,
             settings=settings_snapshot,
+            signal_monologue=monologue,
             paper_ledger=_ledger.snapshot(curve_limit=300),
         )
         return
@@ -209,6 +309,14 @@ async def _run_single_cycle() -> None:
     )
 
     signal_payload = _signal_payload(signal)
+    monologue = _build_signal_monologue(
+        signal=signal,
+        decision_reason=decision_reason,
+        pricing=pricing,
+        diagnostics=diagnostics,
+        settings=settings,
+        now_ts=cycle_ts,
+    )
 
     if signal is None:
         _set_state(
@@ -220,6 +328,7 @@ async def _run_single_cycle() -> None:
             current_market_ticker=market_ticker,
             settings=settings_snapshot,
             last_signal=None,
+            signal_monologue=monologue,
             paper_ledger=_ledger.snapshot(curve_limit=300),
             pricing=pricing,
             diagnostics=diagnostics,
@@ -227,6 +336,11 @@ async def _run_single_cycle() -> None:
         return
 
     if effective_mode == "observe":
+        observe_monologue = _monologue_with_intent(
+            monologue,
+            f"EV favorable, observe mode only. Would take {str(signal.side).upper()} @ {int(signal.quote_price_cents)}c.",
+            now_ts=cycle_ts,
+        )
         rejection = build_shadow_event(
             kind="rejection",
             reason="observe_mode_signal_only",
@@ -253,6 +367,7 @@ async def _run_single_cycle() -> None:
             current_market_ticker=market_ticker,
             settings=settings_snapshot,
             last_signal=signal_payload,
+            signal_monologue=observe_monologue,
             paper_ledger=_ledger.snapshot(curve_limit=300),
             pricing=pricing,
             diagnostics=diagnostics,
@@ -260,6 +375,11 @@ async def _run_single_cycle() -> None:
         return
 
     if effective_mode == "paper":
+        paper_attempt_monologue = _monologue_with_intent(
+            monologue,
+            f"EV favorable, attempting PAPER fill on {str(signal.side).upper()} @ {int(signal.quote_price_cents)}c.",
+            now_ts=cycle_ts,
+        )
         order_event = build_shadow_event(
             kind="order",
             reason="paper_order_submitted",
@@ -286,6 +406,11 @@ async def _run_single_cycle() -> None:
         )
 
         if not fill_quote.can_fill or fill_quote.fill_price_cents is None:
+            rejection_monologue = _monologue_with_intent(
+                paper_attempt_monologue,
+                f"EV favorable but PAPER fill rejected: {str(fill_quote.reason)}.",
+                now_ts=cycle_ts,
+            )
             rejection = build_shadow_event(
                 kind="rejection",
                 reason=fill_quote.reason,
@@ -312,6 +437,7 @@ async def _run_single_cycle() -> None:
                 current_market_ticker=market_ticker,
                 settings=settings_snapshot,
                 last_signal=signal_payload,
+                signal_monologue=rejection_monologue,
                 paper_ledger=_ledger.snapshot(curve_limit=300),
                 pricing=pricing,
                 diagnostics=diagnostics,
@@ -333,6 +459,11 @@ async def _run_single_cycle() -> None:
         )
 
         if fill_apply is None:
+            rejection_monologue = _monologue_with_intent(
+                paper_attempt_monologue,
+                "EV favorable but PAPER fill rejected: insufficient_cash.",
+                now_ts=cycle_ts,
+            )
             rejection = build_shadow_event(
                 kind="rejection",
                 reason="insufficient_cash",
@@ -355,12 +486,18 @@ async def _run_single_cycle() -> None:
                 current_market_ticker=market_ticker,
                 settings=settings_snapshot,
                 last_signal=signal_payload,
+                signal_monologue=rejection_monologue,
                 paper_ledger=_ledger.snapshot(curve_limit=300),
                 pricing=pricing,
                 diagnostics=diagnostics,
             )
             return
 
+        fill_monologue = _monologue_with_intent(
+            paper_attempt_monologue,
+            f"EV favorable, PAPER fill completed on {str(signal.side).upper()} @ {int(fill_quote.fill_price_cents)}c.",
+            now_ts=cycle_ts,
+        )
         fill_event = build_shadow_event(
             kind="fill",
             reason=fill_quote.reason,
@@ -392,6 +529,7 @@ async def _run_single_cycle() -> None:
             current_market_ticker=market_ticker,
             settings=settings_snapshot,
             last_signal=signal_payload,
+            signal_monologue=fill_monologue,
             paper_ledger=_ledger.snapshot(curve_limit=300),
             pricing=pricing,
             diagnostics=diagnostics,
@@ -400,6 +538,11 @@ async def _run_single_cycle() -> None:
 
     # effective_mode == live
     try:
+        live_attempt_monologue = _monologue_with_intent(
+            monologue,
+            f"EV favorable, submitting LIVE order on {str(signal.side).upper()} @ {int(signal.quote_price_cents)}c.",
+            now_ts=cycle_ts,
+        )
         placed = await asyncio.to_thread(
             place_limit_order,
             market_ticker=signal.market_ticker,
@@ -438,11 +581,17 @@ async def _run_single_cycle() -> None:
             current_market_ticker=market_ticker,
             settings=settings_snapshot,
             last_signal=signal_payload,
+            signal_monologue=live_attempt_monologue,
             paper_ledger=_ledger.snapshot(curve_limit=300),
             pricing=pricing,
             diagnostics=diagnostics,
         )
     except Exception as exc:  # pragma: no cover - network/api failure path
+        rejection_monologue = _monologue_with_intent(
+            monologue,
+            f"EV favorable but LIVE order failed: {str(exc)}",
+            now_ts=cycle_ts,
+        )
         rejection = build_shadow_event(
             kind="rejection",
             reason="live_order_failed",
@@ -467,6 +616,7 @@ async def _run_single_cycle() -> None:
             current_market_ticker=market_ticker,
             settings=settings_snapshot,
             last_signal=signal_payload,
+            signal_monologue=rejection_monologue,
             paper_ledger=_ledger.snapshot(curve_limit=300),
             pricing=pricing,
             diagnostics=diagnostics,
