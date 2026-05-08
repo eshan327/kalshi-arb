@@ -71,7 +71,7 @@
     });
   }
 
-  async function refreshBrtiTicks(limit = 200, options = {}) {
+  async function refreshBrtiTicks(limit = 200) {
     await refreshLogStream({
       endpoint: "brti-ticks",
       limit,
@@ -81,9 +81,6 @@
       },
       onRows: (rows) => {
         drawBrtiChart(rows, Number(window.__settlementWindowSeconds || 60));
-        if (typeof options.onRows === "function") {
-          options.onRows(rows);
-        }
       },
     });
   }
@@ -99,35 +96,11 @@
     });
   }
 
-  async function refreshExecutionEvents(limit = 200) {
-    await refreshLogStream({
-      endpoint: "execution-events",
-      limit,
-      elementId: "executionEvents",
-      formatRow: (row, ts) => {
-        return `${ts} | kind=${row.kind} | reason=${row.reason || ""} | side=${row.side || ""} | qty=${row.count || ""} | px=${row.quote_price_cents || ""} | edge=${row.edge_cents || ""}`;
-      },
-    });
-  }
-
-  async function refreshFillEvents(limit = 200) {
-    await refreshLogStream({
-      endpoint: "fill-events",
-      limit,
-      elementId: "fillEvents",
-      formatRow: (row, ts) => {
-        return `${ts} | fill=${row.fill_id || ""} | order=${row.order_id || ""} | ${row.action || ""}_${row.side || ""} | qty=${row.count || ""} | yes=${row.yes_price || ""} | no=${row.no_price || ""} | edge=${row.expected_edge_cents || ""}`;
-      },
-    });
-  }
-
   window.DashboardLogs = {
     refreshReconLog,
     refreshRawLog,
     refreshImpactLog,
     refreshBrtiTicks,
     refreshBrtiRawLog,
-    refreshExecutionEvents,
-    refreshFillEvents,
   };
 })();

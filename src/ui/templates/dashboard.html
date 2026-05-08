@@ -6,142 +6,71 @@
   <title>Kalshi Arb Dashboard</title>
   <style>
     :root {
-      --bg: #0b0f14;
-      --bg-grad-a: #102338;
-      --bg-grad-b: #0b0f14;
-      --card: #101823;
-      --card-alt: #121f2e;
-      --line: #28384d;
-      --text: #d9e3ef;
-      --muted: #8ca2be;
-      --ok: #4dd39b;
-      --warn: #ffbe62;
-      --danger: #f08d8d;
+      --bg: #0c1118;
+      --card: #141b25;
+      --line: #2a3647;
+      --text: #d8dfeb;
+      --muted: #93a6c4;
+      --ok: #4bd19a;
+      --warn: #ffcf72;
       --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       --sans: "Avenir Next", "Segoe UI", sans-serif;
     }
-
-    * { box-sizing: border-box; }
-
     body {
       margin: 0;
+      background: radial-gradient(70% 45% at 10% 0%, #1b2640 0%, var(--bg) 58%);
       color: var(--text);
       font-family: var(--sans);
-      background:
-        radial-gradient(60% 45% at 0% 0%, var(--bg-grad-a) 0%, transparent 60%),
-        radial-gradient(60% 50% at 100% 0%, #1d2e3f 0%, transparent 65%),
-        linear-gradient(180deg, var(--bg-grad-b) 0%, #090d12 100%);
-      min-height: 100vh;
     }
-
     .wrap {
-      max-width: 1320px;
-      margin: 18px auto 28px;
+      max-width: 1380px;
+      margin: 18px auto;
       padding: 0 14px;
       display: grid;
       gap: 14px;
-      grid-template-columns: 1fr;
+      grid-template-columns: 1.45fr 0.85fr;
     }
-
-    .hero {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      gap: 10px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: linear-gradient(145deg, #12233a 0%, #0f1826 100%);
-      padding: 14px;
-      box-shadow: 0 8px 26px rgba(0, 0, 0, 0.24);
-    }
-
-    .hero h1 {
-      margin: 0;
-      font-size: clamp(21px, 3vw, 30px);
-      letter-spacing: 0.3px;
-    }
-
-    .hero p {
-      margin: 4px 0 0;
-      color: var(--muted);
-      font-size: 13px;
-      font-family: var(--mono);
-    }
-
-    .status-tags {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-
-    .tag {
-      border: 1px solid #335076;
-      border-radius: 999px;
-      padding: 4px 10px;
-      font-size: 12px;
-      color: #adc5e2;
-      background: rgba(13, 25, 40, 0.75);
-      font-family: var(--mono);
-    }
-
     .card {
+      background: linear-gradient(180deg, #182230 0%, var(--card) 100%);
       border: 1px solid var(--line);
       border-radius: 14px;
-      background: linear-gradient(180deg, var(--card-alt) 0%, var(--card) 100%);
       padding: 14px;
-      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.22);
     }
-
-    h2, h3 {
-      margin: 0 0 10px;
-      letter-spacing: 0.2px;
+    h2, h3 { margin: 0 0 10px; }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
     }
-
     .asset-selector-row {
       display: flex;
       gap: 10px;
       align-items: center;
-      margin-bottom: 12px;
+      margin-bottom: 10px;
       flex-wrap: wrap;
     }
-
     .asset-select {
-      background: #0d1521;
+      background: #0f1724;
       color: var(--text);
-      border: 1px solid #314762;
+      border: 1px solid #31435e;
       border-radius: 8px;
-      padding: 5px 9px;
+      padding: 4px 8px;
       font-family: var(--mono);
       font-size: 12px;
     }
-
     .asset-status {
       font-family: var(--mono);
       font-size: 12px;
       color: var(--muted);
     }
-
-    .mono {
-      font-family: var(--mono);
-      color: var(--muted);
-    }
-
-    .summary-grid {
-      display: grid;
-      gap: 8px;
-      margin-bottom: 12px;
-      grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
-    }
-
     .summary-box {
-      border: 1px solid #2f425d;
+      border: 1px solid #31435e;
       border-radius: 10px;
       padding: 8px 10px;
-      background: #0f1722;
-      min-height: 64px;
+      background: #121a25;
     }
-
     .summary-label {
       font-size: 11px;
       letter-spacing: 0.3px;
@@ -149,91 +78,111 @@
       margin-bottom: 3px;
       font-family: var(--mono);
     }
-
     .summary-value {
       font-size: 14px;
       color: var(--text);
       font-family: var(--mono);
-      line-height: 1.4;
     }
-
     .ok { color: var(--ok); }
     .warn { color: var(--warn); }
-
-    .book-grid {
+    .grid2 {
       display: grid;
       gap: 10px;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      grid-template-columns: 1fr 1fr;
     }
-
     table {
       width: 100%;
       border-collapse: collapse;
       font-family: var(--mono);
       font-size: 12px;
     }
-
     th, td {
-      border-bottom: 1px solid #223246;
+      border-bottom: 1px solid #243143;
       padding: 5px 6px;
       text-align: right;
     }
-
     th:first-child, td:first-child { text-align: left; }
-
-    .index-hero {
-      margin-top: 8px;
+    .hero {
+      margin-top: 6px;
       font-family: var(--mono);
-      font-size: clamp(34px, 5.2vw, 56px);
-      color: #d7ffe5;
+      font-size: clamp(34px, 5.4vw, 58px);
+      color: #d4ffe2;
       line-height: 1;
     }
-
+    .mono { font-family: var(--mono); color: var(--muted); }
     .chart-wrap {
       margin-top: 10px;
-      border: 1px solid #24364d;
+      border: 1px solid #243143;
       border-radius: 10px;
-      background: #0c131d;
+      background: #0d1520;
       padding: 8px;
     }
-
     .chart-title {
-      margin: 0 0 6px;
       font-family: var(--mono);
       color: var(--muted);
       font-size: 12px;
+      margin: 0 0 6px;
     }
-
     #brtiChart,
-    #movingAvgChart,
-    #pnlChart,
-    #winRateChart,
-    #edgeChart,
-    #confidenceHist,
-    #timingChart,
-    #rejectionChart,
-    #makerTakerChart,
-    #latencyChart,
-    #spreadChart,
-    #windowFillChart {
+    #movingAvgChart {
       width: 100%;
+      height: 220px;
       display: block;
-      border-radius: 8px;
     }
-
+    details { margin-top: 10px; }
+    summary {
+      cursor: pointer;
+      font-family: var(--mono);
+      color: #9fb1cf;
+      margin-bottom: 6px;
+    }
+    .log {
+      max-height: 34vh;
+      overflow: auto;
+      background: #0b1119;
+      border: 1px solid #223044;
+      border-radius: 10px;
+      padding: 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      white-space: pre-wrap;
+    }
+    .badge {
+      display: inline-block;
+      border: 1px solid #31435e;
+      border-radius: 999px;
+      padding: 3px 10px;
+      margin-right: 6px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .meta-list {
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
     .phase3-bottom {
       margin-top: 16px;
       padding-top: 14px;
       border-top: 1px solid var(--line);
     }
-
-    .meta-list {
-      font-family: var(--mono);
-      font-size: 12px;
-      line-height: 1.6;
-      color: var(--muted);
+    .phase3-bottom h3 {
+      color: #b8d4f0;
     }
-
+    .phase3-readme {
+      margin-bottom: 14px;
+    }
+    .phase3-readme details {
+      margin-top: 0;
+    }
+    .phase3-readme summary {
+      color: #b8c9e8;
+    }
+    .phase3-readme .meta-list strong {
+      color: #d8e4f5;
+    }
     .viz-row {
       display: grid;
       grid-template-columns: 120px 1fr 72px;
@@ -243,15 +192,8 @@
       font-family: var(--mono);
       font-size: 12px;
     }
-
     .viz-label { color: var(--muted); }
-
-    .viz-pct {
-      text-align: right;
-      color: #a9e1ff;
-      font-weight: 600;
-    }
-
+    .viz-pct { text-align: right; color: #a8e6ff; font-weight: 600; }
     .viz-track {
       height: 22px;
       border-radius: 8px;
@@ -259,193 +201,50 @@
       border: 1px solid #2a3a52;
       overflow: hidden;
     }
-
     .viz-fill {
       height: 100%;
       border-radius: 7px;
       transition: width 0.25s ease;
       min-width: 0;
     }
-
-    .viz-fill-yes { background: linear-gradient(90deg, #1f5937, #3ecc7c); }
-    .viz-fill-no { background: linear-gradient(90deg, #75272b, #e46868); }
-    .viz-fill-neutral { background: linear-gradient(90deg, #3f4958, #7a8697); }
-    .viz-pct-yes { color: #7df1b1 !important; }
-    .viz-pct-no { color: #ffb0b0 !important; }
-    .viz-pct-neutral { color: #bcc6d4 !important; }
-
+    /* P(model) / P(book): green = YES (>50%), red = NO (<50%), gray = 50% */
+    .viz-fill-yes {
+      background: linear-gradient(90deg, #1a4d30, #3ecf7a);
+    }
+    .viz-fill-no {
+      background: linear-gradient(90deg, #6b1f24, #e85d5d);
+    }
+    .viz-fill-neutral {
+      background: linear-gradient(90deg, #3d4450, #7a8494);
+    }
+    .viz-pct-yes { color: #6ee7a8 !important; }
+    .viz-pct-no { color: #ff9a9a !important; }
+    .viz-pct-neutral { color: #b8c2d0 !important; }
     .inner-calc-pre {
-      max-height: 52vh;
+      max-height: 42vh;
       overflow: auto;
-      background: #0a1018;
-      border: 1px solid #213248;
+      background: #0b1119;
+      border: 1px solid #223044;
       border-radius: 10px;
       padding: 10px;
       font-family: var(--mono);
-      font-size: 11px;
+      font-size: 10px;
       line-height: 1.45;
       white-space: pre-wrap;
       word-break: break-word;
       color: #a8c0e0;
       margin: 0;
     }
-
-    details { margin-top: 10px; }
-
-    summary {
-      cursor: pointer;
-      font-family: var(--mono);
-      color: #a2b5d1;
-      margin-bottom: 6px;
-    }
-
-    .badge {
-      display: inline-block;
-      border: 1px solid #334d70;
-      border-radius: 999px;
-      padding: 3px 10px;
-      margin-right: 6px;
-      margin-bottom: 10px;
-      font-size: 12px;
-      color: #a6c1e1;
-      background: rgba(15, 26, 40, 0.7);
-    }
-
-    .verification-tabs {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-      border-bottom: 1px solid var(--line);
-      margin-bottom: 8px;
-      padding-bottom: 8px;
-    }
-
-    .log-tab {
-      border: 1px solid #30445f;
-      background: #0f1a28;
-      color: #a8b9d1;
-      border-radius: 8px;
-      padding: 6px 10px;
-      cursor: pointer;
-      font-size: 12px;
-      font-family: var(--mono);
-    }
-
-    .log-tab.active {
-      color: #e7f1ff;
-      border-color: #5a89ba;
-      background: #16283d;
-    }
-
-    .log-panel {
-      display: none;
-    }
-
-    .log-panel.active {
-      display: block;
-    }
-
-    .log {
-      max-height: 52vh;
-      overflow: auto;
-      background: #0a1119;
-      border: 1px solid #22364c;
-      border-radius: 10px;
-      padding: 10px;
-      font-family: var(--mono);
-      font-size: 11px;
-      white-space: pre-wrap;
-      line-height: 1.45;
-      margin: 0;
-    }
-
-    .export-controls {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-bottom: 10px;
-    }
-
-    .btn {
-      border: 1px solid #355172;
-      background: #102235;
-      color: #dbe8f8;
-      border-radius: 8px;
-      padding: 7px 12px;
-      cursor: pointer;
-      font-family: var(--mono);
-      font-size: 12px;
-    }
-
-    .btn:hover { background: #17314b; }
-
-    .export-status {
-      font-family: var(--mono);
-      font-size: 12px;
-      color: var(--muted);
-      min-height: 18px;
-      margin-bottom: 10px;
-    }
-
-    .session-list {
-      border: 1px solid #2d4159;
-      border-radius: 10px;
-      padding: 10px;
-      background: #0d1622;
-      display: none;
-    }
-
-    .session-list.visible { display: block; }
-
-    .session-item {
-      border-bottom: 1px solid #1f3046;
-      padding: 7px 0;
-      font-family: var(--mono);
-      font-size: 12px;
-      color: #b8c9df;
-    }
-
-    .session-item:last-child {
-      border-bottom: none;
-    }
-
-    .session-item .meta {
-      color: var(--muted);
-      font-size: 11px;
-    }
-
-    @media (max-width: 880px) {
-      .summary-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
-      .viz-row { grid-template-columns: 100px 1fr 66px; }
-      .log { max-height: 42vh; }
-    }
-
-    @media (max-width: 600px) {
-      .hero { padding: 12px; }
-      .card { padding: 12px; }
+    @media (max-width: 980px) {
+      .wrap { grid-template-columns: 1fr; }
       .summary-grid { grid-template-columns: 1fr; }
-      .book-grid { grid-template-columns: 1fr; }
-      .viz-row { grid-template-columns: 90px 1fr 62px; gap: 8px; }
-      .index-hero { font-size: clamp(28px, 12vw, 42px); }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <header class="hero">
-      <div>
-        <h1>Kalshi 15m Arb Control Center</h1>
-        <p>Live orderbook, model confidence, paper/live execution telemetry, and session exports.</p>
-      </div>
-      <div class="status-tags">
-        <span class="tag">Single Stream View</span>
-        <span class="tag">Paper/Live Runtime</span>
-        <span class="tag">Session Artifacts</span>
-      </div>
-    </header>
-
     <section class="card">
-      <h2>Market and Orderbook</h2>
+      <h2>Kalshi Reconstructed Orderbook</h2>
       <div class="asset-selector-row">
         <label class="mono" for="assetSelector">15m Market Asset</label>
         <select id="assetSelector" class="asset-select">
@@ -454,10 +253,9 @@
         </select>
         <span id="assetSelectorStatus" class="asset-status">Loading market selection...</span>
       </div>
-
       <div class="summary-grid" id="summary"></div>
 
-      <div class="book-grid">
+      <div class="grid2">
         <div>
           <h3>YES Top 10</h3>
           <table id="yesTable"></table>
@@ -469,37 +267,42 @@
       </div>
 
       <h3 style="margin-top:14px">Index Synthesized Price</h3>
-      <div id="brti" class="index-hero">--</div>
+      <div id="brti" class="hero">--</div>
       <div id="brtiMeta" class="mono"></div>
       <div id="settlementProxy" class="mono"></div>
       <div id="settlementRuleText" class="mono"></div>
 
       <div class="chart-wrap">
         <p class="chart-title">Index Spot</p>
-        <canvas id="brtiChart" data-height="230"></canvas>
+        <canvas id="brtiChart" width="1100" height="220"></canvas>
       </div>
 
       <div class="chart-wrap">
         <p class="chart-title">Synthetic 60s Moving Average</p>
-        <canvas id="movingAvgChart" data-height="230"></canvas>
+        <canvas id="movingAvgChart" width="1100" height="220"></canvas>
       </div>
-    </section>
 
-    <section class="card">
-      <h2>Model, Execution, and Runtime</h2>
-      <p class="meta-list" style="margin-bottom:12px">
-        P(model) is the pricing model probability, while P(book) is short-horizon orderbook pressure. Execution runtime panels reflect observe, paper, or live mode behavior.
-      </p>
+      <div class="phase3-bottom" id="phase3Section">
+        <h3>Asian pricer &amp; Realized Vol (Live)</h3>
+        <p class="meta-list" style="margin-bottom:12px">
+          <code>asian_pricer.py</code> + <code>vol_estimator.py</code>: lognormal / collapsed TWAP probability vs strike; σ from index log returns. Bars update with <code>/api/state</code>. Green = YES (&gt;50%), red = NO (&lt;50%).
+        </p>
 
-      <details>
-        <summary>Read me — what P(model) and P(book) mean</summary>
-        <div class="meta-list" style="margin-top:8px">
-          <p style="margin-top:0"><strong>P(model)</strong> estimates the probability that the official final-minute settlement average resolves above strike. <strong>P(book)</strong> summarizes near-term orderbook pressure (OBI, TFI, MPP) and is used as execution confirmation.</p>
-          <p style="margin-bottom:0">Green means probability above 50% (YES skew), red means below 50% (NO skew), and gray means neutral or unavailable.</p>
+        <div class="phase3-readme">
+          <details>
+            <summary>Read me — what P(model) and P(book) mean</summary>
+            <div class="meta-list" style="margin-top:8px">
+              <p style="margin-top:0"><strong>P(model)</strong> is the model’s estimate of the probability that the <strong>official 60-second benchmark index average</strong> (the one Kalshi uses over the final minute) finishes <strong>above the strike</strong> you see in the grid. It is <strong>not</strong> the same as the YES contract’s market price on Kalshi — it is our own math on synthetic index proxy and vol.</p>
+              <p><strong>How it’s computed:</strong> With <strong>more than 60 seconds left</strong> to expiry, we use a <strong>Levy-style</strong> lognormal approximation to the average of 60 future spot samples (Turnbull–Wakeman–style idea). <strong>Inside the last 60 seconds</strong>, we switch to a <strong>collapsed-variance</strong> update: seconds already observed are fixed; only the rest is uncertain. <strong>σ</strong> comes from <code>vol_estimator.py</code> (realized vol on index log returns). The <strong>regime</strong> line in the status tells you which branch is active.</p>
+              <p><strong>What the percentage is:</strong> A value like <strong>63.2%</strong> means “the model assigns about a 63% chance the TWAP settles above the strike.” The <strong>bar width</strong> is the same number on a 0–100 scale. It is a probability, not a price in cents.</p>
+              <p><strong>Bar colors (50% rule):</strong> For both metrics, <strong>green</strong> when the shown probability is &gt; 50% (leans YES), <strong>red</strong> when &lt; 50% (leans NO), <strong>gray</strong> at 50% or when data isn’t available (e.g. pricer not ready, or no order-book snapshot yet for P(book)).</p>
+              <p><strong>P(book)</strong> is a separate signal from the <strong>Kalshi order book</strong> (and aggressor trades when wired): we combine <strong>OBI</strong> (resting bid vs ask imbalance), <strong>TFI</strong> (recent buy-yes vs sell-yes flow), and <strong>MPP</strong> (how much the mid moved vs the spread) into a <strong>logistic</strong> score in (0, 1), shown as a percent. It measures <strong>short-term pressure</strong> and liquidity, not the index TWAP model. <strong>TFI</strong> may stay flat until public trade events are connected.</p>
+              <p><strong>Why both differ:</strong> P(model) is spot + vol + time structure; P(book) is what traders are doing on Kalshi right now. They can diverge — e.g. model says fair YES is high while the book is leaning NO, or the reverse.</p>
+              <p style="margin-bottom:0">For raw numbers (σ, <code>pricer_detail</code>, OBI/TFI/MPP, sigmoid <code>z</code>), open <strong>Asian Pricer and Realized Vol Calculations</strong> on the right.</p>
+            </div>
+          </details>
         </div>
-      </details>
 
-      <div class="phase3-bottom" id="phase3Section" style="margin-top:10px">
         <div class="viz-row">
           <span class="viz-label">P(model)</span>
           <div class="viz-track"><div class="viz-fill viz-fill-neutral" id="pModelBar" style="width:0%"></div></div>
@@ -514,66 +317,6 @@
         <p class="mono" id="phase3Status" style="font-size:11px;margin-top:8px">—</p>
       </div>
 
-      <div class="phase3-bottom" id="executionSection">
-        <h3>Autonomous Execution Runtime</h3>
-        <div class="summary-grid" id="executionStatusGrid"></div>
-      </div>
-
-      <div class="phase3-bottom" id="runtimeSection">
-        <h3>Runtime Performance</h3>
-        <div class="summary-grid" id="runtimeStatsGrid"></div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Realized PnL Curve (cumulative)</p>
-          <canvas id="pnlChart" data-height="190"></canvas>
-        </div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Rolling Win Rate</p>
-          <canvas id="winRateChart" data-height="190"></canvas>
-        </div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Cumulative Edge Captured (expected)</p>
-          <canvas id="edgeChart" data-height="190"></canvas>
-        </div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Confidence Distribution (recent window)</p>
-          <canvas id="confidenceHist" data-height="180"></canvas>
-        </div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Order Timing Within Contract Window</p>
-          <canvas id="timingChart" data-height="180"></canvas>
-        </div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Policy Rejection Reasons</p>
-          <canvas id="rejectionChart" data-height="180"></canvas>
-        </div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Maker vs Taker Fills (recent window)</p>
-          <canvas id="makerTakerChart" data-height="160"></canvas>
-        </div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Fill Latency Distribution</p>
-          <canvas id="latencyChart" data-height="180"></canvas>
-        </div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Fill Spread Distribution</p>
-          <canvas id="spreadChart" data-height="180"></canvas>
-        </div>
-
-        <div class="chart-wrap">
-          <p class="chart-title">Per-Window Fill Rate (settled windows)</p>
-          <canvas id="windowFillChart" data-height="180"></canvas>
-        </div>
-      </div>
-
       <details>
         <summary>Explain technical metrics</summary>
         <div class="meta-list" id="metricHelp"></div>
@@ -581,54 +324,42 @@
     </section>
 
     <section class="card">
-      <h2>Verification Streams and Session Export</h2>
-      <div class="badge">Kalshi + index streams tracked end-to-end</div>
-      <div class="badge">Export JSON/CSV/PNG/HTML snapshots</div>
+      <h2>Verification Streams</h2>
+      <div class="badge">Kalshi messages tracked end-to-end</div>
+      <div class="badge">Index exchange messages tracked end-to-end</div>
 
-      <div class="export-controls">
-        <button id="exportSessionBtn" class="btn" type="button">Export Session</button>
-        <button id="toggleSessionsBtn" class="btn" type="button">Show Exported Sessions</button>
-      </div>
-      <div id="exportStatus" class="export-status"></div>
-      <div id="exportSessionsPanel" class="session-list">
-        <div id="exportSessionsList"></div>
-      </div>
-
-      <div class="verification-tabs" id="verificationTabs">
-        <button type="button" class="log-tab active" data-log-target="executionEvents">Execution</button>
-        <button type="button" class="log-tab" data-log-target="fillEvents">Fills</button>
-        <button type="button" class="log-tab" data-log-target="brtiTicks">Index Ticks</button>
-        <button type="button" class="log-tab" data-log-target="impactLog">Top-10 Impact</button>
-        <button type="button" class="log-tab" data-log-target="rawLog">Kalshi WS</button>
-        <button type="button" class="log-tab" data-log-target="brtiRawLog">Index WS</button>
-        <button type="button" class="log-tab" data-log-target="reconLog">Reconciliation</button>
-        <button type="button" class="log-tab" data-log-target="innerCalcJson">Pricing/Microstructure JSON</button>
-      </div>
-
-      <div class="log-panel active" id="panel_executionEvents">
-        <pre class="log" id="executionEvents"></pre>
-      </div>
-      <div class="log-panel" id="panel_fillEvents">
-        <pre class="log" id="fillEvents"></pre>
-      </div>
-      <div class="log-panel" id="panel_brtiTicks">
-        <pre class="log" id="brtiTicks"></pre>
-      </div>
-      <div class="log-panel" id="panel_impactLog">
-        <pre class="log" id="impactLog"></pre>
-      </div>
-      <div class="log-panel" id="panel_rawLog">
-        <pre class="log" id="rawLog"></pre>
-      </div>
-      <div class="log-panel" id="panel_brtiRawLog">
-        <pre class="log" id="brtiRawLog"></pre>
-      </div>
-      <div class="log-panel" id="panel_reconLog">
-        <pre class="log" id="reconLog"></pre>
-      </div>
-      <div class="log-panel" id="panel_innerCalcJson">
+      <details style="margin-top:4px">
+        <summary>Asian Pricer and Realized Vol Calculations</summary>
+        <p class="meta-list" style="margin:6px 0 8px">
+          Raw <code>pricing</code> (vol path, <code>pricer_detail</code>, TWAP fields) and <code>microstructure</code> (OBI, TFI, MPP, sigmoid <code>z</code>) from each poll.
+        </p>
         <pre class="inner-calc-pre" id="innerCalcJson">{}</pre>
-      </div>
+      </details>
+
+      <details>
+        <summary>Reconciliation Checks (REST vs WebSocket)</summary>
+        <div class="log" id="reconLog"></div>
+      </details>
+
+      <details>
+        <summary>Index Tick Stream</summary>
+        <div class="log" id="brtiTicks"></div>
+      </details>
+
+      <details>
+        <summary>Kalshi Top-10 Impact Events</summary>
+        <div class="log" id="impactLog"></div>
+      </details>
+
+      <details>
+        <summary>Kalshi Raw WebSocket Messages</summary>
+        <div class="log" id="rawLog"></div>
+      </details>
+
+      <details>
+        <summary>Index Raw Exchange WebSocket Messages</summary>
+        <div class="log" id="brtiRawLog"></div>
+      </details>
     </section>
   </div>
 

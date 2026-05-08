@@ -1,27 +1,7 @@
 (function () {
   const { bindAssetSelector, syncAssetSelectorFromState } = window.DashboardAssetSelection;
+  const { buildBookTable, renderInnerCalcJson, renderPhase3Section } = window.DashboardRenderers;
   const {
-    buildBookTable,
-    renderExecutionState,
-    renderInnerCalcJson,
-    renderPhase3Section,
-    renderRuntimeStats,
-  } = window.DashboardRenderers;
-  const {
-    drawConfidenceHistogram,
-    drawEdgeChart,
-    drawLatencyHistogram,
-    drawMakerTakerChart,
-    drawOrderTimingChart,
-    drawPnlChart,
-    drawRejectionReasonsChart,
-    drawSpreadHistogram,
-    drawWindowFillRateChart,
-    drawWinRateChart,
-  } = window.DashboardCharts;
-  const {
-    refreshExecutionEvents,
-    refreshFillEvents,
     refreshReconLog,
     refreshRawLog,
     refreshImpactLog,
@@ -29,33 +9,14 @@
     refreshBrtiRawLog,
   } = window.DashboardLogs;
 
-  let activeLogPanelId = "executionEvents";
-  let sessionsVisible = false;
-  let latestState = null;
-  let latestBrtiRows = [];
-
-  const logRefreshers = {
-    rawLog: () => refreshRawLog(200),
-    impactLog: () => refreshImpactLog(200),
-    reconLog: () => refreshReconLog(200),
-    brtiRawLog: () => refreshBrtiRawLog(200),
-    brtiTicks: () =>
-      refreshBrtiTicks(200, {
-        onRows: (rows) => {
-          latestBrtiRows = Array.isArray(rows) ? rows : [];
-        },
-      }),
-    executionEvents: () => refreshExecutionEvents(200),
-    fillEvents: () => refreshFillEvents(200),
-    innerCalcJson: async () => {},
-  };
-
   function isDocumentVisible() {
     return document.visibilityState === "visible";
   }
 
-  function isLogPanelActive(contentElementId) {
-    return activeLogPanelId === contentElementId;
+  function isDetailsPanelOpen(contentElementId) {
+    const contentEl = document.getElementById(contentElementId);
+    const detailsEl = contentEl ? contentEl.closest("details") : null;
+    return Boolean(detailsEl && detailsEl.open);
   }
 
   function createAdaptivePoller(task, options) {
@@ -108,140 +69,26 @@
     };
   }
 
-  function setActiveLogPanel(targetId) {
-    activeLogPanelId = targetId;
+  function bindDetailsToggleRefreshes(onOpenRefreshMap) {
+    Object.entries(onOpenRefreshMap).forEach(([contentId, refreshFn]) => {
+      const contentEl = document.getElementById(contentId);
+      const detailsEl = contentEl ? contentEl.closest("details") : null;
+      if (!detailsEl || detailsEl.dataset.refreshBound === "1") {
+        return;
+      }
 
-    document.querySelectorAll(".log-tab").forEach((tab) => {
-      tab.classList.toggle("active", tab.dataset.logTarget === targetId);
-    });
-
-    document.querySelectorAll(".log-panel").forEach((panel) => {
-      panel.classList.toggle("active", panel.id === `panel_${targetId}`);
-    });
-  }
-
-  function bindVerificationTabs() {
-    const tabsRoot = document.getElementById("verificationTabs");
-    if (!tabsRoot) {
-      return;
-    }
-
-    tabsRoot.querySelectorAll(".log-tab").forEach((button) => {
-      button.addEventListener("click", () => {
-        const target = button.dataset.logTarget;
-        if (!target) {
-          return;
-        }
-
-        setActiveLogPanel(target);
-        const refresh = logRefreshers[target];
-        if (typeof refresh === "function") {
-          refresh().catch(() => {});
+      detailsEl.addEventListener("toggle", () => {
+        if (detailsEl.open) {
+          refreshFn().catch(() => {});
         }
       });
+      detailsEl.dataset.refreshBound = "1";
     });
   }
 
-  async function refreshExportSessions(limit = 20) {
-    const response = await fetch(`/api/export-sessions?limit=${Math.max(1, Number(limit) || 20)}`);
-    const payload = await response.json();
-    const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
-
-    const list = document.getElementById("exportSessionsList");
-    if (!list) {
-      return;
-    }
-
-    if (!sessions.length) {
-      list.innerHTML = '<div class="session-item">No exported sessions yet.</div>';
-      return;
-    }
-
-    list.innerHTML = sessions
-      .map((session) => {
-        const meta = session.metadata || {};
-        const summary = session.summary || {};
-        const winRate = summary.win_rate == null ? "--" : `${(Number(summary.win_rate) * 100).toFixed(2)}%`;
-        return `
-          <div class="session-item">
-            <div>${session.session_id || "unknown"}</div>
-            <div class="meta">mode=${summary.mode || "--"} | pnl=${summary.pnl_dollars || "--"} | win_rate=${winRate} | fills=${summary.fills_total || 0}</div>
-            <div class="meta">start=${meta.start_ts || "--"} | end=${meta.end_ts || "--"}</div>
-          </div>
-        `;
-      })
-      .join("");
-  }
-
-  function bindExportControls() {
-    const exportBtn = document.getElementById("exportSessionBtn");
-    const toggleBtn = document.getElementById("toggleSessionsBtn");
-    const statusEl = document.getElementById("exportStatus");
-    const panel = document.getElementById("exportSessionsPanel");
-
-    if (exportBtn) {
-      exportBtn.addEventListener("click", async () => {
-        if (statusEl) {
-          statusEl.textContent = "Exporting session artifacts...";
-          statusEl.style.color = "var(--warn)";
-        }
-
-        try {
-          const response = await fetch("/api/export-session", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ reason: "manual_ui" }),
-          });
-          const payload = await response.json();
-
-          if (!response.ok || !payload.ok) {
-            throw new Error(payload.error || "Export failed.");
-          }
-
-          if (statusEl) {
-            statusEl.textContent = `Export complete: ${payload.session_id} (${payload.path})`;
-            statusEl.style.color = "var(--ok)";
-          }
-
-          if (sessionsVisible) {
-            await refreshExportSessions(30);
-          }
-        } catch (err) {
-          if (statusEl) {
-            statusEl.textContent = String(err?.message || err || "Export failed.");
-            statusEl.style.color = "var(--danger)";
-          }
-        }
-      });
-    }
-
-    if (toggleBtn && panel) {
-      toggleBtn.addEventListener("click", async () => {
-        sessionsVisible = !sessionsVisible;
-        panel.classList.toggle("visible", sessionsVisible);
-        toggleBtn.textContent = sessionsVisible ? "Hide Exported Sessions" : "Show Exported Sessions";
-        if (sessionsVisible) {
-          await refreshExportSessions(30);
-        }
-      });
-    }
-  }
-
-  function renderSummary(state) {
-    const ob = state.orderbook;
-    const summary = document.getElementById("summary");
-    if (!summary) {
-      return;
-    }
-
-    summary.innerHTML =
-      `<div class="summary-box"><div class="summary-label">Orderbook Status</div><div class="summary-value ${ob.initialized ? "ok" : "warn"}">${ob.initialized ? "Live and updating" : "Waiting for bootstrap"}</div></div>` +
-      `<div class="summary-box"><div class="summary-label">Tracked Market</div><div class="summary-value">${ob.market_ticker ?? "n/a"}</div></div>` +
-      `<div class="summary-box"><div class="summary-label">Next Sequence Expected</div><div class="summary-value">${ob.expected_seq ?? "n/a"}</div></div>` +
-      `<div class="summary-box"><div class="summary-label">Logged Kalshi Events</div><div class="summary-value">${state.ws_log_size}</div></div>`;
-  }
-
-  function renderState(state) {
+  async function refreshState() {
+    const stateRes = await fetch("/api/state?depth=10");
+    const state = await stateRes.json();
     const ob = state.orderbook;
     const asset = state.asset || "BTC";
     const indexLabel = state.index_label || "Index";
@@ -251,7 +98,13 @@
     bindAssetSelector();
     syncAssetSelectorFromState(state);
 
-    renderSummary(state);
+    const summary = document.getElementById("summary");
+    summary.innerHTML =
+      `<div class="summary-box"><div class="summary-label">Orderbook Status</div><div class="summary-value ${ob.initialized ? "ok" : "warn"}">${ob.initialized ? "Live and updating" : "Waiting for bootstrap"}</div></div>` +
+      `<div class="summary-box"><div class="summary-label">Tracked ${asset} Market</div><div class="summary-value">${ob.market_ticker ?? "n/a"}</div></div>` +
+      `<div class="summary-box"><div class="summary-label">Next Sequence Expected</div><div class="summary-value">${ob.expected_seq ?? "n/a"}</div></div>` +
+      `<div class="summary-box"><div class="summary-label">Logged Kalshi Events</div><div class="summary-value">${state.ws_log_size}</div></div>`;
+
     buildBookTable(document.getElementById("yesTable"), ob.yes_bids, ob.yes_asks);
     buildBookTable(document.getElementById("noTable"), ob.no_bids, ob.no_asks);
 
@@ -262,26 +115,18 @@
       window.__suggestedStrike = null;
     }
 
-    const brtiEl = document.getElementById("brti");
-    if (brtiEl) {
-      brtiEl.textContent = brti.brti ? `$${Number(brti.brti).toLocaleString()}` : "--";
-    }
-
-    const brtiMeta = document.getElementById("brtiMeta");
-    if (brtiMeta) {
-      brtiMeta.textContent = `Latest depth used: ${brti.depth} ${asset} | Exchanges included: ${brti.exchanges} | Timestamp: ${new Date((brti.timestamp || 0) * 1000).toISOString()}`;
-      if (state.asset_syncing) {
-        brtiMeta.textContent += ` | Feed syncing: ${state.feed_asset || "?"} -> ${asset}`;
-      }
-    }
+    document.getElementById("brti").textContent = brti.brti ? `$${Number(brti.brti).toLocaleString()}` : "--";
+    document.getElementById("brtiMeta").textContent =
+      `Latest depth used: ${brti.depth} ${asset} | Exchanges included: ${brti.exchanges} | Timestamp: ${new Date((brti.timestamp || 0) * 1000).toISOString()}`;
 
     const proxy = state.synthetic_settlement_proxy || {};
     const proxyAvg = proxy.average != null ? `$${Number(proxy.average).toLocaleString()}` : "--";
     const proxyMethod = proxy.method === "discrete_1s_forward_fill" ? "1Hz forward-fill" : "rolling";
-    const settlementProxy = document.getElementById("settlementProxy");
-    if (settlementProxy) {
-      settlementProxy.textContent = `Synthetic ${settlementWindowSeconds}s ${indexLabel} average (${proxyMethod} proxy): ${proxyAvg} | samples=${proxy.samples ?? 0}`;
-    }
+    document.getElementById("settlementProxy").textContent =
+      `Synthetic ${settlementWindowSeconds}s ${indexLabel} average (${proxyMethod} proxy): ${proxyAvg} | samples=${proxy.samples ?? 0}`;
+
+    const syncSuffix = state.asset_syncing ? ` | Feed syncing: ${state.feed_asset || "?"} -> ${asset}` : "";
+    document.getElementById("brtiMeta").textContent += syncSuffix;
 
     const settlementRuleEl = document.getElementById("settlementRuleText");
     if (settlementRuleEl) {
@@ -294,90 +139,71 @@
       indexLabel,
       settlementWindowSeconds,
     });
-    renderExecutionState(state.execution_state);
-    renderRuntimeStats(state.runtime_stats);
     renderInnerCalcJson(state.pricing, state.microstructure);
-
-    const runtimeStats = state.runtime_stats || {};
-    drawPnlChart(runtimeStats.pnl_curve || []);
-    drawWinRateChart(runtimeStats.win_rate_curve || []);
-    drawEdgeChart(runtimeStats.edge_curve || []);
-    drawConfidenceHistogram(runtimeStats.confidence_bins || {});
-    drawOrderTimingChart(runtimeStats.order_timing_events || [], runtimeStats.window_seconds || 900);
-    drawRejectionReasonsChart(runtimeStats.rejection_reasons || {});
-    drawMakerTakerChart(runtimeStats.maker_fills_window || 0, runtimeStats.taker_fills_window || 0);
-    drawLatencyHistogram(runtimeStats.fill_latency_bins || {});
-    drawSpreadHistogram(runtimeStats.fill_spread_bins || {});
-    drawWindowFillRateChart(runtimeStats.window_fill_rate_curve || []);
 
     const help = document.getElementById("metricHelp");
     const k = state.kalshi_ws_stats || {};
     const b = state.brti_ws_stats || {};
-    if (help) {
-      help.innerHTML =
-        `Orderbook Status: whether bootstrap + sequence sync succeeded.<br>` +
-        `Tracked Market: exact market ticker currently reconstructed.<br>` +
-        `Next Sequence Expected: the next Kalshi delta sequence ID required for in-order updates.<br>` +
-        `Logged Kalshi Events: retained websocket events for audit.<br>` +
-        `Incoming websocket messages: ${k.total_received ?? "n/a"} | ticker messages: ${k.ticker_received ?? "n/a"}<br>` +
-        `${indexLabel} exchange messages: ${b.total_received ?? "n/a"} | parsed: ${b.total_parsed ?? "n/a"}<br>` +
-        "Execution panels track mode state, exposure, realized PnL, confidence distribution, timing behavior, rejection diagnostics, fill quality, and per-window participation.";
-    }
+    help.innerHTML =
+      "Orderbook Status: whether bootstrap + sequence sync succeeded.<br>" +
+      "Tracked Market: exact market ticker currently reconstructed.<br>" +
+      "Next Sequence Expected: the next Kalshi delta sequence ID required for in-order updates.<br>" +
+      "Logged Kalshi Events: retained raw websocket events for auditing.<br>" +
+      `Latest depth used: ${indexLabel} utilized depth in ${asset} for price calculation.<br>` +
+      `Exchanges included: number of clean, non-stale exchanges currently used by ${indexLabel}.<br><br>` +
+      `Synthetic ${settlementWindowSeconds}s RTI average: 1Hz forward-filled average of synthetic ${indexLabel} prints over the last ${settlementWindowSeconds} seconds. This approximates settlement mechanics but is not the official CF value.<br><br>` +
+      "<strong>Asian pricer &amp; Realized Vol (below charts)</strong><br>" +
+      "P(model): Asian / collapsed-variance estimate from <code>asian_pricer.py</code> using σ from <code>vol_estimator.py</code>. P(book): order-book skew from <code>book_microstructure.py</code>. Bars: green = YES (&gt;50%), red = NO (&lt;50%). Inner JSON: right column → Asian Pricer and Realized Vol Calculations.<br><br>" +
+      "<strong>Kalshi message processing counters</strong><br>" +
+      `Incoming websocket messages: ${k.total_received ?? "n/a"}<br>` +
+      `Orderbook deltas received: ${k.orderbook_delta_received ?? "n/a"}<br>` +
+      `Orderbook deltas buffered: ${k.orderbook_delta_buffered ?? "n/a"}<br>` +
+      `Orderbook deltas applied: ${k.orderbook_delta_applied ?? "n/a"}<br>` +
+      `Orderbook stale deltas ignored: ${k.orderbook_delta_stale_ignored ?? "n/a"}<br>` +
+      `Orderbook sequence gaps: ${k.orderbook_delta_seq_gap ?? "n/a"}<br><br>` +
+      `<strong>${indexLabel} exchange message processing counters</strong><br>` +
+      `Incoming exchange websocket messages: ${b.total_received ?? "n/a"}<br>` +
+      `Parsed exchange websocket messages: ${b.total_parsed ?? "n/a"}<br>` +
+      `Orderbook updates applied to ${indexLabel} books: ${b.book_updates_applied ?? "n/a"}<br>` +
+      `Coinbase messages: ${b.coinbase_received ?? "n/a"} | Kraken messages: ${b.kraken_received ?? "n/a"}<br>` +
+      `Gemini messages: ${b.gemini_received ?? "n/a"} | Bitstamp messages: ${b.bitstamp_received ?? "n/a"} | Paxos messages: ${b.paxos_received ?? "n/a"}<br>` +
+      `Coinbase parsed: ${b.coinbase_parsed ?? "n/a"} | Kraken parsed: ${b.kraken_parsed ?? "n/a"} | Gemini parsed: ${b.gemini_parsed ?? "n/a"}<br>` +
+      `Bitstamp parsed: ${b.bitstamp_parsed ?? "n/a"} | Paxos parsed: ${b.paxos_parsed ?? "n/a"}`;
   }
 
-  async function refreshState() {
-    const response = await fetch("/api/state?depth=10");
-    const state = await response.json();
-    latestState = state;
-    renderState(state);
-  }
+  const detailsRefreshers = {
+    rawLog: () => refreshRawLog(200),
+    impactLog: () => refreshImpactLog(200),
+    reconLog: () => refreshReconLog(200),
+    brtiRawLog: () => refreshBrtiRawLog(200),
+    brtiTicks: () => refreshBrtiTicks(200),
+  };
 
-  function bindResizeRedraw() {
-    let resizeTimer = null;
-    window.addEventListener("resize", () => {
-      if (resizeTimer != null) {
-        window.clearTimeout(resizeTimer);
-      }
-      resizeTimer = window.setTimeout(() => {
-        if (latestState) {
-          renderState(latestState);
-        }
-      }, 120);
-    });
-  }
-
-  bindVerificationTabs();
-  bindExportControls();
-  bindResizeRedraw();
+  bindDetailsToggleRefreshes(detailsRefreshers);
 
   [
     {
       task: refreshState,
-      options: { visibleMs: 700, hiddenMs: 3200, runWhenHidden: false, immediate: true },
+      options: { visibleMs: 600, hiddenMs: 3000, runWhenHidden: false, immediate: true },
     },
     {
-      task: () =>
-        refreshBrtiTicks(200, {
-          onRows: (rows) => {
-            latestBrtiRows = Array.isArray(rows) ? rows : [];
-          },
-        }),
-      options: { visibleMs: 1100, hiddenMs: 6000, runWhenHidden: false, immediate: true },
-    },
-    {
-      task: async () => {
-        const fn = logRefreshers[activeLogPanelId];
-        if (typeof fn === "function") {
-          await fn();
-        }
-      },
-      options: {
-        visibleMs: 1300,
-        hiddenMs: 7000,
-        runWhenHidden: false,
-        onlyWhen: () => isLogPanelActive(activeLogPanelId),
-        immediate: true,
-      },
+      task: () => refreshBrtiTicks(isDetailsPanelOpen("brtiTicks") ? 200 : 120),
+      options: { visibleMs: 1200, hiddenMs: 6000, runWhenHidden: false, immediate: true },
     },
   ].forEach(({ task, options }) => createAdaptivePoller(task, options));
+
+  [
+    { contentId: "rawLog", refresh: refreshRawLog, visibleMs: 1400 },
+    { contentId: "impactLog", refresh: refreshImpactLog, visibleMs: 1400 },
+    { contentId: "brtiRawLog", refresh: refreshBrtiRawLog, visibleMs: 1600 },
+    { contentId: "reconLog", refresh: refreshReconLog, visibleMs: 1800 },
+  ].forEach(({ contentId, refresh, visibleMs }) => {
+    createAdaptivePoller(() => refresh(200), {
+      visibleMs,
+      hiddenMs: 7000,
+      runWhenHidden: false,
+      onlyWhen: () => isDetailsPanelOpen(contentId),
+      immediate: false,
+    });
+  });
 })();
