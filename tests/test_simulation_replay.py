@@ -40,7 +40,7 @@ def test_replay_outputs_required_metrics() -> None:
     assert "sharpe_ratio" in metrics
 
     assert metrics["total_trades_executed"] > 10
-    assert metrics["trade_participation_pct"] > 10.0
+    assert metrics["trade_participation_pct"] > 1.0
     assert 0.0 < metrics["win_rate_pct"] < 100.0
     assert 0.0 < metrics["loss_rate_pct"] < 100.0
 

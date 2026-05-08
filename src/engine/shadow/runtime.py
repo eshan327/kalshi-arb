@@ -79,6 +79,7 @@ def _signal_payload(signal: Any) -> dict[str, Any] | None:
         "ts": signal.ts,
         "market_ticker": signal.market_ticker,
         "side": signal.side,
+        "action": signal.action,
         "intent": signal.intent,
         "count": signal.count,
         "quote_price_cents": signal.quote_price_cents,
@@ -135,7 +136,10 @@ def _build_signal_monologue(
     min_edge = _safe_float(getattr(settings, "min_edge_cents", None)) or 0.0
 
     if signal is not None:
-        base_intent = f"EV favorable, attempting fill on {str(signal.side).upper()}."
+        if str(signal.action) == "sell":
+            base_intent = f"Edge reversed, scaling OUT {str(signal.side).upper()} clip."
+        else:
+            base_intent = f"EV favorable, scaling IN {str(signal.side).upper()} clip."
     elif decision_reason == "edge_below_threshold" and lean_side is not None and best_edge is not None:
         base_intent = (
             f"Leans {lean_side.upper()}, but edge too small "
@@ -298,6 +302,9 @@ async def _run_single_cycle() -> None:
 
     _ledger.mark_to_market(market_ticker=market_ticker, book=get_live_book(), now_ts=cycle_ts)
     bankroll_cents = _ledger.current_bankroll_cents()
+    available_cash_cents = _ledger.available_cash_cents()
+    open_yes_contracts = _ledger.get_position_contracts(market_ticker=market_ticker, side="yes")
+    open_no_contracts = _ledger.get_position_contracts(market_ticker=market_ticker, side="no")
 
     signal, decision_reason, diagnostics = build_shadow_signal(
         pricing=pricing,
@@ -305,6 +312,9 @@ async def _run_single_cycle() -> None:
         book=get_live_book(),
         settings=settings,
         bankroll_cents=bankroll_cents,
+        open_yes_contracts=open_yes_contracts,
+        open_no_contracts=open_no_contracts,
+        available_cash_cents=available_cash_cents,
         now_ts=cycle_ts,
     )
 
@@ -338,7 +348,10 @@ async def _run_single_cycle() -> None:
     if effective_mode == "observe":
         observe_monologue = _monologue_with_intent(
             monologue,
-            f"EV favorable, observe mode only. Would take {str(signal.side).upper()} @ {int(signal.quote_price_cents)}c.",
+            (
+                f"Observe mode only. Would {str(signal.action).upper()} "
+                f"{str(signal.side).upper()} @ {int(signal.quote_price_cents)}c."
+            ),
             now_ts=cycle_ts,
         )
         rejection = build_shadow_event(
@@ -377,12 +390,15 @@ async def _run_single_cycle() -> None:
     if effective_mode == "paper":
         paper_attempt_monologue = _monologue_with_intent(
             monologue,
-            f"EV favorable, attempting PAPER fill on {str(signal.side).upper()} @ {int(signal.quote_price_cents)}c.",
+            (
+                f"Attempting PAPER {str(signal.action).upper()} "
+                f"{str(signal.side).upper()} @ {int(signal.quote_price_cents)}c."
+            ),
             now_ts=cycle_ts,
         )
         order_event = build_shadow_event(
             kind="order",
-            reason="paper_order_submitted",
+            reason=f"paper_{str(signal.action).lower()}_submitted",
             intent=signal.intent,
             market_ticker=signal.market_ticker,
             side=signal.side,
@@ -394,6 +410,7 @@ async def _run_single_cycle() -> None:
             extra={
                 "quote_price_cents": signal.quote_price_cents,
                 "edge_cents": signal.edge_cents,
+                "action": signal.action,
             },
         )
         _emit_event(order_event)
@@ -401,6 +418,7 @@ async def _run_single_cycle() -> None:
         fill_quote = simulate_taker_fill(
             book=get_live_book(),
             side=signal.side,
+            action=signal.action,
             slippage_ticks=settings.slippage_ticks,
             now_ts=cycle_ts,
         )
@@ -448,15 +466,25 @@ async def _run_single_cycle() -> None:
         fee_total = fee_per_contract * float(signal.count)
         expected_edge_total = float(signal.edge_cents) * float(signal.count)
 
-        fill_apply = _ledger.apply_fill(
-            market_ticker=signal.market_ticker,
-            side=signal.side,
-            contracts=signal.count,
-            fill_price_cents=fill_quote.fill_price_cents,
-            fee_total_cents=fee_total,
-            expected_edge_cents=expected_edge_total,
-            now_ts=cycle_ts,
-        )
+        if str(signal.action) == "sell":
+            fill_apply = _ledger.apply_close_fill(
+                market_ticker=signal.market_ticker,
+                side=signal.side,
+                contracts=signal.count,
+                fill_price_cents=fill_quote.fill_price_cents,
+                fee_total_cents=fee_total,
+                now_ts=cycle_ts,
+            )
+        else:
+            fill_apply = _ledger.apply_fill(
+                market_ticker=signal.market_ticker,
+                side=signal.side,
+                contracts=signal.count,
+                fill_price_cents=fill_quote.fill_price_cents,
+                fee_total_cents=fee_total,
+                expected_edge_cents=expected_edge_total,
+                now_ts=cycle_ts,
+            )
 
         if fill_apply is None:
             rejection_monologue = _monologue_with_intent(
@@ -516,6 +544,7 @@ async def _run_single_cycle() -> None:
                 "quote_price_cents": signal.quote_price_cents,
                 "fee_total_cents": round(fee_total, 6),
                 "edge_cents": signal.edge_cents,
+                "action": signal.action,
             },
         )
         _emit_event(fill_event)
@@ -540,13 +569,17 @@ async def _run_single_cycle() -> None:
     try:
         live_attempt_monologue = _monologue_with_intent(
             monologue,
-            f"EV favorable, submitting LIVE order on {str(signal.side).upper()} @ {int(signal.quote_price_cents)}c.",
+            (
+                f"Submitting LIVE {str(signal.action).upper()} "
+                f"{str(signal.side).upper()} @ {int(signal.quote_price_cents)}c."
+            ),
             now_ts=cycle_ts,
         )
         placed = await asyncio.to_thread(
             place_limit_order,
             market_ticker=signal.market_ticker,
             side=signal.side,
+            action=signal.action,
             count=signal.count,
             price_cents=signal.quote_price_cents,
             post_only=False,
@@ -635,4 +668,5 @@ async def run_shadow_trading_loop() -> None:
 
         _set_state(last_cycle_ts=cycle_started)
         elapsed = max(0.0, time.time() - cycle_started)
-        await asyncio.sleep(max(0.05, float(EXECUTION_LOOP_INTERVAL_SEC) - elapsed))
+        eval_interval = max(5.0, float(EXECUTION_LOOP_INTERVAL_SEC))
+        await asyncio.sleep(max(0.05, eval_interval - elapsed))

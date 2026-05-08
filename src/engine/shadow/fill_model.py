@@ -10,11 +10,13 @@ def simulate_taker_fill(
     *,
     book: OrderBook | None,
     side: str,
+    action: str = "buy",
     slippage_ticks: int,
     now_ts: float | None = None,
 ) -> PaperFillQuote:
     ts = time.time() if now_ts is None else float(now_ts)
     normalized_side = "yes" if str(side).strip().lower() == "yes" else "no"
+    normalized_action = "sell" if str(action).strip().lower() == "sell" else "buy"
 
     if book is None or not book.initialized:
         return PaperFillQuote(
@@ -22,6 +24,7 @@ def simulate_taker_fill(
             can_fill=False,
             reason="no_live_orderbook",
             side=normalized_side,
+            action=normalized_action,
             best_bid_cents=None,
             best_ask_cents=None,
             spread_cents=None,
@@ -43,6 +46,7 @@ def simulate_taker_fill(
             can_fill=False,
             reason="missing_top_of_book",
             side=normalized_side,
+            action=normalized_action,
             best_bid_cents=best_bid,
             best_ask_cents=best_ask,
             spread_cents=None,
@@ -52,14 +56,19 @@ def simulate_taker_fill(
 
     ticks = max(0, int(slippage_ticks))
     spread = max(0.0, float(best_ask - best_bid))
-    fill_price = max(1, min(99, best_ask + ticks))
-    slippage = max(0.0, float(fill_price - best_ask))
+    if normalized_action == "sell":
+        fill_price = max(1, min(99, best_bid - ticks))
+        slippage = max(0.0, float(best_bid - fill_price))
+    else:
+        fill_price = max(1, min(99, best_ask + ticks))
+        slippage = max(0.0, float(fill_price - best_ask))
 
     return PaperFillQuote(
         ts=ts,
         can_fill=True,
         reason="crossed_spread",
         side=normalized_side,
+        action=normalized_action,
         best_bid_cents=best_bid,
         best_ask_cents=best_ask,
         spread_cents=spread,

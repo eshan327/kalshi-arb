@@ -16,6 +16,26 @@ def taker_fee_cents_per_contract(price_cents: float, curve_coeff: float) -> floa
     return coeff * px * (1.0 - px)
 
 
+def kelly_fraction_binary(*, p_win: float, cost_cents: float) -> float:
+    """Full Kelly fraction for a binary contract that costs c and pays 100 on win.
+
+    b = (100 - c) / c
+    f* = p - (1 - p) / b
+    """
+    p = max(0.0, min(1.0, float(p_win)))
+    c = _clip_price(float(cost_cents))
+    b = (100.0 - c) / c
+    if b <= 0.0:
+        return 0.0
+    q = 1.0 - p
+    frac = p - (q / b)
+    return max(0.0, float(frac))
+
+
+def quarter_kelly_fraction_binary(*, p_win: float, cost_cents: float) -> float:
+    return 0.25 * kelly_fraction_binary(p_win=p_win, cost_cents=cost_cents)
+
+
 def expected_value_yes_cents(
     *,
     p_model: float,

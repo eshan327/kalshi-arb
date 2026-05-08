@@ -62,6 +62,12 @@ class PaperLedger:
         with self._lock:
             return int(self._cash_cents)
 
+    def get_position_contracts(self, *, market_ticker: str, side: str) -> int:
+        key = (str(market_ticker), str(side))
+        with self._lock:
+            pos = self._positions.get(key)
+            return int(pos.contracts) if pos is not None else 0
+
     def apply_fill(
         self,
         *,
@@ -114,6 +120,55 @@ class PaperLedger:
                 "avg_entry_cents": round(float(updated.avg_entry_cents), 6),
                 "fill_price_cents": int(px),
                 "fee_total_cents": round(float(fees), 6),
+                "cash_cents": int(self._cash_cents),
+                "equity_cents": int(round(float(self._cash_cents) + self._positions_market_value_locked())),
+            }
+
+    def apply_close_fill(
+        self,
+        *,
+        market_ticker: str,
+        side: str,
+        contracts: int,
+        fill_price_cents: int,
+        fee_total_cents: float,
+        now_ts: float | None = None,
+    ) -> dict[str, Any] | None:
+        ts = time.time() if now_ts is None else float(now_ts)
+        qty = max(1, int(contracts))
+        px = max(1, min(99, int(fill_price_cents)))
+        fees = max(0.0, float(fee_total_cents))
+
+        key = (str(market_ticker), str(side))
+        with self._lock:
+            existing = self._positions.get(key)
+            if existing is None or int(existing.contracts) <= 0:
+                return None
+
+            close_qty = min(int(existing.contracts), qty)
+            avg_entry = float(existing.avg_entry_cents)
+
+            proceeds = float(close_qty) * float(px) - fees
+            realized_delta = float(close_qty) * (float(px) - avg_entry) - fees
+
+            self._cash_cents = int(round(float(self._cash_cents) + proceeds))
+            self._realized_pnl_cents += realized_delta
+
+            existing.contracts = int(existing.contracts) - int(close_qty)
+            existing.last_mark_cents = float(px)
+            if existing.contracts <= 0:
+                self._positions.pop(key, None)
+
+            self._fills_total += 1
+            self._record_curves_locked(ts)
+
+            return {
+                "market_ticker": str(market_ticker),
+                "side": str(side),
+                "closed_contracts": int(close_qty),
+                "fill_price_cents": int(px),
+                "fee_total_cents": round(float(fees), 6),
+                "realized_delta_cents": int(round(realized_delta)),
                 "cash_cents": int(self._cash_cents),
                 "equity_cents": int(round(float(self._cash_cents) + self._positions_market_value_locked())),
             }

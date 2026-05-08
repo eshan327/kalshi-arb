@@ -6,9 +6,18 @@ from typing import Any
 from engine.asian_pricer import prob_collapsed_variance_binary, prob_levy_tw_binary
 from engine.book_microstructure import get_last_p_book_snapshot
 from engine.orderbook import OrderBook
-from engine.shadow.fee_model import expected_value_no_cents, expected_value_yes_cents
+from engine.shadow.fee_model import (
+    expected_value_no_cents,
+    expected_value_yes_cents,
+    quarter_kelly_fraction_binary,
+)
 from engine.shadow.models import ShadowSignal
 from engine.shadow.settings_state import ShadowSettings
+
+PROBABILITY_LOWER_BOUND = 0.20
+PROBABILITY_UPPER_BOUND = 0.80
+MAX_POSITION_USD_HARD_CAP = 50.0
+MAX_CLIP_CONTRACTS = 50
 
 
 def _safe_float(value: Any) -> float | None:
@@ -31,16 +40,18 @@ def _best_quotes(book: OrderBook | None) -> tuple[int | None, int | None, int | 
     )
 
 
-def _size_from_bankroll(
+def _kelly_target_contracts(
     *,
+    p_win: float,
     quote_price_cents: int,
     bankroll_cents: int,
-    settings: ShadowSettings,
+    max_position_usd: float,
 ) -> int:
     px = max(1, int(quote_price_cents))
-    cap_by_pct = float(bankroll_cents) * float(settings.trade_size_pct)
-    cap_by_fixed = float(settings.max_position_usd) * 100.0
-    notional_cap_cents = max(0.0, min(cap_by_pct, cap_by_fixed))
+    kelly_fraction = quarter_kelly_fraction_binary(p_win=float(p_win), cost_cents=float(px))
+    cap_by_kelly = float(max(0, int(bankroll_cents))) * float(kelly_fraction)
+    cap_by_fixed = min(float(max_position_usd), MAX_POSITION_USD_HARD_CAP) * 100.0
+    notional_cap_cents = max(0.0, min(cap_by_kelly, cap_by_fixed))
     return max(0, int(notional_cap_cents // float(px)))
 
 
@@ -97,6 +108,9 @@ def build_shadow_signal(
     book: OrderBook | None,
     settings: ShadowSettings,
     bankroll_cents: int,
+    open_yes_contracts: int = 0,
+    open_no_contracts: int = 0,
+    available_cash_cents: int | None = None,
     now_ts: float | None = None,
 ) -> tuple[ShadowSignal | None, str, dict[str, Any]]:
     ts = time.time() if now_ts is None else float(now_ts)
@@ -112,6 +126,15 @@ def build_shadow_signal(
     if p_model_value is None or not (0.0 < p_model_value < 1.0):
         return None, "invalid_model_probability", diagnostics
 
+    if not (PROBABILITY_LOWER_BOUND <= float(p_model_value) <= PROBABILITY_UPPER_BOUND):
+        diagnostics.update(
+            {
+                "probability_lower_bound": PROBABILITY_LOWER_BOUND,
+                "probability_upper_bound": PROBABILITY_UPPER_BOUND,
+            }
+        )
+        return None, "model_probability_out_of_bounds", diagnostics
+
     yes_bid, yes_ask, no_bid, no_ask = _best_quotes(book)
     diagnostics.update(
         {
@@ -124,6 +147,14 @@ def build_shadow_signal(
 
     if yes_ask is None or no_ask is None:
         return None, "missing_best_quotes", diagnostics
+
+    fair_yes_cents = float(p_model_value) * 100.0
+    fair_no_cents = (1.0 - float(p_model_value)) * 100.0
+
+    diagnostics["fair_yes_cents"] = round(fair_yes_cents, 6)
+    diagnostics["fair_no_cents"] = round(fair_no_cents, 6)
+    diagnostics["open_yes_contracts"] = int(max(0, open_yes_contracts))
+    diagnostics["open_no_contracts"] = int(max(0, open_no_contracts))
 
     p_book_snapshot = get_last_p_book_snapshot() or {}
     p_book = _safe_float(p_book_snapshot.get("p_book"))
@@ -144,6 +175,51 @@ def build_shadow_signal(
         if divergence > settings.p_book_max_divergence:
             return None, "p_book_divergence_high", diagnostics
 
+    # Dynamic scale-out: if held side is richer than model fair value, sell clips to reduce risk.
+    if int(open_yes_contracts) > 0 and yes_bid is not None and float(yes_bid) > (fair_yes_cents + float(settings.min_edge_cents)):
+        clip_count = min(int(open_yes_contracts), int(MAX_CLIP_CONTRACTS))
+        diagnostics["exit_trigger"] = "yes_bid_above_fair"
+        signal = ShadowSignal(
+            ts=ts,
+            market_ticker=str(market_ticker),
+            side="yes",
+            action="sell",
+            intent="taker",
+            count=int(clip_count),
+            quote_price_cents=int(yes_bid),
+            fair_price_cents=round(float(fair_yes_cents), 6),
+            edge_cents=round(float(fair_yes_cents - float(yes_bid)), 6),
+            edge_probability=round(float(p_model_value) - (float(yes_bid) / 100.0), 8),
+            confidence=round(abs(float(p_model_value) - 0.5), 8),
+            model_probability=round(float(p_model_value), 8),
+            market_implied_probability=round(float(yes_bid) / 100.0, 8),
+            reason="edge_reversal_exit_yes",
+            diagnostics=diagnostics,
+        )
+        return signal, signal.reason, diagnostics
+
+    if int(open_no_contracts) > 0 and no_bid is not None and float(no_bid) > (fair_no_cents + float(settings.min_edge_cents)):
+        clip_count = min(int(open_no_contracts), int(MAX_CLIP_CONTRACTS))
+        diagnostics["exit_trigger"] = "no_bid_above_fair"
+        signal = ShadowSignal(
+            ts=ts,
+            market_ticker=str(market_ticker),
+            side="no",
+            action="sell",
+            intent="taker",
+            count=int(clip_count),
+            quote_price_cents=int(no_bid),
+            fair_price_cents=round(float(fair_no_cents), 6),
+            edge_cents=round(float(fair_no_cents - float(no_bid)), 6),
+            edge_probability=round((1.0 - float(p_model_value)) - (float(no_bid) / 100.0), 8),
+            confidence=round(abs(float(p_model_value) - 0.5), 8),
+            model_probability=round(float(p_model_value), 8),
+            market_implied_probability=round(float(no_bid) / 100.0, 8),
+            reason="edge_reversal_exit_no",
+            diagnostics=diagnostics,
+        )
+        return signal, signal.reason, diagnostics
+
     edge_yes = expected_value_yes_cents(
         p_model=p_model_value,
         ask_price_cents=yes_ask,
@@ -162,13 +238,15 @@ def build_shadow_signal(
         ask = int(yes_ask)
         model_side_prob = float(p_model_value)
         edge_cents = float(edge_yes)
-        fair_price_cents = float(p_model_value) * 100.0
+        fair_price_cents = fair_yes_cents
+        current_contracts = max(0, int(open_yes_contracts))
     else:
         side = "no"
         ask = int(no_ask)
         model_side_prob = 1.0 - float(p_model_value)
         edge_cents = float(edge_no)
-        fair_price_cents = (1.0 - float(p_model_value)) * 100.0
+        fair_price_cents = fair_no_cents
+        current_contracts = max(0, int(open_no_contracts))
 
     edge_probability = model_side_prob - (float(ask) / 100.0)
     confidence = abs(float(p_model_value) - 0.5)
@@ -176,18 +254,36 @@ def build_shadow_signal(
     if edge_cents < float(settings.min_edge_cents):
         return None, "edge_below_threshold", diagnostics
 
-    count = _size_from_bankroll(
+    target_contracts = _kelly_target_contracts(
+        p_win=model_side_prob,
         quote_price_cents=ask,
         bankroll_cents=max(0, int(bankroll_cents)),
-        settings=settings,
+        max_position_usd=float(settings.max_position_usd),
     )
+
+    remaining_to_target = max(0, int(target_contracts) - int(current_contracts))
+    count = min(int(MAX_CLIP_CONTRACTS), int(remaining_to_target))
+
+    if isinstance(available_cash_cents, int) and available_cash_cents >= 0:
+        max_by_cash = int(available_cash_cents) // max(1, int(ask))
+        count = min(int(count), int(max_by_cash))
+
+    diagnostics["kelly_fraction_quarter"] = round(
+        quarter_kelly_fraction_binary(p_win=model_side_prob, cost_cents=float(ask)),
+        8,
+    )
+    diagnostics["kelly_target_contracts"] = int(target_contracts)
+    diagnostics["current_contracts"] = int(current_contracts)
+    diagnostics["clip_contracts"] = int(count)
+
     if count <= 0:
-        return None, "size_too_small", diagnostics
+        return None, "at_target_allocation", diagnostics
 
     signal = ShadowSignal(
         ts=ts,
         market_ticker=str(market_ticker),
         side=side,
+        action="buy",
         intent="taker",
         count=int(count),
         quote_price_cents=int(ask),

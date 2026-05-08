@@ -57,6 +57,7 @@ def place_limit_order(
     *,
     market_ticker: str,
     side: str,
+    action: str = "buy",
     count: int,
     price_cents: int,
     post_only: bool,
@@ -71,6 +72,10 @@ def place_limit_order(
     if side_norm not in {"yes", "no"}:
         raise ValueError(f"Invalid side '{side}'.")
 
+    action_norm = str(action).strip().lower()
+    if action_norm not in {"buy", "sell"}:
+        raise ValueError(f"Invalid action '{action}'.")
+
     px = max(1, min(99, int(price_cents)))
     comp = 100 - px
     order_id = client_order_id or _build_client_order_id(prefix="live")
@@ -79,7 +84,7 @@ def place_limit_order(
         "ticker": str(market_ticker),
         "client_order_id": order_id,
         "side": side_norm,
-        "action": "buy",
+        "action": action_norm,
         "count": max(1, int(count)),
         "type": "limit",
         "time_in_force": time_in_force or EXECUTION_ORDER_TIME_IN_FORCE,

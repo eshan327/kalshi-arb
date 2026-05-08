@@ -5,6 +5,7 @@ from typing import Literal
 
 SignalSide = Literal["yes", "no"]
 ExecutionIntent = Literal["taker", "maker"]
+SignalAction = Literal["buy", "sell"]
 
 
 @dataclass(frozen=True)
@@ -12,6 +13,7 @@ class ShadowSignal:
     ts: float
     market_ticker: str
     side: SignalSide
+    action: SignalAction
     intent: ExecutionIntent
     count: int
     quote_price_cents: int
@@ -40,6 +42,7 @@ class PaperFillQuote:
     can_fill: bool
     reason: str
     side: SignalSide
+    action: SignalAction
     best_bid_cents: int | None
     best_ask_cents: int | None
     spread_cents: float | None
