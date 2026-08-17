@@ -17,10 +17,8 @@ from core.config import (
     EXECUTION_EVENTS_MAXLEN,
     EXECUTION_EVENTS_PATH,
     EXECUTION_LOOP_INTERVAL_SEC,
-    EXECUTION_MODE,
     EXECUTION_STATE_PATH,
     KALSHI_ENV,
-    LIVE_TRADING_ENABLED,
     PAPER_STARTING_CASH_CENTS,
 )
 from core.market_metadata import extract_suggested_strike
@@ -30,6 +28,7 @@ from data.kalshi_trading import (
     get_balance_summary,
     get_positions,
     place_limit_order,
+    set_live_order_entry_enabled,
 )
 from engine.live_pricing import compute_live_pricing_snapshot
 from engine.streamer import get_live_book, get_live_market_info
@@ -54,17 +53,17 @@ _lock = RLock()
 _execution_lock = RLock()
 _events: deque[dict[str, Any]] = deque(maxlen=max(500, EXECUTION_EVENTS_MAXLEN))
 _runtime_started_ts = time.time()
+_execution_mode: str | None = None
 _armed = False
 _last_submission_ts = 0.0
 _last_market_ticker: str | None = None
-_risk_state: dict[str, Any] = {}
+_risk_states: dict[str, dict[str, Any]] = {}
 _paper_account = PaperAccount(PAPER_STARTING_CASH_CENTS)
 
 _runtime_state: dict[str, Any] = {
-    "status": "booting",
+    "status": "stopped",
     "armed": False,
-    "execution_mode": EXECUTION_MODE,
-    "live_trading_enabled": LIVE_TRADING_ENABLED,
+    "execution_mode": None,
     "kalshi_env": KALSHI_ENV,
     "last_reason": None,
     "last_error": None,
@@ -76,9 +75,7 @@ _runtime_state: dict[str, Any] = {
     "daily_risk": {},
     "fee_policy": {},
     "settings": get_trading_settings_snapshot(),
-    "signal_monologue": {
-        "action_intent": f"{EXECUTION_MODE.title()} engine booting..."
-    },
+    "signal_monologue": {"action_intent": "Choose Paper or Live to start."},
 }
 
 
@@ -99,11 +96,27 @@ def _set_armed(value: bool) -> None:
     with _lock:
         _armed = bool(value)
         _runtime_state["armed"] = _armed
+        live_enabled = _armed and _execution_mode == "live"
+    set_live_order_entry_enabled(live_enabled)
 
 
 def _is_armed() -> bool:
     with _lock:
         return _armed
+
+
+def _get_execution_mode() -> str | None:
+    with _lock:
+        return _execution_mode
+
+
+def _set_execution_mode(value: str) -> None:
+    global _execution_mode, _last_submission_ts
+    with _lock:
+        _execution_mode = value
+        _last_submission_ts = 0.0
+        _runtime_state["execution_mode"] = value
+    set_live_order_entry_enabled(False)
 
 
 def _position_payload(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -129,9 +142,12 @@ def _position_payload(raw: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _fetch_account_snapshot() -> dict[str, Any]:
-    if EXECUTION_MODE == "paper":
+def _fetch_account_snapshot(execution_mode: str | None = None) -> dict[str, Any]:
+    mode = execution_mode or _get_execution_mode()
+    if mode == "paper":
         return _paper_account.snapshot()
+    if mode != "live":
+        raise RuntimeError("Choose Paper or Live first.")
     balance = get_balance_summary()
     positions = [
         position
@@ -154,8 +170,8 @@ def _risk_day() -> str:
     return datetime.now(_NY).date().isoformat()
 
 
-def _load_risk_state() -> dict[str, Any]:
-    path = _risk_state_path()
+def _load_risk_state(execution_mode: str) -> dict[str, Any]:
+    path = _risk_state_path(execution_mode)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         return payload if isinstance(payload, dict) else {}
@@ -163,50 +179,55 @@ def _load_risk_state() -> dict[str, Any]:
         return {}
 
 
-def _save_risk_state() -> None:
-    path = _risk_state_path()
+def _save_risk_state(execution_mode: str) -> None:
+    path = _risk_state_path(execution_mode)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(f"{path.suffix}.tmp")
     temp_path.write_text(
-        json.dumps(_risk_state, separators=(",", ":")), encoding="utf-8"
+        json.dumps(_risk_states[execution_mode], separators=(",", ":")),
+        encoding="utf-8",
     )
     temp_path.replace(path)
 
 
-def _risk_state_path() -> Path:
+def _risk_state_path(execution_mode: str) -> Path:
     return Path(
         EXECUTION_STATE_PATH
-        if EXECUTION_MODE == "live"
+        if execution_mode == "live"
         else f"{EXECUTION_STATE_PATH}.paper"
     )
 
 
 def _sync_daily_risk(
-    equity_cents: int, max_daily_loss_usd: float
+    equity_cents: int, max_daily_loss_usd: float, execution_mode: str | None = None
 ) -> tuple[dict[str, Any], bool]:
-    global _risk_state
+    mode = execution_mode or _get_execution_mode()
+    if mode not in {"paper", "live"}:
+        raise RuntimeError("Choose Paper or Live first.")
     with _lock:
         day = _risk_day()
-        if not _risk_state:
-            _risk_state = _load_risk_state()
-        if _risk_state.get("day") != day:
-            _risk_state = {
+        risk_state = _risk_states.get(mode) or _load_risk_state(mode)
+        if risk_state.get("day") != day:
+            risk_state = {
                 "day": day,
                 "start_equity_cents": int(equity_cents),
                 "locked": False,
             }
-            _save_risk_state()
+            _risk_states[mode] = risk_state
+            _save_risk_state(mode)
+        else:
+            _risk_states[mode] = risk_state
 
-        start = int(_risk_state.get("start_equity_cents", equity_cents))
+        start = int(risk_state.get("start_equity_cents", equity_cents))
         drawdown = int(equity_cents) - start
-        was_locked = bool(_risk_state.get("locked"))
+        was_locked = bool(risk_state.get("locked"))
         if drawdown <= -round(float(max_daily_loss_usd) * 100):
-            _risk_state["locked"] = True
-        if bool(_risk_state.get("locked")) != was_locked:
-            _save_risk_state()
+            risk_state["locked"] = True
+        if bool(risk_state.get("locked")) != was_locked:
+            _save_risk_state(mode)
 
         snapshot = {
-            **_risk_state,
+            **risk_state,
             "current_equity_cents": int(equity_cents),
             "drawdown_cents": int(drawdown),
             "max_daily_loss_cents": round(float(max_daily_loss_usd) * 100),
@@ -321,14 +342,16 @@ def _emit_event(kind: str, reason: str, **extra: Any) -> dict[str, Any]:
 
 def _place_order(
     *,
+    execution_mode: str,
     market_ticker: str,
     side: str,
     action: str,
     count: int | float,
     price_cents: float,
     fee_multiplier: float = 1.0,
+    allow_when_stopped: bool = False,
 ) -> dict[str, Any]:
-    if EXECUTION_MODE == "paper":
+    if execution_mode == "paper":
         return _paper_account.place_ioc(
             market_ticker=market_ticker,
             side=side,
@@ -338,12 +361,15 @@ def _place_order(
             book=get_live_book(),
             fee_multiplier=fee_multiplier,
         )
+    if execution_mode != "live":
+        raise RuntimeError("Choose Paper or Live first.")
     return place_limit_order(
         market_ticker=market_ticker,
         side=side,
         action=action,
         count=count,
         price_cents=price_cents,
+        allow_when_stopped=allow_when_stopped,
     )
 
 
@@ -354,7 +380,9 @@ def _current_fee_multiplier() -> float:
         )
 
 
-def _flatten_market(account: dict[str, Any], market_ticker: str) -> dict[str, Any]:
+def _flatten_market(
+    account: dict[str, Any], market_ticker: str, execution_mode: str
+) -> dict[str, Any]:
     position = _market_position(account, market_ticker)
     if position is None:
         return {"ok": True, "status": "already_flat", "market_ticker": market_ticker}
@@ -369,6 +397,7 @@ def _flatten_market(account: dict[str, Any], market_ticker: str) -> dict[str, An
     settings = get_trading_settings_model()
     market_info = get_live_market_info()
     result = _place_order(
+        execution_mode=execution_mode,
         market_ticker=market_ticker,
         side=side,
         action="sell",
@@ -380,6 +409,7 @@ def _flatten_market(account: dict[str, Any], market_ticker: str) -> dict[str, An
             market_info.get("price_ranges"),
         ),
         fee_multiplier=_current_fee_multiplier(),
+        allow_when_stopped=True,
     )
     _emit_event(
         "flatten",
@@ -390,9 +420,7 @@ def _flatten_market(account: dict[str, Any], market_ticker: str) -> dict[str, An
     return result
 
 
-def submit_manual_order(
-    *, side: str, action: str, count: Any, confirmation: str
-) -> dict[str, Any]:
+def submit_manual_order(*, side: str, action: str, count: Any) -> dict[str, Any]:
     side = side.strip().lower()
     action = action.strip().lower()
     if side not in {"yes", "no"} or action not in {"buy", "sell"}:
@@ -407,17 +435,12 @@ def submit_manual_order(
     if quantity < 1:
         raise ValueError("count must be at least 1")
 
-    expected_confirmation = f"SUBMIT {EXECUTION_MODE.upper()}"
-    if confirmation != expected_confirmation:
-        raise ValueError(
-            f"Manual orders require the exact confirmation '{expected_confirmation}'."
-        )
-    if EXECUTION_MODE == "live" and not LIVE_TRADING_ENABLED:
-        raise RuntimeError("Live trading is not enabled for this process.")
-
     with _execution_lock:
+        execution_mode = _get_execution_mode()
+        if execution_mode not in {"paper", "live"}:
+            raise RuntimeError("Choose Paper or Live first.")
         if not _is_armed():
-            raise RuntimeError("Arm trading before submitting a discretionary order.")
+            raise RuntimeError("Start trading before submitting a discretionary order.")
         settings = get_trading_settings_model()
         if quantity > settings.max_order_contracts:
             raise ValueError(
@@ -441,9 +464,11 @@ def submit_manual_order(
         ):
             raise RuntimeError("The active orderbook is stale.")
 
-        account = _fetch_account_snapshot()
+        account = _fetch_account_snapshot(execution_mode)
         daily_risk, _ = _sync_daily_risk(
-            int(account["equity_cents"]), settings.max_daily_loss_usd
+            int(account["equity_cents"]),
+            settings.max_daily_loss_usd,
+            execution_mode,
         )
         if daily_risk["locked"]:
             _set_armed(False)
@@ -506,6 +531,7 @@ def submit_manual_order(
                 raise ValueError("order would breach the configured cash buffer")
 
         result = _place_order(
+            execution_mode=execution_mode,
             market_ticker=market_ticker,
             side=side,
             action=action,
@@ -515,7 +541,7 @@ def submit_manual_order(
         )
         order = result.get("order", {})
         filled = _decimal(order.get("fill_count")) > 0
-        status = f"manual_{EXECUTION_MODE}_{'filled' if filled else 'unfilled'}"
+        status = f"manual_{execution_mode}_{'filled' if filled else 'unfilled'}"
         event = _emit_event(
             "manual_order",
             status,
@@ -526,8 +552,8 @@ def submit_manual_order(
             order=order,
         )
         state: dict[str, Any] = {"status": status, "last_order": event}
-        if EXECUTION_MODE == "paper":
-            state["account"] = _fetch_account_snapshot()
+        if execution_mode == "paper":
+            state["account"] = _fetch_account_snapshot(execution_mode)
         _set_state(**state)
         return {"ok": bool(result.get("ok", True)), "status": status, "result": result}
 
@@ -542,23 +568,21 @@ def get_trading_events(limit: int = 200) -> list[dict[str, Any]]:
         return list(_events)[-max(1, int(limit)) :]
 
 
-def control_trading(operation: str, confirmation: str = "") -> dict[str, Any]:
+def control_trading(operation: str, execution_mode: str = "") -> dict[str, Any]:
     operation = operation.strip().lower()
-    if operation == "arm":
-        expected_confirmation = f"ARM {EXECUTION_MODE.upper()}"
-        if confirmation != expected_confirmation:
-            raise ValueError(
-                f"Arming requires the exact confirmation '{expected_confirmation}'."
-            )
-        if EXECUTION_MODE == "live" and not LIVE_TRADING_ENABLED:
-            raise RuntimeError(
-                "Set KALSHI_LIVE_TRADING_ENABLED=true and restart first."
-            )
+    if operation == "start":
+        mode = execution_mode.strip().lower()
+        if mode not in {"paper", "live"}:
+            raise ValueError("execution_mode must be paper or live")
         with _execution_lock:
-            account = _fetch_account_snapshot()
+            if _get_execution_mode() == "live" and mode != "live":
+                cancel_bot_orders()
+            account = _fetch_account_snapshot(mode)
+            _set_armed(False)
+            _set_execution_mode(mode)
             settings = get_trading_settings_model()
             daily_risk, _ = _sync_daily_risk(
-                int(account["equity_cents"]), settings.max_daily_loss_usd
+                int(account["equity_cents"]), settings.max_daily_loss_usd, mode
             )
             if daily_risk["locked"]:
                 raise RuntimeError(
@@ -568,21 +592,20 @@ def control_trading(operation: str, confirmation: str = "") -> dict[str, Any]:
             _set_state(
                 account=account,
                 daily_risk=daily_risk,
-                status="armed",
+                status="running",
                 last_error=None,
             )
-            _emit_event("control", "armed_by_operator", execution_mode=EXECUTION_MODE)
-            return {"ok": True, "status": "armed"}
+            _emit_event("control", "started_by_operator", execution_mode=mode)
+            return {"ok": True, "status": "started", "execution_mode": mode}
 
     if operation not in {"pause", "flatten"}:
-        raise ValueError("operation must be arm, pause, or flatten")
-    if operation == "flatten" and confirmation != "FLATTEN":
-        raise ValueError("Flattening requires the exact confirmation 'FLATTEN'.")
+        raise ValueError("operation must be start, pause, or flatten")
 
     with _execution_lock:
+        mode = _get_execution_mode()
         _set_armed(False)
         cancel_error = None
-        if EXECUTION_MODE == "live":
+        if mode == "live":
             try:
                 canceled = cancel_bot_orders()
             except Exception as exc:  # cancellation failure must not re-arm the engine
@@ -603,8 +626,10 @@ def control_trading(operation: str, confirmation: str = "") -> dict[str, Any]:
         market_ticker = str(get_live_market_info().get("ticker") or "")
         if not market_ticker:
             raise RuntimeError("No active market to flatten.")
-        account = _fetch_account_snapshot()
-        result = _flatten_market(account, market_ticker)
+        if mode not in {"paper", "live"}:
+            raise RuntimeError("Choose Paper or Live first.")
+        account = _fetch_account_snapshot(mode)
+        result = _flatten_market(account, market_ticker, mode)
         _set_state(status="flatten_submitted", last_reason="flattened_by_operator")
         return {
             "ok": True,
@@ -616,16 +641,23 @@ def control_trading(operation: str, confirmation: str = "") -> dict[str, Any]:
 
 
 def _submit_signal(
-    signal: TradeSignal, cycle_ts: float, cooldown_seconds: int
+    signal: TradeSignal,
+    cycle_ts: float,
+    cooldown_seconds: int,
+    execution_mode: str | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     global _last_submission_ts
     with _execution_lock:
-        if not _is_armed():
+        mode = execution_mode or _get_execution_mode()
+        if mode != _get_execution_mode():
+            return "mode_changed", None
+        if mode not in {"paper", "live"} or not _is_armed():
             return "disarmed", None
         if signal.action == "buy" and cycle_ts - _last_submission_ts < cooldown_seconds:
             return "cooldown", None
         _last_submission_ts = cycle_ts
         return "submitted", _place_order(
+            execution_mode=mode,
             market_ticker=signal.market_ticker,
             side=signal.side,
             action=signal.action,
@@ -638,8 +670,10 @@ def _submit_signal(
 _submit_live_signal = _submit_signal
 
 
-async def _refresh_paper_account(active_market_ticker: str) -> None:
-    if EXECUTION_MODE != "paper":
+async def _refresh_paper_account(
+    active_market_ticker: str, execution_mode: str
+) -> None:
+    if execution_mode != "paper":
         return
     _paper_account.mark_to_market(active_market_ticker, get_live_book())
     for market_ticker in _paper_account.market_tickers() - {active_market_ticker}:
@@ -657,35 +691,62 @@ async def _refresh_paper_account(active_market_ticker: str) -> None:
             logger.warning("Could not settle paper market %s: %s", market_ticker, exc)
 
 
-async def _run_single_cycle() -> None:
-    global _last_market_ticker
-
-    cycle_ts = time.time()
-    settings = get_trading_settings_model()
-    settings_snapshot = get_trading_settings_snapshot()
-    market_info = get_live_market_info()
-    market_ticker = str(market_info.get("ticker") or "").strip()
-
-    await _refresh_paper_account(market_ticker)
-    account = await asyncio.to_thread(_fetch_account_snapshot)
-    daily_risk, newly_locked = _sync_daily_risk(
-        int(account["equity_cents"]), settings.max_daily_loss_usd
-    )
-    _set_state(account=account, daily_risk=daily_risk, settings=settings_snapshot)
-
-    if daily_risk["locked"]:
+def _enforce_daily_loss_lock(
+    execution_mode: str,
+    account: dict[str, Any],
+    market_ticker: str,
+    daily_risk: dict[str, Any],
+    newly_locked: bool,
+) -> None:
+    with _execution_lock:
+        if execution_mode != _get_execution_mode():
+            return
         was_armed = _is_armed()
         _set_armed(False)
         if newly_locked:
             _emit_event("risk", "daily_loss_limit_reached", daily_risk=daily_risk)
         if was_armed and market_ticker:
             try:
-                if EXECUTION_MODE == "live":
-                    await asyncio.to_thread(cancel_bot_orders)
-                await asyncio.to_thread(_flatten_market, account, market_ticker)
+                if execution_mode == "live":
+                    cancel_bot_orders()
+                _flatten_market(account, market_ticker, execution_mode)
             except Exception as exc:
                 _set_state(last_error=f"Risk flatten failed: {exc}")
         _set_state(status="daily_loss_locked", last_reason="daily_loss_limit_reached")
+
+
+async def _run_single_cycle() -> None:
+    global _last_market_ticker
+
+    cycle_ts = time.time()
+    settings = get_trading_settings_model()
+    settings_snapshot = get_trading_settings_snapshot()
+    execution_mode = _get_execution_mode()
+    if execution_mode not in {"paper", "live"}:
+        _set_state(status="stopped", settings=settings_snapshot)
+        return
+
+    market_info = get_live_market_info()
+    market_ticker = str(market_info.get("ticker") or "").strip()
+
+    await _refresh_paper_account(market_ticker, execution_mode)
+    account = await asyncio.to_thread(_fetch_account_snapshot, execution_mode)
+    daily_risk, newly_locked = _sync_daily_risk(
+        int(account["equity_cents"]), settings.max_daily_loss_usd, execution_mode
+    )
+    if execution_mode != _get_execution_mode():
+        return
+    _set_state(account=account, daily_risk=daily_risk, settings=settings_snapshot)
+
+    if daily_risk["locked"]:
+        await asyncio.to_thread(
+            _enforce_daily_loss_lock,
+            execution_mode,
+            account,
+            market_ticker,
+            daily_risk,
+            newly_locked,
+        )
         return
 
     if not market_ticker:
@@ -697,7 +758,7 @@ async def _run_single_cycle() -> None:
         return
 
     if _last_market_ticker and _last_market_ticker != market_ticker:
-        if EXECUTION_MODE == "live":
+        if execution_mode == "live":
             await asyncio.to_thread(
                 cancel_bot_orders, market_ticker=_last_market_ticker
             )
@@ -784,10 +845,15 @@ async def _run_single_cycle() -> None:
         return
     try:
         submission, placed = await asyncio.to_thread(
-            _submit_signal, signal, cycle_ts, settings.cooldown_seconds
+            _submit_signal,
+            signal,
+            cycle_ts,
+            settings.cooldown_seconds,
+            execution_mode,
         )
-        if submission == "disarmed":
-            _set_state(status="signal_waiting_for_arm", **common_state)
+        if submission in {"disarmed", "mode_changed"}:
+            if execution_mode == _get_execution_mode():
+                _set_state(status="signal_waiting_for_start", **common_state)
             return
         if submission == "cooldown":
             _set_state(
@@ -803,7 +869,7 @@ async def _run_single_cycle() -> None:
         assert placed is not None
         order = placed.get("order", {})
         fill_count = _decimal(order.get("fill_count"))
-        status = f"{EXECUTION_MODE}_{'filled' if fill_count > 0 else 'unfilled'}"
+        status = f"{execution_mode}_{'filled' if fill_count > 0 else 'unfilled'}"
         event = _emit_event(
             "order",
             status,
@@ -815,12 +881,12 @@ async def _run_single_cycle() -> None:
     except Exception as exc:
         _emit_event(
             "rejection",
-            f"{EXECUTION_MODE}_order_failed",
+            f"{execution_mode}_order_failed",
             signal=signal_payload,
             error=str(exc),
         )
         _set_state(
-            status=f"{EXECUTION_MODE}_order_error",
+            status=f"{execution_mode}_order_error",
             **{**common_state, "last_error": str(exc)},
         )
 

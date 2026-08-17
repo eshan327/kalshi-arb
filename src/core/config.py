@@ -54,13 +54,6 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return bool(default)
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -71,11 +64,7 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-# Execution defaults. Both modes start disarmed; only live can reach the order API.
-EXECUTION_MODE = os.getenv("KALSHI_EXECUTION_MODE", "paper").strip().lower()
-if EXECUTION_MODE not in {"paper", "live"}:
-    EXECUTION_MODE = "paper"
-LIVE_TRADING_ENABLED = _env_bool("KALSHI_LIVE_TRADING_ENABLED", False)
+# Execution starts stopped; the operator chooses Paper or Live in the dashboard.
 PAPER_STARTING_CASH_CENTS = max(
     100, _env_int("KALSHI_PAPER_STARTING_CASH_CENTS", 100_000)
 )

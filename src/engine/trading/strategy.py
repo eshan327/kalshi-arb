@@ -378,6 +378,9 @@ def build_trade_signal(
         )
         return signal, signal.reason, diagnostics
 
+    if settings.trading_style == "click":
+        return None, "click_trading", diagnostics
+
     for side in sides:
         name = str(side["name"])
         contracts = int(side["contracts"])
@@ -463,8 +466,8 @@ def build_trade_signal(
                 trigger=f"{name}_bid_above_fair",
             )
 
-    if not settings.entries_enabled:
-        return None, "entries_disabled", diagnostics
+    if settings.trading_style == "semi":
+        return None, "manual_entries", diagnostics
 
     if diagnostics.get("technical_warmup_remaining_seconds") is not None:
         return None, "technical_warmup", diagnostics

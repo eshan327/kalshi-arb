@@ -10,13 +10,19 @@ from urllib.parse import urlparse
 import requests
 
 from core.auth import get_api_auth_headers
-from core.config import API_BASE_URL, LIVE_TRADING_ENABLED
+from core.config import API_BASE_URL
 
 HTTP_TIMEOUT_SEC = 10.0
 CLIENT_ORDER_PREFIX = "kalshi-algo-"
 
 _api_call_lock = Lock()
 _session = requests.Session()
+_live_order_entry_enabled = False
+
+
+def set_live_order_entry_enabled(enabled: bool) -> None:
+    global _live_order_entry_enabled
+    _live_order_entry_enabled = bool(enabled)
 
 
 def _request(
@@ -63,15 +69,17 @@ def place_limit_order(
     count: int | float | Decimal,
     price_cents: int | float | Decimal,
     client_order_id: str | None = None,
+    allow_when_stopped: bool = False,
 ) -> dict[str, Any]:
     """Place a V2 IOC order using outcome-side semantics at the strategy boundary."""
-    if not LIVE_TRADING_ENABLED:
-        raise RuntimeError("Live order entry requires KALSHI_LIVE_TRADING_ENABLED=true.")
-
     side = side.strip().lower()
     action = action.strip().lower()
     if side not in {"yes", "no"} or action not in {"buy", "sell"}:
         raise ValueError("side must be yes/no and action must be buy/sell")
+    if not _live_order_entry_enabled and not (
+        allow_when_stopped and action == "sell"
+    ):
+        raise RuntimeError("Start live trading before submitting orders.")
     try:
         quantity = Decimal(str(count)).quantize(Decimal("0.01"))
     except InvalidOperation as exc:

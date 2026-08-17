@@ -1,30 +1,29 @@
 # Kalshi 15-minute crypto trader
 
-Fee-aware systematic and discretionary trading for Kalshi's single-asset
-15-minute crypto markets. One process trades one asset in either paper or live
-mode.
+Fee-aware systematic, semi-systematic, and click trading for Kalshi's
+single-asset 15-minute crypto markets.
 
 ## Quick start
 
 ```bash
 uv sync
 cp .env.example .env
-uv run src/main.py --paper bitcoin
+uv run src/main.py bitcoin
 ```
 
-Open [http://127.0.0.1:5000](http://127.0.0.1:5000), verify the status strip,
-review the default limits, then click **Arm Paper** and enter `ARM PAPER`.
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000), choose a trading style,
+then click **Start Paper** or **Start Live**. The process starts stopped and
+neither destination has a confirmation step.
 
 Supported assets: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `ADA`, `NEAR`,
 `BCH`, `HYPE`, `TON`, and `ZEC`. Names such as `bitcoin` and `solana` also work.
 
 ```bash
-uv run src/main.py --paper ETH
-uv run src/main.py --live SOL
+uv run src/main.py ETH
+uv run src/main.py SOL
 ```
 
-If the mode is omitted, paper is the safe default. If the asset is omitted,
-`KALSHI_MARKET_ASSET` is used, then BTC.
+If the asset is omitted, `KALSHI_MARKET_ASSET` is used, then BTC.
 
 ## Credentials and modes
 
@@ -32,9 +31,9 @@ Both modes need a Kalshi API key because the live orderbook WebSocket is
 authenticated. Configure the demo or production key selected by `KALSHI_ENV` in
 `.env`.
 
-### Paper
+### Paper and live
 
-`--paper` never calls Kalshi's order-entry API. It:
+**Start Paper** never calls Kalshi's order-entry API. It:
 
 - starts with an ephemeral $1,000 balance by default;
 - simulates IOC fills against displayed live top-of-book price and quantity;
@@ -46,30 +45,20 @@ authenticated. Configure the demo or production key selected by `KALSHI_ENV` in
 Set `KALSHI_PAPER_STARTING_CASH_CENTS` to change the starting balance. The paper
 account resets when the process restarts.
 
-### Live
-
-`--live` sends IOC orders to the Kalshi environment selected by `KALSHI_ENV`.
-It remains unable to submit orders until this explicit gate is also set:
-
-```env
-KALSHI_LIVE_TRADING_ENABLED=true
-```
-
-`KALSHI_ENV=demo` sends orders to Kalshi demo. `KALSHI_ENV=prod` sends real-money
-orders. Every process starts disarmed and arming never survives a restart.
+**Start Live** sends IOC orders to the Kalshi environment selected by
+`KALSHI_ENV`: `demo` uses Kalshi demo and `prod` uses production. **Stop**
+disables order entry. Switching from live to paper also cancels this bot's
+resting live orders.
 
 ## Operating workflows
 
-### Fully systematic
+There is one dashboard. The trading-style selector changes who submits strategy
+orders; it does not hide tools or move the operator into another GUI.
 
-1. Start in paper mode.
-2. Confirm the status strip shows the intended mode, market, fresh data, and no
-   daily-loss lock.
-3. Review **Systematic Policy** and click **Save Settings**.
-4. Leave **New Systematic Entries** enabled.
-5. Arm the process with the displayed confirmation.
-6. Monitor signal intent, model fair value, current position, equity, and daily
-   P&L.
+### Systematic
+
+Select **Systematic — auto in/out**. The engine submits both model entries and
+model exits. The click ticket remains available for discretionary overrides.
 
 The engine evaluates once per second. Risk-reducing exits can act every cycle;
 new buys have a five-second default cooldown so account state can reconcile
@@ -77,32 +66,24 @@ before more risk is added.
 
 ### Semi-systematic
 
-Leave systematic entries enabled and use **Discretionary IOC** only when you
-want to add or reduce a specific side. Automated position exits remain active.
-The discretionary ticket bypasses the model edge and Kelly decision, but it
-does not bypass arming, the daily-loss guard, cash buffer, order cap, position
-cap, slippage setting, or reduce-only sell checks.
+Select **Semi — click in, auto out**. You enter positions from **Click Order**;
+the engine continues to manage model exits.
 
-### Manual-only
+### Click trading
 
-1. Set **New Systematic Entries** to **Disabled** and save settings.
-2. Arm the process.
-3. Choose Buy or Sell/Reduce, YES or NO, and contract count in
-   **Discretionary IOC**.
-4. Review the displayed top quote, model fair value, held quantity, and IOC
-   protection.
-5. Submit and enter `SUBMIT PAPER` or `SUBMIT LIVE` exactly.
+Select **Click trading — manual in/out**. The engine displays its model but does
+not submit model entries or exits. Choose Buy or Sell/Reduce, YES or NO, and a
+contract count in **Click Order**, then submit.
 
-Manual-only mode still retains the account-wide daily-loss guard. Automated
-signal exits are also still evaluated for existing positions; use **Pause** if
-you want all strategy submissions stopped.
+Click orders use the active market, top of book, configured slippage, order and
+position limits, cash buffer, reduce-only checks, and daily-loss guard.
 
 ### Stop and flatten
 
-- **Pause** disarms the engine. In live mode it also cancels this bot's resting
+- **Stop** stops the engine. In live mode it also cancels this bot's resting
   orders.
 - **Flatten Active Market** disarms, cancels, and submits a reduce-only IOC for
-  the active position. It requires `FLATTEN`.
+  the active position.
 - A daily-loss breach disarms and attempts to flatten the active market. The
   lock persists until the next New York trading day.
 
@@ -128,19 +109,19 @@ Sizing is the smallest of several ceilings:
 
 Entries also require a 30-second data warm-up, a fresh orderbook, non-fallback
 volatility, model probability between 20% and 80%, a known fee policy, and at
-least ten seconds to expiry. Optional orderbook-probability confirmation can
-hard-gate entries.
+least ten seconds to expiry. Optional model/orderbook agreement can hard-gate
+entries.
 
 Existing positions can exit on probability guardrails, profit plus edge decay,
 max-position edge decay, or edge reversal. Entry gates never block these exits.
 
 ## Dashboard map
 
-- **Operator strip:** mode, armed state, active market, decision-loop freshness,
-  daily P&L/lock, arm, pause, and flatten.
+- **Operator strip:** trading style, paper/live start, running state, active
+  market, data freshness, daily P&L/lock, stop, and flatten.
 - **Systematic Policy:** entry, risk, sizing, slippage, volatility, and
-  orderbook-confirmation settings.
-- **Discretionary IOC:** safe manual buy/reduce ticket for the active market.
+  model/orderbook agreement settings.
+- **Click Order:** manual buy/reduce ticket for the active market.
 - **Account and Signal:** current intent, fair value, implied probability, edge,
   cash, equity, and positions.
 - **Market, Model & Orderbook:** live YES/NO depth, synthetic index, settlement

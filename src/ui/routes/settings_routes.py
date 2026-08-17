@@ -60,7 +60,7 @@ def register_settings_routes(app: Flask) -> None:
         try:
             result = control_trading(
                 str(payload.get("operation") or ""),
-                str(payload.get("confirmation") or ""),
+                str(payload.get("execution_mode") or ""),
             )
             return jsonify(result), 200 if result.get("ok", True) else 502
         except ValueError as exc:
@@ -76,7 +76,6 @@ def register_settings_routes(app: Flask) -> None:
                 side=str(payload.get("side") or ""),
                 action=str(payload.get("action") or ""),
                 count=payload.get("count"),
-                confirmation=str(payload.get("confirmation") or ""),
             )
             return jsonify(result), 200 if result.get("ok", True) else 502
         except ValueError as exc:

@@ -5,8 +5,7 @@ import logging
 import threading
 
 from core.auth import get_ws_auth_headers
-from core.config import BRTI_RECALC_INTERVAL_SEC, EXECUTION_MODE
-from data.kalshi_trading import get_balance_summary
+from core.config import BRTI_RECALC_INTERVAL_SEC
 from engine.streamer import run_market_streamer
 from engine.trading import run_trading_loop
 from feeds.brti_aggregator import run_brti_aggregator
@@ -43,19 +42,8 @@ def start_background_services_once() -> None:
 
 
 def validate_auth_or_exit() -> None:
-    if EXECUTION_MODE == "paper":
-        try:
-            get_ws_auth_headers()
-            logger.info(
-                "Paper account enabled; live account balance will not be queried."
-            )
-            return
-        except Exception as exc:
-            logger.exception("Authentication failed: %s", exc)
-            raise SystemExit(1)
     try:
-        balance = get_balance_summary()
-        logger.info("Balance: $%s", f"{balance['balance'] / 100:,.2f}")
+        get_ws_auth_headers()
     except Exception as exc:
         logger.exception("Authentication failed: %s", exc)
         raise SystemExit(1)

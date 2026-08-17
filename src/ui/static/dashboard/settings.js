@@ -1,6 +1,6 @@
 (function () {
   const byId = (id) => document.getElementById(id);
-  let executionMode = "paper";
+  let executionMode = null;
   let latestState = {};
 
   function numberValue(id, fallback) {
@@ -30,14 +30,9 @@
   }
 
   function applySettings(settings) {
-    executionMode = settings.execution_mode || executionMode;
-    const modeLabel = executionMode === "live" ? "Live" : "Paper";
-    byId("tradingArmBtn").textContent = `Arm ${modeLabel}`;
-    byId("tradingHeading").textContent = `${modeLabel} Algorithmic Trading`;
-    byId("accountHeading").textContent = `${modeLabel} Account and Signal`;
     byId("manualCount").max = String(settings.max_order_contracts || 1);
     const values = {
-      settingEntriesEnabled: settings.entries_enabled ? "true" : "false",
+      settingTradingStyle: settings.trading_style,
       settingMinEdge: settings.min_edge_cents,
       settingMaxOrderContracts: settings.max_order_contracts,
       settingMaxPosition: settings.max_position_usd,
@@ -59,7 +54,7 @@
   function collectSettings() {
     const volOverride = (byId("settingVolOverride")?.value || "").trim();
     return {
-      entries_enabled: byId("settingEntriesEnabled")?.value === "true",
+      trading_style: byId("settingTradingStyle")?.value || "systematic",
       min_edge_cents: numberValue("settingMinEdge", 3),
       max_order_contracts: Math.round(numberValue("settingMaxOrderContracts", 5)),
       max_position_usd: numberValue("settingMaxPosition", 10),
@@ -118,13 +113,13 @@
     }
   }
 
-  async function control(operation, confirmation = "") {
+  async function control(operation, mode = null) {
     setStatus(`${operation} requested...`);
     try {
       const response = await fetch("/api/trading/control", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ operation, confirmation }),
+        body: JSON.stringify({ operation, execution_mode: mode }),
       });
       const payload = await response.json();
       if (!response.ok || !payload.ok) throw new Error(payload.error || payload.cancel_error || "Request failed");
@@ -224,11 +219,11 @@
       runtime.armed && orderbook.initialized && !risk.locked && Number.isFinite(quote)
     );
     byId("manualSubmitBtn").disabled = !ready;
-    if (!runtime.armed) setManualStatus("Arm trading to enable discretionary orders.");
+    if (!runtime.armed) setManualStatus("Start Paper or Live to enable click orders.");
     else if (risk.locked) setManualStatus("Daily-loss guard is locked.", true);
     else if (!Number.isFinite(quote)) {
       setManualStatus("Waiting for a current quote.", true);
-    } else setManualStatus("Ready. Every order requires a mode-specific confirmation.");
+    } else setManualStatus("Ready.");
   }
 
   async function submitManualOrder() {
@@ -237,11 +232,6 @@
       setManualStatus("Contracts must be a positive whole number.", true);
       return;
     }
-    const phrase = `SUBMIT ${executionMode.toUpperCase()}`;
-    const confirmation =
-      window.prompt(`Type ${phrase} to submit this ${executionMode} IOC order:`) || "";
-    if (!confirmation) return;
-
     setManualStatus("Submitting discretionary IOC...");
     try {
       const response = await fetch("/api/trading/manual", {
@@ -251,7 +241,6 @@
           action: byId("manualAction")?.value,
           side: byId("manualSide")?.value,
           count,
-          confirmation,
         }),
       });
       const payload = await response.json();
@@ -270,11 +259,10 @@
     const settings = state?.trading_settings || {};
     const account = state?.account || runtime.account || {};
     const risk = runtime.daily_risk || {};
-    executionMode = runtime.execution_mode || settings.execution_mode || executionMode;
-    const gate = executionMode === "live"
-      ? (settings.live_trading_enabled ? "live gate enabled" : "live gate disabled")
-      : "simulated fills";
-    const armed = runtime.armed ? "ARMED" : "DISARMED";
+    executionMode = runtime.execution_mode || null;
+    const modeLabel = executionMode === "live" ? "Live" : executionMode === "paper" ? "Paper" : null;
+    const destination = executionMode === "live" ? "Kalshi orders" : executionMode === "paper" ? "simulated fills" : "no execution";
+    const armed = runtime.armed ? "RUNNING" : "STOPPED";
     const lock = risk.locked ? " | DAILY LOSS LOCKED" : "";
     const orderbookReady = Boolean(state?.orderbook?.initialized);
     const cycleAge = finite(runtime.last_cycle_ts)
@@ -286,13 +274,13 @@
     const dataAge = cycleAge == null || bookAge == null ? null : Math.max(cycleAge, bookAge);
     setPill(
       "modeStatus",
-      executionMode.toUpperCase(),
-      executionMode === "live" ? "warn" : "ok"
+      executionMode ? executionMode.toUpperCase() : "NO MODE",
+      executionMode ? "ok" : "warn"
     );
     setPill(
       "armedStatus",
-      runtime.armed ? "ARMED" : "DISARMED",
-      runtime.armed ? (executionMode === "live" ? "danger" : "ok") : "warn"
+      runtime.armed ? "RUNNING" : "STOPPED",
+      runtime.armed ? "ok" : "warn"
     );
     setPill(
       "marketStatus",
@@ -311,8 +299,12 @@
       risk.locked ? "DAILY LOSS LOCKED" : `DAY ${money(risk.drawdown_cents)}`,
       risk.locked ? "danger" : "ok"
     );
+    byId("tradingHeading").textContent = modeLabel ? `${modeLabel} Trading` : "Trading";
+    byId("accountHeading").textContent = modeLabel ? `${modeLabel} Account and Signal` : "Account and Signal";
+    byId("startPaperBtn").disabled = runtime.armed && executionMode === "paper";
+    byId("startLiveBtn").disabled = runtime.armed && executionMode === "live";
     byId("runtimeStatus").textContent =
-      `${executionMode.toUpperCase()} | ${String(settings.kalshi_env || runtime.kalshi_env || "?").toUpperCase()} | ${gate} | ${armed} | ` +
+      `${executionMode ? executionMode.toUpperCase() : "STOPPED"} | ${String(settings.kalshi_env || runtime.kalshi_env || "?").toUpperCase()} | ${destination} | ${armed} | ` +
       `Runtime: ${runtime.status || "n/a"} | Market: ${runtime.current_market_ticker || "n/a"} | ` +
       `Daily P&L: ${money(risk.drawdown_cents)}${lock}`;
     renderSignal(state?.signal_monologue || runtime.signal_monologue || {});
@@ -322,16 +314,11 @@
 
   byId("settingsSaveBtn")?.addEventListener("click", saveSettings);
   byId("settingsResetBtn")?.addEventListener("click", resetSettings);
-  byId("tradingArmBtn")?.addEventListener("click", () => {
-    const phrase = `ARM ${executionMode.toUpperCase()}`;
-    const confirmation = window.prompt(`Type ${phrase} to arm ${executionMode} trading:`) || "";
-    if (confirmation) control("arm", confirmation);
-  });
+  byId("settingTradingStyle")?.addEventListener("change", saveSettings);
+  byId("startPaperBtn")?.addEventListener("click", () => control("start", "paper"));
+  byId("startLiveBtn")?.addEventListener("click", () => control("start", "live"));
   byId("tradingPauseBtn")?.addEventListener("click", () => control("pause"));
-  byId("tradingFlattenBtn")?.addEventListener("click", () => {
-    const confirmation = window.prompt("Type FLATTEN to pause and close the active market position:") || "";
-    if (confirmation) control("flatten", confirmation);
-  });
+  byId("tradingFlattenBtn")?.addEventListener("click", () => control("flatten"));
   byId("manualAction")?.addEventListener("change", renderManualTicket);
   byId("manualSide")?.addEventListener("change", renderManualTicket);
   byId("manualSubmitBtn")?.addEventListener("click", submitManualOrder);

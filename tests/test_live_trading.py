@@ -28,7 +28,7 @@ def test_v2_order_mapping(monkeypatch) -> None:
         requests.append((method, path, body))
         return {"order_id": "order-1", "fill_count": "2.00"}
 
-    monkeypatch.setattr(kalshi_trading, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(kalshi_trading, "_live_order_entry_enabled", True)
     monkeypatch.setattr(kalshi_trading, "_request", fake_request)
 
     result = kalshi_trading.place_limit_order(
@@ -52,6 +52,21 @@ def test_v2_order_mapping(monkeypatch) -> None:
         market_ticker="TEST", side="no", action="sell", count=1, price_cents=40
     )
     assert requests[-1][2]["side"] == "bid"
+    assert requests[-1][2]["reduce_only"] is True
+
+    monkeypatch.setattr(kalshi_trading, "_live_order_entry_enabled", False)
+    with pytest.raises(RuntimeError, match="Start live trading"):
+        kalshi_trading.place_limit_order(
+            market_ticker="TEST", side="yes", action="buy", count=1, price_cents=40
+        )
+    kalshi_trading.place_limit_order(
+        market_ticker="TEST",
+        side="yes",
+        action="sell",
+        count=1,
+        price_cents=40,
+        allow_when_stopped=True,
+    )
     assert requests[-1][2]["reduce_only"] is True
 
 
@@ -89,6 +104,38 @@ def test_fee_aware_signal_is_small_and_actionable() -> None:
     assert signal.edge_cents >= settings.min_edge_cents
 
 
+def test_trading_styles_control_strategy_orders() -> None:
+    book = OrderBook("TEST")
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    )
+    inputs = {
+        "pricing": {
+            "ready": True,
+            "p_model": 0.10,
+            "seconds_to_expiry": 850,
+            "vol_is_fallback": False,
+        },
+        "market_ticker": "TEST",
+        "book": book,
+        "bankroll_cents": 100_000,
+        "open_yes_contracts": 1,
+        "open_yes_avg_entry_cents": 60,
+        "runtime_uptime_seconds": 60,
+    }
+
+    signal, reason, _ = build_trade_signal(
+        **inputs, settings=TradingSettings(trading_style="semi")
+    )
+    assert signal is not None and signal.action == "sell"
+    assert reason == "stop_loss_guardrail_exit_yes"
+
+    signal, reason, _ = build_trade_signal(
+        **inputs, settings=TradingSettings(trading_style="click")
+    )
+    assert signal is None and reason == "click_trading"
+
+
 def test_fee_rounding_matches_order_level_formula() -> None:
     assert taker_fee_cents_per_contract(50) == 2
     assert taker_fee_cents_per_contract(50, fee_multiplier=2) == 4
@@ -117,18 +164,14 @@ def test_daily_loss_guard_persists(monkeypatch, tmp_path) -> None:
     state_path = tmp_path / "risk.json"
     monkeypatch.setattr(runtime, "EXECUTION_STATE_PATH", str(state_path))
     monkeypatch.setattr(runtime, "_risk_day", lambda: "2026-08-09")
-    monkeypatch.setattr(runtime, "_risk_state", {})
+    monkeypatch.setattr(runtime, "_risk_states", {})
 
-    first, _ = runtime._sync_daily_risk(10_000, 10)
-    locked, newly_locked = runtime._sync_daily_risk(9_000, 10)
+    first, _ = runtime._sync_daily_risk(10_000, 10, "paper")
+    locked, newly_locked = runtime._sync_daily_risk(9_000, 10, "paper")
     assert first["locked"] is False
     assert locked["locked"] is True
     assert newly_locked is True
-    expected_path = (
-        state_path
-        if runtime.EXECUTION_MODE == "live"
-        else state_path.with_name(f"{state_path.name}.paper")
-    )
+    expected_path = state_path.with_name(f"{state_path.name}.paper")
     assert expected_path.exists()
 
 
@@ -143,6 +186,27 @@ def test_disarmed_runtime_cannot_submit(monkeypatch) -> None:
     )
     status, result = runtime._submit_live_signal(object(), 1_000, 30)
     assert (status, result) == ("disarmed", None)
+
+
+def test_start_selects_execution_mode_without_confirmation(monkeypatch) -> None:
+    from engine.trading import runtime
+
+    account = {"cash_cents": 10_000, "equity_cents": 10_000, "positions": []}
+    monkeypatch.setattr(runtime, "_execution_mode", None)
+    monkeypatch.setattr(runtime, "_armed", False)
+    monkeypatch.setattr(runtime, "_runtime_state", {"armed": False})
+    monkeypatch.setattr(runtime, "_fetch_account_snapshot", lambda mode: account)
+    monkeypatch.setattr(
+        runtime, "_sync_daily_risk", lambda *_: ({"locked": False}, False)
+    )
+    monkeypatch.setattr(runtime, "_emit_event", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runtime, "set_live_order_entry_enabled", lambda _enabled: None)
+
+    result = runtime.control_trading("start", "paper")
+
+    assert result == {"ok": True, "status": "started", "execution_mode": "paper"}
+    assert runtime._get_execution_mode() == "paper"
+    assert runtime._is_armed() is True
 
 
 def test_paper_ioc_accounting_and_settlement() -> None:
@@ -183,7 +247,6 @@ def test_paper_mode_cannot_reach_live_order_api(monkeypatch) -> None:
     book.load_ws_snapshot(
         {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
     )
-    monkeypatch.setattr(runtime, "EXECUTION_MODE", "paper")
     monkeypatch.setattr(runtime, "_paper_account", PaperAccount(10_000))
     monkeypatch.setattr(runtime, "get_live_book", lambda: book)
     monkeypatch.setattr(
@@ -193,6 +256,7 @@ def test_paper_mode_cannot_reach_live_order_api(monkeypatch) -> None:
     )
 
     result = runtime._place_order(
+        execution_mode="paper",
         market_ticker="TEST",
         side="yes",
         action="buy",
@@ -209,7 +273,7 @@ def test_discretionary_order_uses_shared_risk_boundary(monkeypatch) -> None:
     book.load_ws_snapshot(
         {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
     )
-    monkeypatch.setattr(runtime, "EXECUTION_MODE", "paper")
+    monkeypatch.setattr(runtime, "_execution_mode", "paper")
     monkeypatch.setattr(runtime, "_armed", True)
     monkeypatch.setattr(runtime, "_paper_account", PaperAccount(10_000))
     monkeypatch.setattr(runtime, "get_live_book", lambda: book)
@@ -225,13 +289,13 @@ def test_discretionary_order_uses_shared_risk_boundary(monkeypatch) -> None:
     )
 
     result = runtime.submit_manual_order(
-        side="yes", action="buy", count=2, confirmation="SUBMIT PAPER"
+        side="yes", action="buy", count=2
     )
     assert result["status"] == "manual_paper_filled"
     assert runtime._paper_account.snapshot()["positions"][0]["contracts"] == 2
 
     monkeypatch.setattr(runtime, "_armed", False)
-    with pytest.raises(RuntimeError, match="Arm trading"):
+    with pytest.raises(RuntimeError, match="Start trading"):
         runtime.submit_manual_order(
-            side="yes", action="buy", count=1, confirmation="SUBMIT PAPER"
+            side="yes", action="buy", count=1
         )

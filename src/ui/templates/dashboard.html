@@ -169,6 +169,10 @@
       align-items: center;
       flex-wrap: wrap;
     }
+    .operator-control {
+      min-width: 180px;
+      margin-right: 4px;
+    }
     .status-pill {
       border: 1px solid #40516a;
       border-radius: 999px;
@@ -536,33 +540,36 @@
     </section>
 
     <section class="card span-2" id="tradingCard">
-      <h2 id="tradingHeading">Algorithmic Trading</h2>
+      <h2 id="tradingHeading">Trading</h2>
       <div class="operator-bar">
         <div class="status-pills" role="status" aria-live="polite">
           <span class="status-pill" id="modeStatus">Mode —</span>
-          <span class="status-pill" id="armedStatus">Disarmed</span>
+          <span class="status-pill" id="armedStatus">Stopped</span>
           <span class="status-pill" id="marketStatus">Market —</span>
           <span class="status-pill" id="dataStatus">Data —</span>
           <span class="status-pill" id="riskStatus">Risk —</span>
         </div>
         <div class="operator-actions">
-          <button class="btn primary" id="tradingArmBtn" type="button">Arm</button>
-          <button class="btn" id="tradingPauseBtn" type="button">Pause</button>
+          <label class="control operator-control">Trading Style
+            <select id="settingTradingStyle">
+              <option value="systematic">Systematic — auto in/out</option>
+              <option value="semi">Semi — click in, auto out</option>
+              <option value="click">Click trading — manual in/out</option>
+            </select>
+          </label>
+          <button class="btn primary" id="startPaperBtn" type="button">Start Paper</button>
+          <button class="btn primary" id="startLiveBtn" type="button">Start Live</button>
+          <button class="btn" id="tradingPauseBtn" type="button">Stop</button>
           <button class="btn danger" id="tradingFlattenBtn" type="button">Flatten Active Market</button>
         </div>
       </div>
       <div class="panel-note" id="runtimeStatus" aria-live="polite">Runtime state unavailable.</div>
+      <p class="panel-note">One workspace: systematic trades automatically; semi-systematic uses the click ticket for entries and automatic exits; click trading leaves entries and exits to you.</p>
       <div class="settings-live-grid">
         <div>
           <details class="policy-details">
           <summary>Systematic Policy &amp; Risk Limits</summary>
           <div class="control-grid">
-            <label class="control">New Systematic Entries
-              <select id="settingEntriesEnabled">
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </label>
             <label class="control">Minimum Net Edge (cents)
               <input id="settingMinEdge" type="number" step="0.5" min="0.5" max="25" />
             </label>
@@ -610,8 +617,8 @@
           </details>
 
           <section class="trade-ticket" aria-labelledby="manualTicketHeading">
-            <h3 class="section-title" id="manualTicketHeading">Discretionary IOC</h3>
-            <p class="panel-note">Uses the active market, live top of book, configured slippage, order cap, position cap, cash buffer, and daily-loss guard. Disable systematic entries first for manual-only operation.</p>
+            <h3 class="section-title" id="manualTicketHeading">Click Order</h3>
+            <p class="panel-note">Always available while running. The selected trading style controls what the engine does around your orders.</p>
             <div class="manual-grid">
               <label class="control">Action
                 <select id="manualAction">
@@ -633,7 +640,7 @@
             <div class="button-row">
               <button class="btn primary" id="manualSubmitBtn" type="button" disabled>Submit IOC</button>
             </div>
-            <div class="panel-note" id="manualStatus" aria-live="polite">Arm trading to enable discretionary orders.</div>
+            <div class="panel-note" id="manualStatus" aria-live="polite">Start Paper or Live to enable click orders.</div>
           </section>
         </div>
 
