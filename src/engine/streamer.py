@@ -9,7 +9,7 @@ from typing import Optional
 
 import websockets
 
-from core.asset_context import get_active_asset_context
+from core.asset_context import get_active_market_profile
 from core.config import (
     RECONCILIATION_CONSECUTIVE_BREACHES,
     RECONCILIATION_TOP_N,
@@ -239,7 +239,7 @@ async def run_market_streamer() -> None:
     current_market = None
 
     while True:
-        profile = get_active_asset_context().profile
+        profile = get_active_market_profile()
 
         logger.info(
             "Fetching active %s 15m market to stream (%s).",

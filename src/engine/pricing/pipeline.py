@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
 from typing import Any
 
 from core.market_profiles import MarketProfile
@@ -10,6 +9,7 @@ from engine.asian_pricer import (
     prob_collapsed_variance_binary,
     prob_levy_tw_binary,
 )
+from engine.market_stream.discovery import parse_iso8601_to_epoch
 from engine.settlement_sampling import (
     extract_valid_index_points,
     reconstruct_discrete_forward_fill_samples,
@@ -18,15 +18,6 @@ from engine.vol_estimator import realized_vol_from_price_points
 
 _VOL_WINDOW_SEC = 300.0
 _MAX_SAMPLE_STALENESS_SEC = 5.0
-
-
-def parse_close_time_epoch(value: str | None) -> float | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
 
 
 def _json_safe_detail(detail: dict[str, float | int | str | None]) -> dict[str, Any]:
@@ -117,7 +108,7 @@ def compute_pricing_snapshot(
     close_time_iso: str | None,
 ) -> dict[str, Any]:
     settlement_seconds = int(profile.settlement_window_seconds)
-    close_ts = parse_close_time_epoch(close_time_iso)
+    close_ts = parse_iso8601_to_epoch(close_time_iso)
 
     base = _build_base_snapshot(
         profile=profile,

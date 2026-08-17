@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from flask import Flask, jsonify, request
 
-from engine.trading import (
+from engine.trading.runtime import (
     control_trading,
     get_trading_events,
     get_trading_runtime_snapshot,
+    submit_manual_order,
+)
+from engine.trading.settings import (
     get_trading_settings_snapshot,
     reset_trading_settings,
-    submit_manual_order,
     update_trading_settings,
 )
 

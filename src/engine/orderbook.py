@@ -1,8 +1,7 @@
-import logging
 import heapq
+import logging
 import time
 from threading import RLock
-
 
 logger = logging.getLogger(__name__)
 
@@ -83,24 +82,6 @@ class OrderBook:
             for price_cents, qty in top_items
         ]
 
-    def load_ws_snapshot(self, msg):
-        """
-        Loads the WS orderbook_snapshot message.
-        msg keys: yes_dollars_fp, no_dollars_fp, market_ticker, market_id
-        """
-        with self._lock:
-            self._load_levels(msg.get("yes_dollars_fp", []), self.yes)
-            self._load_levels(msg.get("no_dollars_fp", []), self.no)
-
-            seq = self._extract_seq(msg)
-            if isinstance(seq, int):
-                self.expected_seq = seq + 1
-
-            self.initialized = True
-            self.needs_resync = False
-            self.last_update_ts = time.time()
-            logger.info("Snapshot loaded: %s yes, %s no", len(self.yes), len(self.no))
-
     def load_rest_snapshot(self, snapshot):
         """
         Loads REST snapshot payload into yes/no books.
@@ -166,31 +147,6 @@ class OrderBook:
                 book[price] = new_qty
             self.last_update_ts = time.time()
 
-    def check_seq(self, seq):
-        """
-        Checks if the sequence number is what we expect.
-        Returns True if OK, False if there's a gap (needs resync).
-        """
-        with self._lock:
-            if not isinstance(seq, int):
-                logger.warning("Invalid seq value: %s", seq)
-                self.needs_resync = True
-                return False
-
-            if self.expected_seq is None:
-                self.expected_seq = seq + 1
-                return True
-
-            if seq != self.expected_seq:
-                logger.warning(
-                    "Seq gap detected: expected %s, got %s", self.expected_seq, seq
-                )
-                self.needs_resync = True
-                return False
-
-            self.expected_seq = seq + 1
-            return True
-
     def apply_delta_with_seq(self, seq, msg):
         """
         Applies a delta only when sequence is in-order.
@@ -218,16 +174,6 @@ class OrderBook:
             self.expected_seq = seq + 1
             return True
 
-    def apply_buffered_deltas(self, buffered_deltas):
-        """Replays buffered deltas in ascending sequence order."""
-        applied = 0
-        for seq, msg in sorted(buffered_deltas, key=lambda x: x[0]):
-            if self.apply_delta_with_seq(seq, msg):
-                applied += 1
-            if self.needs_resync:
-                break
-        return applied
-
     def reset(self):
         """Clears all state for a fresh reconnect."""
         with self._lock:
@@ -239,35 +185,9 @@ class OrderBook:
             self.last_update_ts = None
 
     def get_orderbook(self):
-        """
-        Returns the current orderbook as sorted lists in cents.
-        yes_bids: [(price_cents, qty), ...] sorted descending
-        yes_asks: implied from no_bids (100 - no_price)
-        no_bids: [(price_cents, qty), ...] sorted descending
-        no_asks: implied from yes_bids (100 - yes_price)
-        """
+        """Returns the complete orderbook as sorted lists in cents."""
         with self._lock:
-            yes_bids = sorted(
-                [
-                    (float(p), self._normalize_qty(q))
-                    for p, q in self.yes.items()
-                ],
-                key=lambda x: x[0],
-                reverse=True,
-            )
-            no_bids = sorted(
-                [
-                    (float(p), self._normalize_qty(q))
-                    for p, q in self.no.items()
-                ],
-                key=lambda x: x[0],
-                reverse=True,
-            )
-
-            yes_asks = sorted([(round(100.0 - p, 2), q) for p, q in no_bids])
-            no_asks = sorted([(round(100.0 - p, 2), q) for p, q in yes_bids])
-
-            return yes_bids, yes_asks, no_bids, no_asks
+            return self.get_orderbook_top_n(max(len(self.yes), len(self.no)))
 
     def get_orderbook_top_n(self, depth):
         """Returns top-N slices of the current orderbook in cents for low-latency read paths."""

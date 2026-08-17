@@ -12,7 +12,7 @@ from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from core.asset_context import get_active_asset_context
+from core.asset_context import get_active_market_profile
 from core.config import (
     EXECUTION_EVENTS_MAXLEN,
     EXECUTION_EVENTS_PATH,
@@ -778,7 +778,7 @@ async def _run_single_cycle() -> None:
         settings,
     )
 
-    profile = get_active_asset_context().profile
+    profile = get_active_market_profile()
     try:
         series = await asyncio.to_thread(get_series, profile.kalshi_series_ticker)
         event_ticker = str(market_info["event_ticker"])

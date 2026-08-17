@@ -5,18 +5,16 @@ import logging
 import time
 from dataclasses import dataclass
 
-from core.market_profiles import MarketProfile, get_market_profile
+from core.market_profiles import MarketProfile
 from feeds.brti_calc import calculate_brti, reset_brti_calc_state
+from feeds.exchanges.bitstamp import BitstampAdapter
+from feeds.exchanges.coinbase import CoinbaseAdapter
+from feeds.exchanges.gemini import GeminiAdapter
+from feeds.exchanges.kraken import KrakenAdapter
+from feeds.exchanges.paxos import PaxosAdapter
 from feeds.state.book_store import get_exchange_books_ref
 from feeds.state.runtime_state import reset_brti_runtime_state
 from feeds.state.tick_store import record_brti_tick, set_brti_state
-from feeds.exchanges import (
-    BitstampAdapter,
-    CoinbaseAdapter,
-    GeminiAdapter,
-    KrakenAdapter,
-    PaxosAdapter,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +22,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FeedsRuntimeContext:
     profile: MarketProfile
-
-    @staticmethod
-    def create(asset: str) -> "FeedsRuntimeContext":
-        return FeedsRuntimeContext(profile=get_market_profile(asset))
 
     def reset_state(self) -> None:
         reset_brti_calc_state()

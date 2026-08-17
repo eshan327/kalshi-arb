@@ -7,21 +7,6 @@ from typing import Any
 
 _log_lock = RLock()
 _exchange_ws_log = deque(maxlen=5000)
-_exchange_ws_stats: dict[str, int] = {
-    "total_received": 0,
-    "total_parsed": 0,
-    "coinbase_received": 0,
-    "coinbase_parsed": 0,
-    "kraken_received": 0,
-    "kraken_parsed": 0,
-    "gemini_received": 0,
-    "gemini_parsed": 0,
-    "bitstamp_received": 0,
-    "bitstamp_parsed": 0,
-    "paxos_received": 0,
-    "paxos_parsed": 0,
-    "book_updates_applied": 0,
-}
 
 
 def _zeroed_ws_stats() -> dict[str, int]:
@@ -40,6 +25,9 @@ def _zeroed_ws_stats() -> dict[str, int]:
         "paxos_parsed": 0,
         "book_updates_applied": 0,
     }
+
+
+_exchange_ws_stats = _zeroed_ws_stats()
 
 
 def reset_diagnostics_state() -> None:

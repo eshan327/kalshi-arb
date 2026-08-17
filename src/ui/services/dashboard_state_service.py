@@ -2,18 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.asset_context import get_active_asset_context
+from core.asset_context import get_active_market_profile
 from core.market_metadata import extract_suggested_strike
 from engine.book_microstructure import get_last_p_book_snapshot
 from engine.live_pricing import compute_live_pricing_snapshot
 from engine.stream_metrics import get_ws_message_log_size, get_ws_processing_stats
 from engine.streamer import get_live_market_info, get_live_orderbook_snapshot
-from engine.trading import get_trading_runtime_snapshot, get_trading_settings_snapshot
-from feeds.brti_aggregator import (
-    get_brti_settlement_proxy,
-    get_brti_state,
-    get_brti_ws_stats,
-)
+from engine.trading.runtime import get_trading_runtime_snapshot
+from engine.trading.settings import get_trading_settings_snapshot
+from feeds.state.diagnostics_store import get_brti_ws_stats
+from feeds.state.tick_store import get_brti_settlement_proxy, get_brti_state
 
 
 def clamped_limit(raw_limit: int | None, default: int, max_limit: int) -> int:
@@ -23,8 +21,7 @@ def clamped_limit(raw_limit: int | None, default: int, max_limit: int) -> int:
 
 
 def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
-    asset_context = get_active_asset_context()
-    profile = asset_context.profile
+    profile = get_active_market_profile()
 
     snapshot = get_live_orderbook_snapshot(depth=depth)
     brti = get_brti_state()

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
-
 from flask import Flask, jsonify, request
 
 from core.config import WS_LOG_DEFAULT_LIMIT
@@ -11,11 +8,9 @@ from engine.stream_metrics import (
     get_top10_impact_log,
     get_ws_message_log,
 )
-from feeds.brti_aggregator import get_brti_ticks, get_brti_ws_log
+from feeds.state.diagnostics_store import get_brti_ws_log
+from feeds.state.tick_store import get_brti_ticks
 from ui.services.dashboard_state_service import clamped_limit
-
-
-LimitedLogFetcher = Callable[..., Any]
 
 
 def _parse_limit_arg() -> int:
@@ -23,31 +18,23 @@ def _parse_limit_arg() -> int:
     return clamped_limit(requested_limit, WS_LOG_DEFAULT_LIMIT, WS_LOG_DEFAULT_LIMIT)
 
 
-def _register_limited_log_route(
-    app: Flask,
-    *,
-    route: str,
-    endpoint: str,
-    fetcher: LimitedLogFetcher,
-) -> None:
-    @app.get(route, endpoint=endpoint)
-    def _handler(fetcher: LimitedLogFetcher = fetcher):
-        return jsonify(fetcher(limit=_parse_limit_arg()))
-
-
 def register_log_routes(app: Flask) -> None:
-    route_specs: tuple[tuple[str, str, LimitedLogFetcher], ...] = (
-        ("/api/ws-log", "api_ws_log", get_ws_message_log),
-        ("/api/top10-impact", "api_top10_impact", get_top10_impact_log),
-        ("/api/brti-ticks", "api_brti_ticks", get_brti_ticks),
-        ("/api/brti-ws-log", "api_brti_ws_log", get_brti_ws_log),
-        ("/api/reconciliation-log", "api_reconciliation_log", get_reconciliation_log),
-    )
+    @app.get("/api/ws-log")
+    def api_ws_log():
+        return jsonify(get_ws_message_log(limit=_parse_limit_arg()))
 
-    for route, endpoint, fetcher in route_specs:
-        _register_limited_log_route(
-            app,
-            route=route,
-            endpoint=endpoint,
-            fetcher=fetcher,
-        )
+    @app.get("/api/top10-impact")
+    def api_top10_impact():
+        return jsonify(get_top10_impact_log(limit=_parse_limit_arg()))
+
+    @app.get("/api/brti-ticks")
+    def api_brti_ticks():
+        return jsonify(get_brti_ticks(limit=_parse_limit_arg()))
+
+    @app.get("/api/brti-ws-log")
+    def api_brti_ws_log():
+        return jsonify(get_brti_ws_log(limit=_parse_limit_arg()))
+
+    @app.get("/api/reconciliation-log")
+    def api_reconciliation_log():
+        return jsonify(get_reconciliation_log(limit=_parse_limit_arg()))

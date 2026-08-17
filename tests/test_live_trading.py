@@ -72,7 +72,7 @@ def test_v2_order_mapping(monkeypatch) -> None:
 
 def test_fee_aware_signal_is_small_and_actionable() -> None:
     book = OrderBook("TEST")
-    book.load_ws_snapshot(
+    book.load_rest_snapshot(
         {
             "yes_dollars_fp": [[0.59, 200], [0.58, 100]],
             "no_dollars_fp": [[0.40, 200], [0.39, 100]],
@@ -106,7 +106,7 @@ def test_fee_aware_signal_is_small_and_actionable() -> None:
 
 def test_trading_styles_control_strategy_orders() -> None:
     book = OrderBook("TEST")
-    book.load_ws_snapshot(
+    book.load_rest_snapshot(
         {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
     )
     inputs = {
@@ -152,7 +152,7 @@ def test_tapered_slippage_moves_by_exchange_ticks() -> None:
     assert slipped_price_cents(10.0, 1, "up", ranges) == 11.0
 
     book = OrderBook("SUBPENNY")
-    book.load_ws_snapshot(
+    book.load_rest_snapshot(
         {"yes_dollars_fp": [[0.062, 10]], "no_dollars_fp": [[0.937, 10]]}
     )
     assert book.get_best_prices()[:2] == (6.2, 6.3)
@@ -211,7 +211,7 @@ def test_start_selects_execution_mode_without_confirmation(monkeypatch) -> None:
 
 def test_paper_ioc_accounting_and_settlement() -> None:
     book = OrderBook("TEST")
-    book.load_ws_snapshot(
+    book.load_rest_snapshot(
         {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 2]]}
     )
     account = PaperAccount(10_000)
@@ -244,7 +244,7 @@ def test_paper_mode_cannot_reach_live_order_api(monkeypatch) -> None:
     from engine.trading import runtime
 
     book = OrderBook("TEST")
-    book.load_ws_snapshot(
+    book.load_rest_snapshot(
         {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
     )
     monkeypatch.setattr(runtime, "_paper_account", PaperAccount(10_000))
@@ -270,7 +270,7 @@ def test_discretionary_order_uses_shared_risk_boundary(monkeypatch) -> None:
     from engine.trading import runtime
 
     book = OrderBook("TEST")
-    book.load_ws_snapshot(
+    book.load_rest_snapshot(
         {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
     )
     monkeypatch.setattr(runtime, "_execution_mode", "paper")

@@ -49,12 +49,6 @@
     return String(reason || "unknown");
   }
 
-  function friendlyAssetName(asset) {
-    if (asset === "ETH") return "Ethereum";
-    if (asset === "BTC") return "Bitcoin";
-    return String(asset || "Unknown");
-  }
-
   window.DashboardFormat = {
     fmtQty,
     fmtPriceCent,
@@ -62,6 +56,5 @@
     vizFillClass,
     vizPctClass,
     humanPricingReason,
-    friendlyAssetName,
   };
 })();

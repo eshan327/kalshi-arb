@@ -1,7 +1,8 @@
 import math
 import statistics
 import time
-from typing import TypedDict
+
+from feeds.state.book_store import ExchangeBook
 
 # --- Index Methodology Parameters (from CME CF RTI methodology family) ---
 # Section 6.2 style depth-walk parameters; applied to the active profile's spot orderbooks.
@@ -12,12 +13,6 @@ STALE_THRESHOLD = 30  # Discard exchange if data >30s old
 
 # Tracks exchanges flagged as potentially erroneous (Section 5.3 step 4 hysteresis)
 _flagged_exchanges: set[str] = set()
-
-
-class ExchangeBook(TypedDict):
-    bids: dict[float, float]
-    asks: dict[float, float]
-    last_update: float
 
 
 ExchangeBooks = dict[str, ExchangeBook]
@@ -92,15 +87,8 @@ def compute_dynamic_order_cap(
         else:
             s_prime.append(s_t[i])
 
-    # Eq 4g: winsorized mean
-    winsorized_mean = sum(s_prime) / n_t
-
     # Eq 4h: winsorized sample standard deviation
-    if n_t <= 1:
-        sigma = 0
-    else:
-        variance = sum((x - winsorized_mean) ** 2 for x in s_prime) / (n_t - 1)
-        sigma = math.sqrt(variance)
+    sigma = statistics.stdev(s_prime) if n_t > 1 else 0
 
     # Eq 5: C_T = trimmed_mean + 5 * sigma
     return trimmed_mean + 5 * sigma
@@ -243,11 +231,7 @@ def consolidate_books(
 
 def consolidate_books_uncapped(exchange_books: ExchangeBooks) -> tuple[Levels, Levels]:
     """Merge without capping — used for dynamic order cap calculation."""
-    all_bids, all_asks = _aggregate_book_levels(exchange_books)
-
-    bids = sorted(all_bids.items(), key=lambda x: x[0], reverse=True)
-    asks = sorted(all_asks.items(), key=lambda x: x[0])
-    return bids, asks
+    return consolidate_books(exchange_books, None)
 
 
 # ---- Step 3: Price-Volume Curves (Eq. 1a-1f) ----
@@ -465,26 +449,9 @@ def calculate_brti(
 
     spacing = max(1, int(spacing))
 
-    try:
-        deviation_threshold = float(deviation_threshold)
-    except (TypeError, ValueError):
-        deviation_threshold = DEVIATION_THRESHOLD
-    if deviation_threshold <= 0:
-        deviation_threshold = DEVIATION_THRESHOLD
-
-    try:
-        potentially_erroneous_param = float(potentially_erroneous_param)
-    except (TypeError, ValueError):
-        potentially_erroneous_param = POTENTIALLY_ERRONEOUS_PARAM
-    if potentially_erroneous_param <= 0:
-        potentially_erroneous_param = POTENTIALLY_ERRONEOUS_PARAM
-
-    try:
-        stale_threshold = float(stale_threshold)
-    except (TypeError, ValueError):
-        stale_threshold = STALE_THRESHOLD
-    if stale_threshold <= 0:
-        stale_threshold = STALE_THRESHOLD
+    deviation_threshold = float(deviation_threshold)
+    potentially_erroneous_param = float(potentially_erroneous_param)
+    stale_threshold = float(stale_threshold)
 
     # --- Section 5.1: Stale data ---
     valid_books = _filter_stale_books(

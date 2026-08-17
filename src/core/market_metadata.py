@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 
 def extract_suggested_strike(market_info: dict) -> float | None:
     """Best-effort strike extraction from Kalshi market metadata."""
@@ -24,24 +26,8 @@ def extract_suggested_strike(market_info: dict) -> float | None:
         if not isinstance(text, str):
             continue
 
-        cleaned = text.replace(",", "")
-        token = ""
-        matches = []
-        for ch in cleaned:
-            if ch.isdigit() or ch == ".":
-                token += ch
-            else:
-                if token:
-                    matches.append(token)
-                    token = ""
-        if token:
-            matches.append(token)
-
-        for candidate in matches:
-            try:
-                value = float(candidate)
-            except ValueError:
-                continue
+        for candidate in re.findall(r"\d+(?:\.\d+)?", text.replace(",", "")):
+            value = float(candidate)
             if 1000 <= value <= 2_000_000:
                 return value
 
