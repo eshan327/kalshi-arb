@@ -32,3 +32,11 @@ def extract_suggested_strike(market_info: dict) -> float | None:
                 return value
 
     return None
+
+
+def extract_settlement_decimals(market_info: dict, fallback: int) -> int:
+    custom_strike = market_info.get("custom_strike") if market_info else None
+    value = (
+        custom_strike.get("round_digits") if isinstance(custom_strike, dict) else None
+    )
+    return max(0, min(12, int(value))) if isinstance(value, (int, float)) else fallback

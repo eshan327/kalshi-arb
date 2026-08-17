@@ -1,9 +1,10 @@
-from core.market_metadata import extract_suggested_strike
+from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
 from engine import live_pricing
 
 
 def test_strike_parser_handles_formatted_price() -> None:
     assert extract_suggested_strike({"title": "Bitcoin above $123,456.78"}) == 123_456.78
+    assert extract_settlement_decimals({"custom_strike": {"round_digits": 7}}, 2) == 7
 
 
 def test_live_pricing_cache_is_single_entry_and_returns_copies(monkeypatch) -> None:

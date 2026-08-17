@@ -10,8 +10,7 @@ from engine.orderbook import OrderBook
 from engine.trading.fees import (
     expected_value_cents,
     quarter_kelly_fraction_binary,
-    time_progress_multiplier,
-    time_weighted_quarter_kelly_fraction_binary,
+    taker_fee_cents_per_contract,
 )
 from engine.trading.models import TradeSignal
 from engine.trading.settings import TradingSettings
@@ -19,12 +18,9 @@ from engine.trading.settings import TradingSettings
 PROBABILITY_LOWER_BOUND = 0.20
 PROBABILITY_UPPER_BOUND = 0.80
 MAX_POSITION_USD_HARD_CAP = 50.0
-MARKET_WINDOW_SECONDS = 900.0
 TECHNICAL_WARMUP_SECONDS = 30.0
-ENTRY_CUTOFF_SECONDS_TO_EXPIRY = 10.0
-MAX_ORDERBOOK_AGE_SECONDS = 5.0
-TAKE_PROFIT_PNL_RATIO = 0.15
-EDGE_DECAY_SCALEOUT_FACTOR = 0.5
+ENTRY_CUTOFF_SECONDS_TO_EXPIRY = 20.0
+MAX_ORDERBOOK_AGE_SECONDS = 2.0
 MARGINAL_CREDIT_STEP_CENTS = 0.5
 
 
@@ -93,49 +89,25 @@ def slipped_price_cents(
     )
 
 
-def _seconds_elapsed_in_window(pricing: dict[str, Any]) -> float:
-    sec_to_expiry = _safe_float(pricing.get("seconds_to_expiry"))
-    if sec_to_expiry is None:
-        # Unknown timing is treated as earliest phase for safety.
-        return 0.0
-
-    elapsed = float(MARKET_WINDOW_SECONDS) - float(sec_to_expiry)
-    return max(0.0, min(float(MARKET_WINDOW_SECONDS), float(elapsed)))
-
-
 def _kelly_target_contracts(
     *,
     p_win: float,
     quote_price_cents: float,
     bankroll_cents: int,
     max_position_usd: float,
-    seconds_elapsed: float,
-) -> tuple[int, float, float, float]:
-    px = max(0.01, float(quote_price_cents))
+    fee_cents: float,
+) -> tuple[int, float, float]:
+    all_in_cost = max(0.01, float(quote_price_cents) + max(0.0, float(fee_cents)))
     kelly_fraction_quarter = quarter_kelly_fraction_binary(
-        p_win=float(p_win), cost_cents=float(px)
-    )
-    time_multiplier = time_progress_multiplier(
-        seconds_elapsed=float(seconds_elapsed),
-        window_seconds=float(MARKET_WINDOW_SECONDS),
-    )
-    weighted_kelly_fraction = time_weighted_quarter_kelly_fraction_binary(
         p_win=float(p_win),
-        cost_cents=float(px),
-        seconds_elapsed=float(seconds_elapsed),
-        window_seconds=float(MARKET_WINDOW_SECONDS),
+        cost_cents=all_in_cost,
     )
 
-    cap_by_kelly = float(max(0, int(bankroll_cents))) * float(weighted_kelly_fraction)
+    cap_by_kelly = float(max(0, int(bankroll_cents))) * kelly_fraction_quarter
     cap_by_fixed = min(float(max_position_usd), MAX_POSITION_USD_HARD_CAP) * 100.0
     notional_cap_cents = max(0.0, min(cap_by_kelly, cap_by_fixed))
-    target_contracts = max(0, int(notional_cap_cents // float(px)))
-    return (
-        target_contracts,
-        kelly_fraction_quarter,
-        time_multiplier,
-        weighted_kelly_fraction,
-    )
+    target_contracts = max(0, int(notional_cap_cents // all_in_cost))
+    return target_contracts, kelly_fraction_quarter, all_in_cost
 
 
 def _credit_target_contracts(
@@ -195,7 +167,9 @@ def apply_pricing_overrides(
         return out
 
     spot = _safe_float(out.get("spot_index"))
-    strike = _safe_float(out.get("strike_usd"))
+    strike = _safe_float(out.get("model_strike_usd"))
+    if strike is None:
+        strike = _safe_float(out.get("strike_usd"))
     sec_exp = _safe_float(out.get("seconds_to_expiry"))
     base_sigma = _safe_float(out.get("sigma_annual"))
     settlement_window = int(_safe_float(out.get("settlement_window_seconds")) or 60)
@@ -219,8 +193,10 @@ def apply_pricing_overrides(
             n_fixes=settlement_window,
         )
     else:
-        k = max(0, int(_safe_float(out.get("twap_seconds_elapsed")) or 0))
-        mean_known = _safe_float(out.get("twap_partial_avg"))
+        k = max(0, int(_safe_float(out.get("twap_samples_observed")) or 0))
+        mean_known = _safe_float(out.get("twap_partial_avg_raw"))
+        if mean_known is None:
+            mean_known = _safe_float(out.get("twap_partial_avg"))
         result = prob_collapsed_variance_binary(
             strike=strike,
             sigma_annual=sigma,
@@ -278,9 +254,6 @@ def build_trade_signal(
     p_model_value = _safe_float(pricing.get("p_model"))
     if p_model_value is None or not (0.0 < p_model_value < 1.0):
         return None, "invalid_model_probability", diagnostics
-
-    market_elapsed_seconds = _seconds_elapsed_in_window(pricing)
-    diagnostics["market_elapsed_seconds"] = round(float(market_elapsed_seconds), 6)
 
     yes_bid, yes_ask, no_bid, no_ask = _best_quotes(book)
     diagnostics.update(
@@ -381,6 +354,10 @@ def build_trade_signal(
     if settings.trading_style == "click":
         return None, "click_trading", diagnostics
 
+    fee_policy_ready = fee_multiplier is not None and fee_type in {
+        "quadratic",
+        "quadratic_with_maker_fees",
+    }
     for side in sides:
         name = str(side["name"])
         contracts = int(side["contracts"])
@@ -391,8 +368,32 @@ def build_trade_signal(
         unrealized = (
             float(contracts) * (float(bid) - avg_entry) if bid is not None else None
         )
-        hold_edge = fair - float(bid) if bid is not None else None
-        side.update(deployed=deployed, unrealized=unrealized, hold_edge=hold_edge)
+        exit_quote = (
+            slipped_price_cents(
+                float(bid), settings.slippage_ticks, "down", price_ranges
+            )
+            if bid is not None
+            else None
+        )
+        exit_fee = (
+            taker_fee_cents_per_contract(
+                float(exit_quote), fee_multiplier=float(fee_multiplier)
+            )
+            if exit_quote is not None and fee_policy_ready
+            else None
+        )
+        net_exit = (
+            float(exit_quote) - float(exit_fee)
+            if exit_quote is not None and exit_fee is not None
+            else None
+        )
+        hold_edge = fair - net_exit if net_exit is not None else None
+        side.update(
+            deployed=deployed,
+            unrealized=unrealized,
+            hold_edge=hold_edge,
+            net_exit=net_exit,
+        )
         diagnostics[f"{name}_deployed_cents"] = round(deployed, 6)
         diagnostics[f"{name}_unrealized_cents"] = (
             None if unrealized is None else round(unrealized, 6)
@@ -400,63 +401,17 @@ def build_trade_signal(
         diagnostics[f"{name}_hold_edge_cents"] = (
             None if hold_edge is None else round(hold_edge, 6)
         )
-
-    for side in sides:
-        name = str(side["name"])
-        if (
-            int(side["contracts"]) > 0
-            and side["bid"] is not None
-            and float(side["probability"]) < PROBABILITY_LOWER_BOUND
-        ):
-            return sell(
-                side,
-                count=int(side["contracts"]),
-                reason=f"stop_loss_guardrail_exit_{name}",
-                trigger=f"stop_loss_{name}_guardrail",
-            )
-
-    for side in sides:
-        name = str(side["name"])
-        if (
-            int(side["contracts"]) > 0
-            and side["bid"] is not None
-            and float(side["deployed"]) > 0.0
-            and side["unrealized"] is not None
-            and side["hold_edge"] is not None
-            and float(side["unrealized"])
-            >= TAKE_PROFIT_PNL_RATIO * float(side["deployed"])
-            and float(side["hold_edge"]) < float(settings.min_edge_cents)
-        ):
-            return sell(
-                side,
-                count=int(side["contracts"]),
-                reason=f"take_profit_edge_decay_exit_{name}",
-                trigger=f"take_profit_edge_decay_{name}",
-            )
-
-    edge_decay_threshold = float(settings.min_edge_cents) * EDGE_DECAY_SCALEOUT_FACTOR
-    for side in sides:
-        name = str(side["name"])
-        if (
-            float(side["deployed"]) >= float(settings.max_position_usd) * 100.0
-            and side["bid"] is not None
-            and side["hold_edge"] is not None
-            and float(side["hold_edge"]) <= edge_decay_threshold
-        ):
-            return sell(
-                side,
-                count=max(1, round(int(side["contracts"]) * 0.5)),
-                reason=f"max_position_edge_decay_scaleout_{name}",
-                trigger=f"max_position_edge_decay_{name}",
-            )
+        diagnostics[f"{name}_net_exit_cents"] = (
+            None if net_exit is None else round(net_exit, 6)
+        )
 
     # Inventory exits never depend on entry gates or microstructure confirmation.
     for side in sides:
         name = str(side["name"])
         if (
             int(side["contracts"]) > 0
-            and side["bid"] is not None
-            and float(side["bid"])
+            and side["net_exit"] is not None
+            and float(side["net_exit"])
             > float(side["fair"]) + float(settings.min_edge_cents)
         ):
             return sell(
@@ -500,10 +455,7 @@ def build_trade_signal(
 
     diagnostics["fee_type"] = fee_type
     diagnostics["fee_multiplier"] = fee_multiplier
-    if fee_multiplier is None or fee_type not in {
-        "quadratic",
-        "quadratic_with_maker_fees",
-    }:
+    if not fee_policy_ready:
         return None, "fee_policy_unavailable", diagnostics
 
     yes_limit = slipped_price_cents(
@@ -550,22 +502,16 @@ def build_trade_signal(
     if edge_cents < float(settings.min_edge_cents):
         return None, "edge_below_threshold", diagnostics
 
-    seconds_elapsed = _seconds_elapsed_in_window(pricing)
-    (
-        target_contracts,
-        kelly_fraction_quarter,
-        time_multiplier,
-        weighted_kelly_fraction,
-    ) = _kelly_target_contracts(
+    fee_cents = taker_fee_cents_per_contract(ask, fee_multiplier=float(fee_multiplier))
+    target_contracts, kelly_fraction_quarter, all_in_cost = _kelly_target_contracts(
         p_win=model_side_prob,
         quote_price_cents=ask,
         bankroll_cents=max(0, int(bankroll_cents)),
         max_position_usd=float(settings.max_position_usd),
-        seconds_elapsed=float(seconds_elapsed),
+        fee_cents=fee_cents,
     )
 
     remaining_to_target = max(0, int(target_contracts) - int(current_contracts))
-    fee_cents = max(0.0, float(credit_cents) - float(edge_cents))
     minimum_credit_cents = float(settings.min_edge_cents) + fee_cents
     credit_target_contracts = _credit_target_contracts(
         credit_cents=credit_cents,
@@ -585,23 +531,16 @@ def build_trade_signal(
     remaining_notional_headroom_cents = max(
         0.0, float(notional_cap_cents) - float(current_side_notional_cents)
     )
-    max_by_notional_cap = int(
-        remaining_notional_headroom_cents // max(0.01, float(ask))
-    )
+    max_by_notional_cap = int(remaining_notional_headroom_cents // all_in_cost)
     count = min(int(count), int(max_by_notional_cap))
 
     max_by_cash: int | None = None
     if isinstance(available_cash_cents, int) and available_cash_cents >= 0:
-        max_by_cash = int(available_cash_cents // max(0.01, float(ask)))
+        max_by_cash = int(available_cash_cents // all_in_cost)
         count = min(int(count), int(max_by_cash))
 
     diagnostics["kelly_fraction_quarter"] = round(float(kelly_fraction_quarter), 8)
-    diagnostics["time_multiplier"] = round(float(time_multiplier), 8)
-    diagnostics["time_weighted_kelly_fraction"] = round(
-        float(weighted_kelly_fraction), 8
-    )
-    diagnostics["seconds_elapsed"] = round(float(seconds_elapsed), 6)
-    diagnostics["seconds_window"] = float(MARKET_WINDOW_SECONDS)
+    diagnostics["all_in_cost_cents"] = round(float(all_in_cost), 6)
     diagnostics["kelly_target_contracts"] = int(target_contracts)
     diagnostics["credit_cents"] = round(float(credit_cents), 6)
     diagnostics["minimum_credit_cents"] = round(float(minimum_credit_cents), 6)
@@ -625,8 +564,6 @@ def build_trade_signal(
     diagnostics["max_by_cash"] = None if max_by_cash is None else int(max_by_cash)
 
     if count <= 0:
-        if target_contracts <= 0 and current_contracts <= 0 and time_multiplier < 1.0:
-            return None, "time_weighted_size_too_small", diagnostics
         if max_by_notional_cap <= 0:
             return None, "position_notional_cap_reached", diagnostics
         if max_by_cash is not None and max_by_cash <= 0:

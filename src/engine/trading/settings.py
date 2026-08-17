@@ -13,7 +13,7 @@ class TradingSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     trading_style: Literal["systematic", "semi", "click"] = "systematic"
-    min_edge_cents: float = Field(default=3.0, ge=0.5, le=25.0)
+    min_edge_cents: float = Field(default=5.0, ge=0.5, le=25.0)
     max_position_usd: float = Field(default=10.0, ge=1.0, le=50.0)
     max_order_contracts: int = Field(default=5, ge=1, le=25)
     max_daily_loss_usd: float = Field(default=10.0, ge=1.0, le=100.0)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -18,14 +19,15 @@ from engine.vol_estimator import realized_vol_from_price_points
 
 _VOL_WINDOW_SEC = 300.0
 _MAX_SAMPLE_STALENESS_SEC = 5.0
+_MIN_INDEX_EXCHANGES = 2
+_MIN_ANCHOR_SAMPLES = 55
+_MARKET_INTERVAL_SECONDS = 15 * 60
 
 
 def _json_safe_detail(detail: dict[str, float | int | str | None]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in detail.items():
-        if isinstance(value, float) and (
-            value != value or value in (float("inf"), float("-inf"))
-        ):
+        if isinstance(value, float) and not math.isfinite(value):
             out[key] = None
         else:
             out[key] = value
@@ -38,8 +40,10 @@ def _build_base_snapshot(
     feed_asset: str,
     strike: float | None,
     market_ticker: str | None,
-    spot: float | int | None,
+    spot: float | None,
     settlement_seconds: int,
+    settlement_decimals: int,
+    source_exchanges: int,
 ) -> dict[str, Any]:
     return {
         "asset": profile.asset,
@@ -51,7 +55,16 @@ def _build_base_snapshot(
         "strike_usd": strike,
         "market_ticker": market_ticker,
         "spot_brti": float(spot) if isinstance(spot, (int, float)) else None,
-        "spot_index": float(spot) if isinstance(spot, (int, float)) else None,
+        "spot_index_raw": float(spot) if isinstance(spot, (int, float)) else None,
+        "spot_index": None,
+        "source_exchanges": source_exchanges,
+        "settlement_decimals": settlement_decimals,
+        "model_strike_usd": None,
+        "rounding_half_unit": None,
+        "proxy_reference_avg": None,
+        "proxy_basis_adjustment": None,
+        "proxy_anchor_samples": 0,
+        "proxy_anchor_ready": False,
         "sigma_annual": None,
         "sigma_samples": 0,
         "index_age_seconds": None,
@@ -61,7 +74,9 @@ def _build_base_snapshot(
         "regime": None,
         "sigma_eff": None,
         "twap_seconds_elapsed": 0,
+        "twap_samples_observed": 0,
         "twap_partial_avg": None,
+        "twap_partial_avg_raw": None,
         "twap_required_avg": None,
         "pricer_detail": None,
         "ready": False,
@@ -101,13 +116,27 @@ def compute_pricing_snapshot(
     *,
     profile: MarketProfile,
     feed_asset: str,
-    spot: float | int | None,
+    spot: float | None,
     ticks: list[dict[str, Any]],
     strike: float | None,
     market_ticker: str | None,
     close_time_iso: str | None,
+    settlement_decimals: int | None = None,
+    source_exchanges: int = 0,
 ) -> dict[str, Any]:
     settlement_seconds = int(profile.settlement_window_seconds)
+    settlement_decimals = max(
+        0,
+        min(
+            12,
+            int(
+                profile.settlement_decimals_fallback
+                if settlement_decimals is None
+                else settlement_decimals
+            ),
+        ),
+    )
+    source_exchanges = max(0, int(source_exchanges))
     close_ts = parse_iso8601_to_epoch(close_time_iso)
 
     base = _build_base_snapshot(
@@ -117,6 +146,8 @@ def compute_pricing_snapshot(
         market_ticker=market_ticker,
         spot=spot,
         settlement_seconds=settlement_seconds,
+        settlement_decimals=settlement_decimals,
+        source_exchanges=source_exchanges,
     )
 
     if close_ts is None:
@@ -130,6 +161,9 @@ def compute_pricing_snapshot(
         return base
     if not isinstance(spot, (int, float)) or float(spot) <= 0:
         base["reason"] = "no_brti"
+        return base
+    if source_exchanges < _MIN_INDEX_EXCHANGES:
+        base["reason"] = "insufficient_index_sources"
         return base
 
     now_ts = time.time()
@@ -145,6 +179,47 @@ def compute_pricing_snapshot(
     if index_age_seconds > _MAX_SAMPLE_STALENESS_SEC:
         base["reason"] = "stale_index"
         return base
+
+    anchor_samples, anchor_elapsed = reconstruct_discrete_forward_fill_samples(
+        points,
+        float(close_ts) - _MARKET_INTERVAL_SECONDS - settlement_seconds,
+        float(close_ts) - _MARKET_INTERVAL_SECONDS,
+        max_staleness_sec=_MAX_SAMPLE_STALENESS_SEC,
+    )
+    base["proxy_anchor_samples"] = len(anchor_samples)
+    if (
+        anchor_elapsed != settlement_seconds
+        or len(anchor_samples) < _MIN_ANCHOR_SAMPLES
+    ):
+        base["reason"] = "proxy_anchor_unavailable"
+        return base
+
+    proxy_reference_avg = sum(anchor_samples) / len(anchor_samples)
+    proxy_basis_adjustment = float(strike) - proxy_reference_avg
+    adjusted_spot = float(spot) + proxy_basis_adjustment
+    adjusted_points = [
+        (ts, value + proxy_basis_adjustment)
+        for ts, value in points
+        if value + proxy_basis_adjustment > 0
+    ]
+    if adjusted_spot <= 0 or not adjusted_points:
+        base["reason"] = "invalid_proxy_anchor"
+        return base
+
+    rounding_half_unit = 0.5 * (10.0 ** (-settlement_decimals))
+    model_strike = float(strike) - rounding_half_unit
+    base.update(
+        {
+            "spot_index": adjusted_spot,
+            "model_strike_usd": model_strike,
+            "rounding_half_unit": rounding_half_unit,
+            "proxy_reference_avg": round(proxy_reference_avg, settlement_decimals + 2),
+            "proxy_basis_adjustment": round(
+                proxy_basis_adjustment, settlement_decimals + 2
+            ),
+            "proxy_anchor_ready": True,
+        }
+    )
 
     sigma, vol_is_fallback = _estimate_sigma(
         points,
@@ -163,8 +238,8 @@ def compute_pricing_snapshot(
     result: AsianBinaryPricerResult
     if sec_exp > settlement_seconds:
         result = prob_levy_tw_binary(
-            float(spot),
-            float(strike),
+            adjusted_spot,
+            model_strike,
             sigma,
             sec_exp,
             n_fixes=settlement_seconds,
@@ -173,7 +248,7 @@ def compute_pricing_snapshot(
         window_start_ts = float(close_ts) - settlement_seconds
         observed_end_ts = min(now_ts, float(close_ts))
         samples, twap_elapsed_seconds = reconstruct_discrete_forward_fill_samples(
-            points,
+            adjusted_points,
             window_start_ts,
             observed_end_ts,
             max_staleness_sec=_MAX_SAMPLE_STALENESS_SEC,
@@ -183,21 +258,22 @@ def compute_pricing_snapshot(
         known_mean = (sum(samples) / len(samples)) if samples else None
 
         result = prob_collapsed_variance_binary(
-            float(strike),
+            model_strike,
             sigma,
             n=settlement_seconds,
             k=sample_count,
             mean_known_samples=known_mean,
-            mu_fwd=float(spot),
+            mu_fwd=adjusted_spot,
         )
 
         if known_mean is not None:
-            twap_partial_avg = round(known_mean, 2)
+            twap_partial_avg = round(known_mean, settlement_decimals)
+            base["twap_partial_avg_raw"] = known_mean
 
         if sample_count < settlement_seconds and samples:
             remaining = settlement_seconds - sample_count
-            needed_sum = float(strike) * settlement_seconds - sum(samples)
-            twap_required_avg = round(needed_sum / remaining, 2)
+            needed_sum = model_strike * settlement_seconds - sum(samples)
+            twap_required_avg = round(needed_sum / remaining, settlement_decimals)
 
     base["p_model"] = round(result.p_model, 8)
     base["p_model_pct"] = round(100.0 * result.p_model, 4)
@@ -207,6 +283,7 @@ def compute_pricing_snapshot(
     )
     base["pricer_detail"] = _json_safe_detail(result.detail)
     base["twap_seconds_elapsed"] = twap_elapsed_seconds
+    base["twap_samples_observed"] = len(samples) if sec_exp <= settlement_seconds else 0
     base["twap_partial_avg"] = twap_partial_avg
     base["twap_required_avg"] = twap_required_avg
     base["ready"] = True

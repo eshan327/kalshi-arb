@@ -21,8 +21,6 @@ def _zeroed_ws_stats() -> dict[str, int]:
         "gemini_parsed": 0,
         "bitstamp_received": 0,
         "bitstamp_parsed": 0,
-        "paxos_received": 0,
-        "paxos_parsed": 0,
         "book_updates_applied": 0,
     }
 

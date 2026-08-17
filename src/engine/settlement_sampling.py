@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -34,7 +35,8 @@ def reconstruct_discrete_forward_fill_samples(
     *,
     max_staleness_sec: float,
 ) -> tuple[list[float], int]:
-    elapsed_seconds = int(max(0.0, float(window_end_ts) - float(window_start_ts)))
+    duration = max(0.0, float(window_end_ts) - float(window_start_ts))
+    elapsed_seconds = math.ceil(duration - 1e-9)
     if elapsed_seconds <= 0:
         return [], 0
     if not points:
@@ -45,13 +47,14 @@ def reconstruct_discrete_forward_fill_samples(
     last_value: float | None = None
     last_value_ts: float | None = None
 
-    while idx < point_count and points[idx][0] <= window_start_ts:
+    while idx < point_count and points[idx][0] < window_start_ts:
         last_value = points[idx][1]
         last_value_ts = points[idx][0]
         idx += 1
 
     samples: list[float] = []
-    for second in range(1, elapsed_seconds + 1):
+    # Settlement uses the seconds in [window_start, window_end), not the expiry print.
+    for second in range(elapsed_seconds):
         target_ts = window_start_ts + second
         while idx < point_count and points[idx][0] <= target_ts:
             last_value = points[idx][1]
@@ -72,6 +75,7 @@ def compute_discrete_settlement_proxy(
     ticks: list[dict[str, Any]],
     *,
     window_seconds: int,
+    decimals: int = 2,
     max_staleness_sec: float = 5.0,
     now_ts: float | None = None,
 ) -> dict[str, float | int | None | str]:
@@ -101,5 +105,5 @@ def compute_discrete_settlement_proxy(
         "samples": len(samples),
         "elapsed_seconds": elapsed_seconds,
         "method": "discrete_1s_forward_fill",
-        "average": round(sum(samples) / len(samples), 2),
+        "average": round(sum(samples) / len(samples), max(0, min(12, int(decimals)))),
     }

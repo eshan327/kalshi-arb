@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.asset_context import get_active_market_profile
-from core.market_metadata import extract_suggested_strike
+from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
 from engine.book_microstructure import get_last_p_book_snapshot
 from engine.live_pricing import compute_live_pricing_snapshot
 from engine.stream_metrics import get_ws_message_log_size, get_ws_processing_stats
@@ -33,10 +33,14 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
     feed_asset = str(brti.get("asset") or active_asset)
     asset_syncing = feed_asset != active_asset
 
-    settlement_proxy = get_brti_settlement_proxy(
-        window_seconds=profile.settlement_window_seconds
-    )
     market_info = get_live_market_info()
+    settlement_decimals = extract_settlement_decimals(
+        market_info, profile.settlement_decimals_fallback
+    )
+    settlement_proxy = get_brti_settlement_proxy(
+        window_seconds=profile.settlement_window_seconds,
+        decimals=settlement_decimals,
+    )
     suggested_strike = extract_suggested_strike(market_info)
     close_iso = (
         market_info.get("close_time")
@@ -53,6 +57,7 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         strike=suggested_strike,
         market_ticker=market_ticker,
         close_time_iso=close_iso,
+        settlement_decimals=settlement_decimals,
     )
     microstructure = get_last_p_book_snapshot()
     trading_runtime = get_trading_runtime_snapshot()

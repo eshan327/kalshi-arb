@@ -55,7 +55,7 @@
     const volOverride = (byId("settingVolOverride")?.value || "").trim();
     return {
       trading_style: byId("settingTradingStyle")?.value || "systematic",
-      min_edge_cents: numberValue("settingMinEdge", 3),
+      min_edge_cents: numberValue("settingMinEdge", 5),
       max_order_contracts: Math.round(numberValue("settingMaxOrderContracts", 5)),
       max_position_usd: numberValue("settingMaxPosition", 10),
       max_daily_loss_usd: numberValue("settingMaxDailyLoss", 10),

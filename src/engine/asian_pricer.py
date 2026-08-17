@@ -4,8 +4,8 @@ Binary fair value for index TWAP over the last 60s versus strike K (Kalshi-style
 - **More than 60s to expiry:** Levy moment-matching (lognormal approximation to the arithmetic
   average of 60 future spots) — equivalent in spirit to Turnbull–Wakeman / industry Asian
   approximations; probability uses the natural ``N(d2)`` analogue on the matched law.
-- **Inside the last 60s:** collapsed-variance model: locked-in samples plus Gaussian uncertainty
-  on the remaining seconds (user spec).
+- **Inside the last 60s:** locked-in samples plus a moment-matched distribution for the
+  remaining discrete fixes.
 """
 
 from __future__ import annotations
@@ -39,12 +39,11 @@ def _fixing_times_years(seconds_to_expiry: float, n: int) -> list[float]:
     """
     Seconds from *now* until each of the n TWAP samples inside the settlement window.
 
-    Window ends at expiry; samples at end of seconds 1..n inside the window, matching
-    :class:`TwapCalculator` discrete reconstruction.
+    Window ends at expiry and contains the second marks in [expiry-n, expiry).
     """
     tau = float(seconds_to_expiry)
     out: list[float] = []
-    for j in range(1, n + 1):
+    for j in range(n):
         sec_from_now = (tau - n) + j
         out.append(max(sec_from_now, 0.0) / SECONDS_PER_YEAR)
     return out
@@ -63,6 +62,21 @@ def _levy_moment_match_m2(
             acc += math.exp(sig2 * min(t_years[i], t_years[j]))
     M2 = (S0 * S0) / (n * n) * acc
     return M1, M2
+
+
+def _prob_moment_matched_lognormal(
+    mean: float, second_moment: float, threshold: float
+) -> tuple[float, float, float | None]:
+    if threshold <= 0:
+        return 1.0, 0.0, None
+    ratio = second_moment / (mean * mean) if mean > 0 else 0.0
+    if ratio <= 1.0 or not math.isfinite(ratio):
+        return (1.0 if mean >= threshold else 0.0), 0.0, None
+
+    sigma2 = math.log(ratio)
+    sigma = math.sqrt(sigma2)
+    d2 = (math.log(mean / threshold) - 0.5 * sigma2) / sigma
+    return norm_cdf(d2), sigma, d2
 
 
 def prob_levy_tw_binary(
@@ -96,21 +110,14 @@ def prob_levy_tw_binary(
     t_years = _fixing_times_years(tau, n_fixes)
     M1, M2 = _levy_moment_match_m2(S0, sigma_annual, t_years)
 
-    ratio = M2 / (M1 * M1) if M1 > 0 else 0.0
-    if ratio <= 1.0 or not math.isfinite(ratio):
-        p = 1.0 if M1 > strike else 0.0 if M1 < strike else 0.5
+    p, sigma_a, d2 = _prob_moment_matched_lognormal(M1, M2, strike)
+    if d2 is None:
         return AsianBinaryPricerResult(
             p_model=_clamp_prob(p),
             regime="levy_tw",
             sigma_eff=0.0,
             detail={"M1": M1, "M2": M2, "note": "degenerate_variance"},
         )
-
-    sigma_a2 = math.log(ratio)
-    sigma_a = math.sqrt(sigma_a2)
-    # Matched lognormal: ln A ~ N(ln(M1) - σ_a²/2, σ_a²) ⇒ P(A > K) = N(d2)
-    d2 = (math.log(M1 / strike) - 0.5 * sigma_a2) / sigma_a
-    p = norm_cdf(d2)
 
     return AsianBinaryPricerResult(
         p_model=_clamp_prob(p),
@@ -132,9 +139,8 @@ def prob_collapsed_variance_binary(
     """
     Inside the settlement window:
 
-    P = N( ( (k/n) S̄_k + ((n-k)/n) μ_fwd - K ) / ( ((n-k)/n) σ √(Δt) ) )
-
-    with Δt = (n-k) / SECONDS_PER_YEAR (remaining window length in year fraction).
+    The observed sum is fixed. The remaining arithmetic average is matched to a
+    lognormal distribution using the covariance of every remaining one-second fix.
     """
     if strike <= 0 or sigma_annual <= 0 or mu_fwd <= 0:
         return AsianBinaryPricerResult(
@@ -150,7 +156,7 @@ def prob_collapsed_variance_binary(
             avg = mu_fwd
         else:
             avg = mean_known_samples
-        p = 1.0 if avg > strike else 0.0 if avg < strike else 0.5
+        p = 1.0 if avg >= strike else 0.0
         return AsianBinaryPricerResult(
             p_model=_clamp_prob(p),
             regime="terminal",
@@ -160,7 +166,7 @@ def prob_collapsed_variance_binary(
 
     rem = n - k
     if rem <= 0:
-        p = 1.0 if (mean_known_samples or mu_fwd) > strike else 0.0
+        p = 1.0 if (mean_known_samples or mu_fwd) >= strike else 0.0
         return AsianBinaryPricerResult(
             p_model=_clamp_prob(p),
             regime="terminal",
@@ -168,33 +174,27 @@ def prob_collapsed_variance_binary(
             detail={"k": k, "n": n},
         )
 
-    if k == 0 or mean_known_samples is None:
-        s_bar = 0.0
-        w_k = 0.0
-    else:
-        s_bar = mean_known_samples
-        w_k = k / n
-
-    w_rem = rem / n
-    mu_avg = w_k * s_bar + w_rem * mu_fwd
-
-    delta_t = rem / SECONDS_PER_YEAR
-    denom = w_rem * sigma_annual * math.sqrt(delta_t)
-    if denom <= 1e-18 * max(1.0, abs(mu_avg)):
-        p = 1.0 if mu_avg > strike else 0.0 if mu_avg < strike else 0.5
-        return AsianBinaryPricerResult(
-            p_model=_clamp_prob(p),
-            regime="collapsed",
-            sigma_eff=0.0,
-            detail={"mu_avg": mu_avg, "note": "zero_denom"},
-        )
-
-    z = (mu_avg - strike) / denom
-    p = norm_cdf(z)
+    known_sum = (
+        k * float(mean_known_samples) if k and mean_known_samples is not None else 0.0
+    )
+    required_future_avg = (n * strike - known_sum) / rem
+    remaining_times = [second / SECONDS_PER_YEAR for second in range(1, rem + 1)]
+    mean, second_moment = _levy_moment_match_m2(mu_fwd, sigma_annual, remaining_times)
+    p, sigma_eff, d2 = _prob_moment_matched_lognormal(
+        mean, second_moment, required_future_avg
+    )
 
     return AsianBinaryPricerResult(
         p_model=_clamp_prob(p),
         regime="collapsed",
-        sigma_eff=sigma_annual * math.sqrt(delta_t) * w_rem,
-        detail={"k": k, "n": n, "z": z, "mu_avg": mu_avg, "rem": rem},
+        sigma_eff=sigma_eff,
+        detail={
+            "k": k,
+            "n": n,
+            "rem": rem,
+            "required_future_avg": required_future_avg,
+            "future_M1": mean,
+            "future_M2": second_moment,
+            "d2": d2,
+        },
     )

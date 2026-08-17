@@ -8,7 +8,7 @@ from typing import Any
 from engine.settlement_sampling import compute_discrete_settlement_proxy
 
 _current_brti: float | None = None
-_current_depth: int = 0
+_current_depth: float = 0.0
 _current_exchanges: int = 0
 _current_brti_ts: float = 0.0
 _current_asset: str = "BTC"
@@ -28,7 +28,7 @@ def reset_tick_state(asset: str) -> None:
         _tick_version
     with _tick_lock:
         _current_brti = None
-        _current_depth = 0
+        _current_depth = 0.0
         _current_exchanges = 0
         _current_brti_ts = 0.0
         _current_asset = asset
@@ -38,16 +38,17 @@ def reset_tick_state(asset: str) -> None:
 
 def record_brti_tick(
     brti: float | None,
-    depth: int,
+    depth: float,
     num_exchanges: int,
     levels: dict[str, Any],
     status: str,
+    timestamp: float | None = None,
 ) -> None:
     global _tick_version
     with _tick_lock:
         _brti_ticks.append(
             {
-                "ts": time.time(),
+                "ts": time.time() if timestamp is None else float(timestamp),
                 "brti": brti,
                 "depth": depth,
                 "exchanges": num_exchanges,
@@ -58,7 +59,7 @@ def record_brti_tick(
         _tick_version += 1
 
 
-def set_brti_state(brti: float, depth: int, exchanges: int, timestamp: float) -> None:
+def set_brti_state(brti: float, depth: float, exchanges: int, timestamp: float) -> None:
     global _current_brti, _current_depth, _current_exchanges, _current_brti_ts
     with _tick_lock:
         _current_brti = brti
@@ -92,6 +93,7 @@ def get_brti_tick_version() -> int:
 
 def get_brti_settlement_proxy(
     window_seconds: int = 60,
+    decimals: int = 2,
 ) -> dict[str, float | int | None | str]:
     with _tick_lock:
         ticks_snapshot = list(_brti_ticks)
@@ -99,4 +101,5 @@ def get_brti_settlement_proxy(
     return compute_discrete_settlement_proxy(
         ticks_snapshot,
         window_seconds=max(1, int(window_seconds)),
+        decimals=decimals,
     )

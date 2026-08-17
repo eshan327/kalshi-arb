@@ -128,7 +128,7 @@ def test_trading_styles_control_strategy_orders() -> None:
         **inputs, settings=TradingSettings(trading_style="semi")
     )
     assert signal is not None and signal.action == "sell"
-    assert reason == "stop_loss_guardrail_exit_yes"
+    assert reason == "edge_reversal_exit_yes"
 
     signal, reason, _ = build_trade_signal(
         **inputs, settings=TradingSettings(trading_style="click")

@@ -6,7 +6,7 @@ from feeds.state.book_store import ExchangeBook
 
 # --- Index Methodology Parameters (from CME CF RTI methodology family) ---
 # Section 6.2 style depth-walk parameters; applied to the active profile's spot orderbooks.
-SPACING = 1  # Volume spacing in base-asset units (e.g., 1 BTC / 1 ETH)
+SPACING = 1.0
 DEVIATION_THRESHOLD = 0.005  # D = 0.5%
 POTENTIALLY_ERRONEOUS_PARAM = 0.05  # 5%
 STALE_THRESHOLD = 30  # Discard exchange if data >30s old
@@ -110,11 +110,7 @@ def screen_erroneous_book(bids: dict[float, float], asks: dict[float, float]) ->
     best_bid = max(bids.keys())
     best_ask = min(asks.keys())
 
-    # Crossed book
-    if best_bid >= best_ask:
-        return True
-
-    return False
+    return best_bid >= best_ask
 
 
 # ---- Section 5.2.2: Erroneous Prices ----
@@ -148,8 +144,6 @@ def screen_potentially_erroneous(
     deviation drops below 50% of the parameter.
     Returns set of exchange names to discard.
     """
-    global _flagged_exchanges
-
     if not exchange_mids:
         return set()
 
@@ -234,78 +228,88 @@ def consolidate_books_uncapped(exchange_books: ExchangeBooks) -> tuple[Levels, L
     return consolidate_books(exchange_books, None)
 
 
+def uncross_consolidated_book(bids: Levels, asks: Levels) -> tuple[Levels, Levels]:
+    """Remove executable cross-venue volume before building price-volume curves."""
+    clean_bids = [[price, size] for price, size in bids]
+    clean_asks = [[price, size] for price, size in asks]
+    bid_idx = ask_idx = 0
+
+    while (
+        bid_idx < len(clean_bids)
+        and ask_idx < len(clean_asks)
+        and clean_bids[bid_idx][0] >= clean_asks[ask_idx][0]
+    ):
+        matched = min(clean_bids[bid_idx][1], clean_asks[ask_idx][1])
+        clean_bids[bid_idx][1] -= matched
+        clean_asks[ask_idx][1] -= matched
+        if clean_bids[bid_idx][1] <= 0:
+            bid_idx += 1
+        if clean_asks[ask_idx][1] <= 0:
+            ask_idx += 1
+
+    return (
+        [(price, size) for price, size in clean_bids[bid_idx:] if size > 0],
+        [(price, size) for price, size in clean_asks[ask_idx:] if size > 0],
+    )
+
+
 # ---- Step 3: Price-Volume Curves (Eq. 1a-1f) ----
 
 
-def _walk_raw_curve(levels: Levels) -> dict[int, float]:
-    """
-    Walk sorted price levels, compute marginal price at each integer volume.
-    Eq 1a/1b: raw curve before spacing is applied.
-    """
-    curve: dict[int, float] = {}
+def compute_dynamic_spacing(
+    bids: Levels, asks: Levels, target_points: int = 100
+) -> float | None:
+    """Choose a scale-free spacing that samples the shared depth about 100 times."""
+    shared_depth = min(sum(size for _, size in bids), sum(size for _, size in asks))
+    if shared_depth <= 0:
+        return None
+    # ponytail: depth spacing omits CF's KDE mode; add it if proxy tracking shows material error.
+    return shared_depth / max(1, int(target_points))
+
+
+def _prices_at_volumes(levels: Levels, volumes: list[float]) -> dict[float, float]:
+    curve: dict[float, float] = {}
     cumulative = 0.0
     level_idx = 0
-    v = 1
-
-    while level_idx < len(levels):
-        price, size = levels[level_idx]
-        next_cumulative = cumulative + size
-
-        while v <= int(next_cumulative):
-            curve[v] = price
-            v += 1
-
-        cumulative = next_cumulative
-        level_idx += 1
-
+    for volume in volumes:
+        while level_idx < len(levels) and cumulative + levels[level_idx][1] < volume:
+            cumulative += levels[level_idx][1]
+            level_idx += 1
+        if level_idx >= len(levels):
+            break
+        curve[volume] = levels[level_idx][0]
     return curve
 
 
 def compute_price_volume_curves(
     bids: Levels,
     asks: Levels,
-    spacing: int = SPACING,
-) -> tuple[dict[int, float], dict[int, float], dict[int, float], dict[int, float]]:
+    spacing: float = SPACING,
+) -> tuple[
+    dict[float, float], dict[float, float], dict[float, float], dict[float, float]
+]:
     """
-    Step 3: Build askPV, bidPV, midPV, midSV at spacing granularity.
-    Eq 1c: askPV(v) = raw_askPV(s * ceil(v/s))
-    Eq 1d: bidPV(v) = raw_bidPV(s * ceil(v/s))
-    For spacing=1, ceil(v/1) = v, so askPV = raw_askPV.
+    Build askPV, bidPV, midPV, and midSV directly at spacing granularity.
+    Runtime and memory are bounded by sampled points rather than base-asset units.
     """
-    raw_ask = _walk_raw_curve(asks)
-    raw_bid = _walk_raw_curve(bids)
-
-    if not raw_ask or not raw_bid:
+    spacing = float(spacing)
+    if not bids or not asks or spacing <= 0:
         return {}, {}, {}, {}
 
-    max_raw = min(max(raw_ask.keys()), max(raw_bid.keys()))
+    shared_depth = min(sum(size for _, size in bids), sum(size for _, size in asks))
+    point_count = min(50_000, int(shared_depth / spacing + 1e-12))
+    volumes = [spacing * step for step in range(1, point_count + 1)]
+    ask_pv = _prices_at_volumes(asks, volumes)
+    bid_pv = _prices_at_volumes(bids, volumes)
+    mid_pv: dict[float, float] = {}
+    mid_sv: dict[float, float] = {}
 
-    ask_pv: dict[int, float] = {}
-    bid_pv: dict[int, float] = {}
-    mid_pv: dict[int, float] = {}
-    mid_sv: dict[int, float] = {}
-
-    v = spacing
-    while v <= max_raw:
-        # Eq 1c/1d: evaluate raw curve at s * ceil(v/s)
-        lookup = spacing * math.ceil(v / spacing)
-        if lookup not in raw_ask or lookup not in raw_bid:
+    for volume in volumes:
+        if volume not in ask_pv or volume not in bid_pv:
             break
-
-        ask_pv[v] = raw_ask[lookup]
-        bid_pv[v] = raw_bid[lookup]
-
-        # Eq 1e: midPV
-        mid = (ask_pv[v] + bid_pv[v]) / 2
-        mid_pv[v] = mid
-
-        # Eq 1f: midSV
-        if mid > 0:
-            mid_sv[v] = (ask_pv[v] / mid) - 1
-        else:
-            mid_sv[v] = float("inf")
-
-        v += spacing
+        mid = (ask_pv[volume] + bid_pv[volume]) / 2
+        mid_pv[volume] = mid
+        mid_sv[volume] = (ask_pv[volume] / mid) - 1 if mid > 0 else float("inf")
 
     return ask_pv, bid_pv, mid_pv, mid_sv
 
@@ -314,10 +318,10 @@ def compute_price_volume_curves(
 
 
 def compute_utilized_depth(
-    mid_sv: dict[int, float],
-    spacing: int = SPACING,
+    mid_sv: dict[float, float],
+    spacing: float = SPACING,
     deviation_threshold: float = DEVIATION_THRESHOLD,
-) -> int:
+) -> float:
     """
     v̄_T = max(v_i where midSV(v_i) <= D and midSV(v_{i+1}) > D, s)
     """
@@ -325,7 +329,7 @@ def compute_utilized_depth(
         return spacing
 
     volumes = sorted(mid_sv.keys())
-    utilized = 0
+    utilized = 0.0
 
     for i, v in enumerate(volumes):
         if mid_sv[v] <= deviation_threshold:
@@ -340,9 +344,9 @@ def compute_utilized_depth(
 
 
 def compute_brti(
-    mid_pv: dict[int, float],
-    utilized_depth: int,
-    spacing: int = SPACING,
+    mid_pv: dict[float, float],
+    utilized_depth: float,
+    spacing: float = SPACING,
     price_decimals: int = 2,
 ) -> float | None:
     """
@@ -355,13 +359,11 @@ def compute_brti(
     lam = 1.0 / (0.3 * utilized_depth)
 
     # Compute raw weights at spacing intervals
-    raw_weights: dict[int, float] = {}
-    v = spacing
-    while v <= utilized_depth:
-        if v not in mid_pv:
-            break
-        raw_weights[v] = lam * math.exp(-lam * v)
-        v += spacing
+    raw_weights = {
+        volume: lam * math.exp(-lam * volume)
+        for volume in sorted(mid_pv)
+        if volume <= utilized_depth + 1e-12
+    }
 
     if not raw_weights:
         return None
@@ -390,7 +392,7 @@ def _filter_stale_books(
     return {
         name: book
         for name, book in exchange_books.items()
-        if (current_time - book.get("last_update", 0)) < stale_threshold
+        if 0 <= (current_time - book.get("last_update", 0)) < stale_threshold
     }
 
 
@@ -434,20 +436,18 @@ def calculate_brti(
     exchange_books: ExchangeBooks,
     current_time: float | None = None,
     *,
-    spacing: int = SPACING,
+    spacing: float | None = None,
     deviation_threshold: float = DEVIATION_THRESHOLD,
     potentially_erroneous_param: float = POTENTIALLY_ERRONEOUS_PARAM,
     stale_threshold: float = STALE_THRESHOLD,
     price_decimals: int = 2,
-) -> tuple[float | None, int, int]:
+) -> tuple[float | None, float, int]:
     """
-    Full BRTI calculation per CME CF Methodology v16.5.
+    Synthetic CF-style RTI proxy calculation.
     Returns (brti_value, utilized_depth, num_exchanges_used) or (None, 0, 0) on failure.
     """
     if current_time is None:
         current_time = time.time()
-
-    spacing = max(1, int(spacing))
 
     deviation_threshold = float(deviation_threshold)
     potentially_erroneous_param = float(potentially_erroneous_param)
@@ -485,12 +485,19 @@ def calculate_brti(
 
     # --- Steps 1-2: Consolidate with dynamic cap ---
     bids, asks = consolidate_books(final_books, order_cap)
+    bids, asks = uncross_consolidated_book(bids, asks)
 
     if not bids or not asks:
         return None, 0, 0
 
+    if spacing is None or float(spacing) <= 0:
+        spacing = compute_dynamic_spacing(bids, asks)
+    if spacing is None:
+        return None, 0, 0
+    spacing = float(spacing)
+
     # --- Step 3: Price-volume curves ---
-    ask_pv, bid_pv, mid_pv, mid_sv = compute_price_volume_curves(
+    _, _, mid_pv, mid_sv = compute_price_volume_curves(
         bids, asks, spacing=spacing
     )
 

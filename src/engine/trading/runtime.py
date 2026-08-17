@@ -21,7 +21,7 @@ from core.config import (
     KALSHI_ENV,
     PAPER_STARTING_CASH_CENTS,
 )
-from core.market_metadata import extract_suggested_strike
+from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
 from data.kalshi_rest import get_event, get_market, get_series
 from data.kalshi_trading import (
     cancel_bot_orders,
@@ -765,6 +765,7 @@ async def _run_single_cycle() -> None:
     _last_market_ticker = market_ticker
 
     strike = extract_suggested_strike(market_info)
+    profile = get_active_market_profile()
     pricing = apply_pricing_overrides(
         compute_live_pricing_snapshot(
             strike=strike,
@@ -774,11 +775,13 @@ async def _run_single_cycle() -> None:
                 if isinstance(market_info.get("close_time"), str)
                 else None
             ),
+            settlement_decimals=extract_settlement_decimals(
+                market_info, profile.settlement_decimals_fallback
+            ),
         ),
         settings,
     )
 
-    profile = get_active_market_profile()
     try:
         series = await asyncio.to_thread(get_series, profile.kalshi_series_ticker)
         event_ticker = str(market_info["event_ticker"])

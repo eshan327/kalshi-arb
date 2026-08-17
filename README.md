@@ -90,7 +90,9 @@ position limits, cash buffer, reduce-only checks, and daily-loss guard.
 ## How the strategy decides
 
 The model estimates the probability that Kalshi's final-minute settlement
-average finishes above the contract strike. Before buying, model value must
+average finishes at or above the rounded contract strike. The synthetic index
+is first anchored to the market's official opening reference, so a persistent
+proxy/index basis is not treated as a price move. Before buying, model value must
 clear:
 
 - the current marketable IOC price;
@@ -100,20 +102,24 @@ clear:
 
 Sizing is the smallest of several ceilings:
 
-- time-weighted quarter-Kelly on current account equity;
+- fee-inclusive quarter-Kelly on current account equity;
 - available cash after the cash buffer;
 - max order contracts;
 - max position dollars; and
 - an edge ladder where every additional held contract requires another 0.5¢ of
   credit.
 
-Entries also require a 30-second data warm-up, a fresh orderbook, non-fallback
-volatility, model probability between 20% and 80%, a known fee policy, and at
-least ten seconds to expiry. Optional model/orderbook agreement can hard-gate
-entries.
+Entries also require a 30-second data warm-up, an orderbook no more than two
+seconds old, at least two clean index constituents, at least 55 of the 60 proxy
+prints needed to anchor the official opening reference, non-fallback volatility,
+model probability between 20% and 80%, a known fee policy, and at least 20
+seconds to expiry. Start the process at least 90 seconds before a market begins;
+if the opening reference cannot be reconstructed, that market is intentionally
+not traded. Optional model/orderbook agreement can hard-gate entries.
 
-Existing positions can exit on probability guardrails, profit plus edge decay,
-max-position edge decay, or edge reversal. Entry gates never block these exits.
+Existing positions exit when the executable bid, after slippage and fees,
+exceeds model fair value by the configured edge. Entry gates never block this
+edge-reversal exit.
 
 ## Dashboard map
 
@@ -131,7 +137,7 @@ max-position edge decay, or edge reversal. Entry gates never block these exits.
 
 ## Default controls
 
-- Minimum net edge: 3¢ per contract
+- Minimum net edge: 5¢ per contract
 - Max order: 5 contracts
 - Max position: $10 per outcome side
 - Max daily equity loss: $10

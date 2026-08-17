@@ -149,7 +149,7 @@
       `Exchanges included: number of clean, non-stale exchanges currently used by ${indexLabel}.<br><br>` +
       `Synthetic ${settlementWindowSeconds}s RTI average: 1Hz forward-filled average of synthetic ${indexLabel} prints over the last ${settlementWindowSeconds} seconds. This approximates settlement mechanics but is not the official CF value.<br><br>` +
       "<strong>Asian pricer &amp; Realized Vol (below charts)</strong><br>" +
-      "P(model): Asian / collapsed-variance estimate from <code>asian_pricer.py</code> using σ from <code>vol_estimator.py</code>. P(book): order-book skew from <code>book_microstructure.py</code>. Bars: green = YES (&gt;50%), red = NO (&lt;50%). Inner JSON: right column → Asian Pricer and Realized Vol Calculations.<br><br>" +
+      "P(model): discrete Asian estimate from <code>asian_pricer.py</code> using σ from <code>vol_estimator.py</code>. P(book): order-book skew from <code>book_microstructure.py</code>. Bars: green = YES (&gt;50%), red = NO (&lt;50%). Inner JSON: right column → Asian Pricer and Realized Vol Calculations.<br><br>" +
       "<strong>Kalshi message processing counters</strong><br>" +
       `Incoming websocket messages: ${k.total_received ?? "n/a"}<br>` +
       `Orderbook deltas received: ${k.orderbook_delta_received ?? "n/a"}<br>` +
@@ -162,9 +162,9 @@
       `Parsed exchange websocket messages: ${b.total_parsed ?? "n/a"}<br>` +
       `Orderbook updates applied to ${indexLabel} books: ${b.book_updates_applied ?? "n/a"}<br>` +
       `Coinbase messages: ${b.coinbase_received ?? "n/a"} | Kraken messages: ${b.kraken_received ?? "n/a"}<br>` +
-      `Gemini messages: ${b.gemini_received ?? "n/a"} | Bitstamp messages: ${b.bitstamp_received ?? "n/a"} | Paxos messages: ${b.paxos_received ?? "n/a"}<br>` +
+      `Gemini messages: ${b.gemini_received ?? "n/a"} | Bitstamp messages: ${b.bitstamp_received ?? "n/a"}<br>` +
       `Coinbase parsed: ${b.coinbase_parsed ?? "n/a"} | Kraken parsed: ${b.kraken_parsed ?? "n/a"} | Gemini parsed: ${b.gemini_parsed ?? "n/a"}<br>` +
-      `Bitstamp parsed: ${b.bitstamp_parsed ?? "n/a"} | Paxos parsed: ${b.paxos_parsed ?? "n/a"}`;
+      `Bitstamp parsed: ${b.bitstamp_parsed ?? "n/a"}`;
 
     if (window.DashboardSettings && typeof window.DashboardSettings.onState === "function") {
       window.DashboardSettings.onState(state);

@@ -22,6 +22,8 @@ def _compute_cached_pricing_snapshot(
     strike: float | None,
     market_ticker: str | None,
     close_time_iso: str | None,
+    settlement_decimals: int,
+    source_exchanges: int,
     tick_version: int,
     second_bucket: int,
 ) -> dict[str, Any]:
@@ -34,6 +36,8 @@ def _compute_cached_pricing_snapshot(
         strike=strike,
         market_ticker=market_ticker,
         close_time_iso=close_time_iso,
+        settlement_decimals=settlement_decimals,
+        source_exchanges=source_exchanges,
     )
 
 
@@ -47,6 +51,7 @@ def compute_live_pricing_snapshot(
     strike: float | None,
     market_ticker: str | None,
     close_time_iso: str | None,
+    settlement_decimals: int | None = None,
 ) -> dict[str, Any]:
     profile = get_active_market_profile()
 
@@ -61,6 +66,15 @@ def compute_live_pricing_snapshot(
 
     spot_key = float(spot) if isinstance(spot, (int, float)) else None
     strike_key = float(strike) if isinstance(strike, (int, float)) else None
+    exchanges_raw = brti_state.get("exchanges")
+    source_exchanges = (
+        int(exchanges_raw) if isinstance(exchanges_raw, (int, float)) else 0
+    )
+    decimals = (
+        profile.settlement_decimals_fallback
+        if settlement_decimals is None
+        else max(0, min(12, int(settlement_decimals)))
+    )
     snapshot = _compute_cached_pricing_snapshot(
         profile,
         feed_asset=feed_asset,
@@ -68,6 +82,8 @@ def compute_live_pricing_snapshot(
         strike=strike_key,
         market_ticker=market_ticker,
         close_time_iso=close_time_iso,
+        settlement_decimals=decimals,
+        source_exchanges=source_exchanges,
         tick_version=get_brti_tick_version(),
         second_bucket=int(time.time()),
     )
