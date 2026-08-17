@@ -3,25 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 from core.asset_context import get_active_asset_context
-from core.market_selection import get_market_selection_state, request_asset_switch
+from core.market_metadata import extract_suggested_strike
 from engine.book_microstructure import get_last_p_book_snapshot
 from engine.live_pricing import compute_live_pricing_snapshot
-from engine.shadow import get_shadow_runtime_snapshot, get_shadow_settings_snapshot
-from engine.streamer import (
-    get_live_market_info,
-    get_live_orderbook_snapshot,
-    get_ws_message_log_size,
-    get_ws_processing_stats,
+from engine.stream_metrics import get_ws_message_log_size, get_ws_processing_stats
+from engine.streamer import get_live_market_info, get_live_orderbook_snapshot
+from engine.trading import get_trading_runtime_snapshot, get_trading_settings_snapshot
+from feeds.brti_aggregator import (
+    get_brti_settlement_proxy,
+    get_brti_state,
+    get_brti_ws_stats,
 )
-from engine.simulation import get_latest_simulation_payload
-from feeds.brti_aggregator import get_brti_settlement_proxy, get_brti_state, get_brti_ws_stats
-from ui.contracts import (
-    MARKET_SELECTION_PAYLOAD_KEYS,
-    MARKET_SELECTION_POST_RESPONSE_KEYS,
-    STATE_PAYLOAD_KEYS,
-    enforce_payload_contract,
-)
-from ui.market_metadata import extract_suggested_strike
 
 
 def clamped_limit(raw_limit: int | None, default: int, max_limit: int) -> int:
@@ -40,16 +32,25 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
     kalshi_stats = get_ws_processing_stats()
     brti_stats = get_brti_ws_stats()
 
-    selection_state = get_market_selection_state()
     active_asset = profile.asset
     feed_asset = str(brti.get("asset") or active_asset)
     asset_syncing = feed_asset != active_asset
 
-    settlement_proxy = get_brti_settlement_proxy(window_seconds=profile.settlement_window_seconds)
+    settlement_proxy = get_brti_settlement_proxy(
+        window_seconds=profile.settlement_window_seconds
+    )
     market_info = get_live_market_info()
     suggested_strike = extract_suggested_strike(market_info)
-    close_iso = market_info.get("close_time") if isinstance(market_info.get("close_time"), str) else None
-    market_ticker = market_info.get("ticker") if isinstance(market_info.get("ticker"), str) else None
+    close_iso = (
+        market_info.get("close_time")
+        if isinstance(market_info.get("close_time"), str)
+        else None
+    )
+    market_ticker = (
+        market_info.get("ticker")
+        if isinstance(market_info.get("ticker"), str)
+        else None
+    )
 
     pricing = compute_live_pricing_snapshot(
         strike=suggested_strike,
@@ -57,19 +58,18 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         close_time_iso=close_iso,
     )
     microstructure = get_last_p_book_snapshot()
-    shadow_runtime = get_shadow_runtime_snapshot()
-    shadow_settings = get_shadow_settings_snapshot()
-    paper_ledger = shadow_runtime.get("paper_ledger") if isinstance(shadow_runtime.get("paper_ledger"), dict) else {}
-    signal_monologue = (
-        shadow_runtime.get("signal_monologue") if isinstance(shadow_runtime.get("signal_monologue"), dict) else {}
+    trading_runtime = get_trading_runtime_snapshot()
+    trading_settings = get_trading_settings_snapshot()
+    account = (
+        trading_runtime.get("account")
+        if isinstance(trading_runtime.get("account"), dict)
+        else {}
     )
-
-    simulation_latest = get_latest_simulation_payload()
-    simulation_summary = {
-        "ok": bool(simulation_latest.get("ok")),
-        "generated_ts": simulation_latest.get("generated_ts"),
-        "metrics": simulation_latest.get("metrics") if isinstance(simulation_latest.get("metrics"), dict) else {},
-    }
+    signal_monologue = (
+        trading_runtime.get("signal_monologue")
+        if isinstance(trading_runtime.get("signal_monologue"), dict)
+        else {}
+    )
 
     payload = {
         "orderbook": snapshot,
@@ -85,53 +85,15 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         "asset_syncing": asset_syncing,
         "index_label": profile.index_label,
         "active_series": profile.kalshi_series_ticker,
-        "market_selection": selection_state,
         "settlement_benchmark_label": profile.settlement_benchmark_label,
         "settlement_rule_text": profile.settlement_rule_text,
         "settlement_window_seconds": profile.settlement_window_seconds,
         "suggested_strike": suggested_strike,
         "pricing": pricing,
         "microstructure": microstructure,
-        "shadow_settings": shadow_settings,
-        "shadow_runtime": shadow_runtime,
-        "paper_ledger": paper_ledger,
+        "trading_settings": trading_settings,
+        "trading_runtime": trading_runtime,
+        "account": account,
         "signal_monologue": signal_monologue,
-        "simulation_summary": simulation_summary,
     }
-    return enforce_payload_contract(payload, STATE_PAYLOAD_KEYS)
-
-
-def build_market_selection_payload() -> dict[str, Any]:
-    state = get_market_selection_state()
-    active_asset = str(state.get("active_asset") or "BTC")
-    context = get_active_asset_context()
-
-    payload = {
-        "active_asset": context.profile.asset if context.profile.asset == active_asset else active_asset,
-        "active_asset_display": context.profile.display_name,
-        "active_series": context.profile.kalshi_series_ticker,
-        "requested_asset": state.get("requested_asset"),
-        "options": state.get("options", []),
-        "applies_on_market_close": True,
-    }
-    return enforce_payload_contract(payload, MARKET_SELECTION_PAYLOAD_KEYS)
-
-
-def request_market_selection(asset: str) -> tuple[dict[str, Any], int]:
-    if not isinstance(asset, str) or not asset.strip():
-        return {"ok": False, "error": "Missing required field 'asset'."}, 400
-
-    result = request_asset_switch(asset)
-    if not bool(result.get("ok")):
-        return {"ok": False, "error": result.get("message", "Invalid asset selection.")}, 400
-
-    state = get_market_selection_state()
-    payload = {
-        "ok": True,
-        "status": result.get("status"),
-        "message": result.get("message"),
-        "active_asset": state.get("active_asset"),
-        "requested_asset": state.get("requested_asset"),
-        "applies_on_market_close": True,
-    }
-    return enforce_payload_contract(payload, MARKET_SELECTION_POST_RESPONSE_KEYS), 200
+    return payload

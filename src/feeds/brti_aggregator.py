@@ -3,7 +3,11 @@ import logging
 from core.asset_context import get_active_asset_context
 from feeds.context import FeedsRuntimeContext
 from feeds.state.diagnostics_store import get_brti_ws_log, get_brti_ws_stats
-from feeds.state.tick_store import get_brti_settlement_proxy, get_brti_state, get_brti_ticks
+from feeds.state.tick_store import (
+    get_brti_settlement_proxy,
+    get_brti_state,
+    get_brti_ticks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +33,7 @@ def _raise_if_task_failed(tasks: list[asyncio.Task]) -> None:
 
 
 async def run_brti_aggregator(recalc_interval: float = 1.0) -> None:
-    """Runs exchange feeds + index calculator for the active asset, rotating on selector changes."""
+    """Runs exchange feeds and the index calculator for the process asset."""
     asset_context = get_active_asset_context()
     active_asset = asset_context.profile.asset
     runtime_context = FeedsRuntimeContext.create(active_asset)
@@ -50,7 +54,11 @@ async def run_brti_aggregator(recalc_interval: float = 1.0) -> None:
             if latest_asset == active_asset:
                 continue
 
-            logger.info("Switching index proxy feeds from %s to %s...", active_asset, latest_asset)
+            logger.info(
+                "Switching index proxy feeds from %s to %s...",
+                active_asset,
+                latest_asset,
+            )
             await _cancel_tasks(tasks)
 
             active_asset = latest_asset

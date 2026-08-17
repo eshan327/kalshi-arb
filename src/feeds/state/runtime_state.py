@@ -6,7 +6,7 @@ from feeds.state.tick_store import reset_tick_state
 
 
 def reset_brti_runtime_state(asset: str) -> None:
-    """Clears all feed runtime state so BTC/ETH switches do not leak historical state."""
+    """Clears all feed runtime state before starting an asset's streams."""
     reset_exchange_books()
     reset_tick_state(asset)
     reset_diagnostics_state()

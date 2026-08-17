@@ -40,10 +40,14 @@ class KrakenAdapter(ExchangeAdapter):
 
             for entry in entries:
                 for level in entry.get("bids", []):
-                    add_snapshot_level(snapshot_bids, level.get("price"), level.get("qty"))
+                    add_snapshot_level(
+                        snapshot_bids, level.get("price"), level.get("qty")
+                    )
 
                 for level in entry.get("asks", []):
-                    add_snapshot_level(snapshot_asks, level.get("price"), level.get("qty"))
+                    add_snapshot_level(
+                        snapshot_asks, level.get("price"), level.get("qty")
+                    )
 
             replace_full_book(EXCHANGE, snapshot_bids, snapshot_asks)
             return bool(snapshot_bids or snapshot_asks)
@@ -54,11 +58,15 @@ class KrakenAdapter(ExchangeAdapter):
                 continue
 
             for level in entry.get("bids", []):
-                if apply_book_update(EXCHANGE, "bids", level.get("price"), level.get("qty")):
+                if apply_book_update(
+                    EXCHANGE, "bids", level.get("price"), level.get("qty")
+                ):
                     parsed = True
 
             for level in entry.get("asks", []):
-                if apply_book_update(EXCHANGE, "asks", level.get("price"), level.get("qty")):
+                if apply_book_update(
+                    EXCHANGE, "asks", level.get("price"), level.get("qty")
+                ):
                     parsed = True
 
         return parsed

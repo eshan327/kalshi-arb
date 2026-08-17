@@ -21,8 +21,10 @@ async def connect_and_subscribe(market_ticker: str):
         "cmd": "subscribe",
         "params": {
             "channels": SUBSCRIBE_CHANNELS,
-            "market_tickers": [market_ticker]
-        }
+            "market_tickers": [market_ticker],
+            # Internal books intentionally use legacy YES/NO leg price scales.
+            "use_yes_price": False,
+        },
     }
     await ws.send(json.dumps(subscribe_cmd))
     return ws

@@ -9,7 +9,9 @@ def is_actionable_display_level(level: tuple[float, float]) -> bool:
     return MIN_ACTIONABLE_PRICE_CENTS <= float(price) <= MAX_ACTIONABLE_PRICE_CENTS
 
 
-def top_levels_for_display(levels: list[tuple[float, float]], depth: int) -> list[tuple[float, float]]:
+def top_levels_for_display(
+    levels: list[tuple[float, float]], depth: int
+) -> list[tuple[float, float]]:
     """Prefer 1-99c levels for UI display with fallback when those are unavailable."""
     if depth <= 0:
         return []

@@ -9,7 +9,7 @@ from typing import Optional
 
 import websockets
 
-from core.asset_context import apply_queued_asset_switch_and_get_context
+from core.asset_context import get_active_asset_context
 from core.config import (
     RECONCILIATION_CONSECUTIVE_BREACHES,
     RECONCILIATION_TOP_N,
@@ -17,10 +17,17 @@ from core.config import (
 )
 from data.kalshi_rest import get_market_orderbook, get_open_markets
 from data.kalshi_ws import connect_and_subscribe
-from engine.book_microstructure import on_live_orderbook_update, reset_book_microstructure_for_new_market
+from engine.book_microstructure import (
+    on_live_orderbook_update,
+    reset_book_microstructure_for_new_market,
+)
 from engine.live_pricing import reset_live_pricing_for_new_market
 from engine.market_stream.bootstrap import BufferedDelta, try_bootstrap_from_rest
-from engine.market_stream.discovery import is_market_closed, parse_iso8601_to_epoch, select_target_market
+from engine.market_stream.discovery import (
+    is_market_closed,
+    parse_iso8601_to_epoch,
+    select_target_market,
+)
 from engine.market_stream.display import top_levels_for_display
 from engine.market_stream.reconciliation_runner import run_recalibration
 from engine.orderbook import OrderBook
@@ -29,11 +36,6 @@ from engine.stream_metrics import (
     _record_top10_impact,
     _record_ws_event,
     _top10_signature,
-    get_reconciliation_log,
-    get_top10_impact_log,
-    get_ws_message_log,
-    get_ws_message_log_size,
-    get_ws_processing_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,7 @@ def get_live_orderbook_snapshot(depth: int = 10) -> dict:
             "initialized": False,
             "market_ticker": None,
             "expected_seq": None,
+            "last_update_ts": None,
             "yes_bids": [],
             "yes_asks": [],
             "no_bids": [],
@@ -92,6 +95,7 @@ def get_live_orderbook_snapshot(depth: int = 10) -> dict:
         "initialized": True,
         "market_ticker": book.market_ticker,
         "expected_seq": book.expected_seq,
+        "last_update_ts": book.last_update_ts,
         "yes_bids": top_levels_for_display(yes_bids, read_depth),
         "yes_asks": top_levels_for_display(yes_asks, read_depth),
         "no_bids": top_levels_for_display(no_bids, read_depth),
@@ -99,11 +103,15 @@ def get_live_orderbook_snapshot(depth: int = 10) -> dict:
     }
 
 
-async def _stream_with_sync(market_ticker: str, book: OrderBook, market_close_ts: float | None = None) -> None:
+async def _stream_with_sync(
+    market_ticker: str, book: OrderBook, market_close_ts: float | None = None
+) -> None:
     """WS stream loop with REST snapshot bootstrap and sequence-safe delta replay."""
     while True:
         if is_market_closed(market_close_ts):
-            logger.info("Market %s reached close time; rotating stream target...", market_ticker)
+            logger.info(
+                "Market %s reached close time; rotating stream target...", market_ticker
+            )
             return
 
         try:
@@ -114,14 +122,21 @@ async def _stream_with_sync(market_ticker: str, book: OrderBook, market_close_ts
             last_recalibration_at = time.monotonic()
             consecutive_recon_breaches = 0
 
-            rest_snapshot_task = asyncio.create_task(asyncio.to_thread(get_market_orderbook, market_ticker))
+            rest_snapshot_task = asyncio.create_task(
+                asyncio.to_thread(get_market_orderbook, market_ticker)
+            )
 
             ws = await connect_and_subscribe(market_ticker)
-            logger.info("Subscribed to %s. Bootstrapping from REST snapshot...", market_ticker)
+            logger.info(
+                "Subscribed to %s. Bootstrapping from REST snapshot...", market_ticker
+            )
 
             async for message in ws:
                 if is_market_closed(market_close_ts):
-                    logger.info("Market %s reached close time; reconnect loop stopped.", market_ticker)
+                    logger.info(
+                        "Market %s reached close time; reconnect loop stopped.",
+                        market_ticker,
+                    )
                     await ws.close()
                     return
 
@@ -165,23 +180,32 @@ async def _stream_with_sync(market_ticker: str, book: OrderBook, market_close_ts
                     on_live_orderbook_update(book)
 
                 elif msg_type == "subscribed":
-                    logger.info("[SERVER] Subscription confirmed: %s", data.get("msg", {}).get("channel"))
+                    logger.info(
+                        "[SERVER] Subscription confirmed: %s",
+                        data.get("msg", {}).get("channel"),
+                    )
 
                 if book.needs_resync:
                     logger.warning("Resync triggered, reconnecting...")
                     break
 
                 if not bootstrapped:
-                    bootstrapped, reconnect_now, last_recalibration_at = try_bootstrap_from_rest(
-                        book=book,
-                        rest_snapshot_task=rest_snapshot_task,
-                        ws_snapshot_seq=ws_snapshot_seq,
-                        buffered_deltas=buffered_deltas,
+                    bootstrapped, reconnect_now, last_recalibration_at = (
+                        try_bootstrap_from_rest(
+                            book=book,
+                            rest_snapshot_task=rest_snapshot_task,
+                            ws_snapshot_seq=ws_snapshot_seq,
+                            buffered_deltas=buffered_deltas,
+                        )
                     )
                     if reconnect_now:
                         break
 
-                if bootstrapped and time.monotonic() - last_recalibration_at >= SNAPSHOT_RECALIBRATION_SEC:
+                if (
+                    bootstrapped
+                    and time.monotonic() - last_recalibration_at
+                    >= SNAPSHOT_RECALIBRATION_SEC
+                ):
                     consecutive_recon_breaches, action = await run_recalibration(
                         market_ticker=market_ticker,
                         book=book,
@@ -192,7 +216,9 @@ async def _stream_with_sync(market_ticker: str, book: OrderBook, market_close_ts
                     last_recalibration_at = time.monotonic()
 
                     if action == "trigger_resync":
-                        logger.warning("Reconciliation drift threshold breached; forcing resync...")
+                        logger.warning(
+                            "Reconciliation drift threshold breached; forcing resync..."
+                        )
                         break
 
             await ws.close()
@@ -200,23 +226,20 @@ async def _stream_with_sync(market_ticker: str, book: OrderBook, market_close_ts
                 rest_snapshot_task.cancel()
 
         except (websockets.ConnectionClosed, ConnectionError, OSError) as exc:
-            logger.warning("WebSocket dropped (%s), reconnecting in %ss", exc, RECONNECT_DELAY_SEC)
+            logger.warning(
+                "WebSocket dropped (%s), reconnecting in %ss", exc, RECONNECT_DELAY_SEC
+            )
 
         await asyncio.sleep(RECONNECT_DELAY_SEC)
 
 
 async def run_market_streamer() -> None:
-    """Tracks the active selected 15-minute crypto market and rotates on close."""
+    """Tracks the process asset's 15-minute crypto market and rotates on close."""
     global live_book, _live_market_info
     current_market = None
 
     while True:
-        switched_asset, asset_context = apply_queued_asset_switch_and_get_context()
-        profile = asset_context.profile
-
-        if switched_asset:
-            logger.info("Applied queued asset switch. Active asset is now %s.", profile.asset)
-            current_market = None
+        profile = get_active_asset_context().profile
 
         logger.info(
             "Fetching active %s 15m market to stream (%s).",
@@ -226,7 +249,9 @@ async def run_market_streamer() -> None:
         markets = get_open_markets(profile.kalshi_series_ticker)
 
         if not markets:
-            logger.info("No active markets found. Retrying in %ss...", RECONNECT_DELAY_SEC)
+            logger.info(
+                "No active markets found. Retrying in %ss...", RECONNECT_DELAY_SEC
+            )
             _set_live_market_info(profile)
             await asyncio.sleep(RECONNECT_DELAY_SEC)
             continue
@@ -235,7 +260,9 @@ async def run_market_streamer() -> None:
         target_market = selected_market.get("ticker")
 
         if not target_market:
-            logger.warning("No valid market ticker found. Retrying in %ss...", RECONNECT_DELAY_SEC)
+            logger.warning(
+                "No valid market ticker found. Retrying in %ss...", RECONNECT_DELAY_SEC
+            )
             _set_live_market_info(profile)
             await asyncio.sleep(RECONNECT_DELAY_SEC)
             continue
@@ -252,5 +279,5 @@ async def run_market_streamer() -> None:
         live_book = OrderBook(target_market)
         await _stream_with_sync(target_market, live_book, market_close_ts=close_ts)
 
-        # Stream exits on market close/rotation event; immediately discover the next one.
+        # Stream exits on close/rotation; immediately discover the next market.
         await asyncio.sleep(1)

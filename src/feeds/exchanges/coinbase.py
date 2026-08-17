@@ -43,7 +43,9 @@ class CoinbaseAdapter(ExchangeAdapter):
                         continue
 
                     side = snapshot_bids if side_raw == "bid" else snapshot_asks
-                    add_snapshot_level(side, update.get("price_level"), update.get("new_quantity"))
+                    add_snapshot_level(
+                        side, update.get("price_level"), update.get("new_quantity")
+                    )
 
                 replace_full_book(EXCHANGE, snapshot_bids, snapshot_asks)
                 parsed = True
@@ -55,7 +57,12 @@ class CoinbaseAdapter(ExchangeAdapter):
                     continue
 
                 side = "bids" if side_raw == "bid" else "asks"
-                if apply_book_update(EXCHANGE, side, update.get("price_level"), update.get("new_quantity")):
+                if apply_book_update(
+                    EXCHANGE,
+                    side,
+                    update.get("price_level"),
+                    update.get("new_quantity"),
+                ):
                     parsed = True
 
         return parsed

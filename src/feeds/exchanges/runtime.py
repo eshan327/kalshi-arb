@@ -17,7 +17,9 @@ def _next_backoff(current_backoff: float) -> float:
     return min(current_backoff * 2.0, BRTI_RECONNECT_MAX_SEC)
 
 
-async def _sleep_reconnect_backoff(exchange: str, err: Exception, current_backoff: float) -> float:
+async def _sleep_reconnect_backoff(
+    exchange: str, err: Exception, current_backoff: float
+) -> float:
     jitter = random.uniform(0.0, current_backoff * 0.25)
     wait_for = current_backoff + jitter
     logger.warning("%s dropped (%s), reconnecting in %.2fs", exchange, err, wait_for)
@@ -55,5 +57,10 @@ async def run_exchange_stream(
                     if handle_message(data):
                         record_exchange_ws_message(exchange, data, "parsed")
 
-        except (websockets.ConnectionClosed, ConnectionError, OSError, json.JSONDecodeError) as exc:
+        except (
+            websockets.ConnectionClosed,
+            ConnectionError,
+            OSError,
+            json.JSONDecodeError,
+        ) as exc:
             backoff = await _sleep_reconnect_backoff(exchange, exc, backoff)

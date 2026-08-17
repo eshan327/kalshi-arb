@@ -5,10 +5,10 @@ from typing import TypedDict
 
 # --- Index Methodology Parameters (from CME CF RTI methodology family) ---
 # Section 6.2 style depth-walk parameters; applied to the active profile's spot orderbooks.
-SPACING = 1                          # Volume spacing in base-asset units (e.g., 1 BTC / 1 ETH)
-DEVIATION_THRESHOLD = 0.005          # D = 0.5%
-POTENTIALLY_ERRONEOUS_PARAM = 0.05   # 5%
-STALE_THRESHOLD = 30                 # Discard exchange if data >30s old
+SPACING = 1  # Volume spacing in base-asset units (e.g., 1 BTC / 1 ETH)
+DEVIATION_THRESHOLD = 0.005  # D = 0.5%
+POTENTIALLY_ERRONEOUS_PARAM = 0.05  # 5%
+STALE_THRESHOLD = 30  # Discard exchange if data >30s old
 
 # Tracks exchanges flagged as potentially erroneous (Section 5.3 step 4 hysteresis)
 _flagged_exchanges: set[str] = set()
@@ -25,13 +25,16 @@ Levels = list[tuple[float, float]]
 
 
 def reset_brti_calc_state() -> None:
-    """Clears cross-run hysteresis flags (used when switching between BTC and ETH)."""
+    """Clears cross-run exchange-screening hysteresis."""
     _flagged_exchanges.clear()
 
 
 # ---- Section 4.1.3: Dynamic Order Size Cap (Eq. 4a-5) ----
 
-def compute_dynamic_order_cap(uncapped_bids: Levels, uncapped_asks: Levels) -> float | None:
+
+def compute_dynamic_order_cap(
+    uncapped_bids: Levels, uncapped_asks: Levels
+) -> float | None:
     """
     Calculates the dynamic order size cap from the uncapped consolidated orderbook.
     Returns C_T = trimmed_mean + 5 * winsorized_std_dev (Eq. 5)
@@ -73,15 +76,19 @@ def compute_dynamic_order_cap(uncapped_bids: Levels, uncapped_asks: Levels) -> f
     if n_t - 2 * k <= 0:
         trimmed_mean = sum(s_t) / n_t
     else:
-        trimmed_mean = sum(s_t[k:n_t - k]) / (n_t - 2 * k)
+        trimmed_mean = sum(s_t[k : n_t - k]) / (n_t - 2 * k)
 
     # Eq 4f: winsorized sample set
     s_prime = []
     for i in range(n_t):
         if i < k:
-            s_prime.append(s_t[k])        # replace low outliers with s_{k+1} (0-indexed: s_t[k])
+            s_prime.append(
+                s_t[k]
+            )  # replace low outliers with s_{k+1} (0-indexed: s_t[k])
         elif i >= n_t - k:
-            s_prime.append(s_t[n_t - k - 1])  # replace high outliers with s_{n-k} (0-indexed: s_t[n_t-k-1])
+            s_prime.append(
+                s_t[n_t - k - 1]
+            )  # replace high outliers with s_{n-k} (0-indexed: s_t[n_t-k-1])
         else:
             s_prime.append(s_t[i])
 
@@ -100,6 +107,7 @@ def compute_dynamic_order_cap(uncapped_bids: Levels, uncapped_asks: Levels) -> f
 
 
 # ---- Section 5.2.1: Erroneous Books ----
+
 
 def screen_erroneous_book(bids: dict[float, float], asks: dict[float, float]) -> bool:
     """
@@ -123,6 +131,7 @@ def screen_erroneous_book(bids: dict[float, float], asks: dict[float, float]) ->
 
 # ---- Section 5.2.2: Erroneous Prices ----
 
+
 def filter_erroneous_prices(book_side: dict[float, float]) -> dict[float, float]:
     """
     Removes individual entries with non-numeric or non-positive price/size.
@@ -139,6 +148,7 @@ def filter_erroneous_prices(book_side: dict[float, float]) -> dict[float, float]
 
 
 # ---- Section 5.3: Potentially Erroneous Data ----
+
 
 def screen_potentially_erroneous(
     exchange_mids: dict[str, float],
@@ -178,7 +188,9 @@ def screen_potentially_erroneous(
     return currently_flagged
 
 
-def get_exchange_mid(bids: dict[float, float], asks: dict[float, float]) -> float | None:
+def get_exchange_mid(
+    bids: dict[float, float], asks: dict[float, float]
+) -> float | None:
     """Mid price = (best bid + best ask) / 2."""
     if not bids or not asks:
         return None
@@ -189,7 +201,10 @@ def get_exchange_mid(bids: dict[float, float], asks: dict[float, float]) -> floa
 
 # ---- Steps 1-2: Consolidation ----
 
-def _aggregate_book_levels(exchange_books: ExchangeBooks) -> tuple[dict[float, float], dict[float, float]]:
+
+def _aggregate_book_levels(
+    exchange_books: ExchangeBooks,
+) -> tuple[dict[float, float], dict[float, float]]:
     all_bids: dict[float, float] = {}
     all_asks: dict[float, float] = {}
 
@@ -207,7 +222,9 @@ def _aggregate_book_levels(exchange_books: ExchangeBooks) -> tuple[dict[float, f
     return all_bids, all_asks
 
 
-def consolidate_books(exchange_books: ExchangeBooks, order_cap: float | None) -> tuple[Levels, Levels]:
+def consolidate_books(
+    exchange_books: ExchangeBooks, order_cap: float | None
+) -> tuple[Levels, Levels]:
     """
     Merge all exchange orderbooks into one consolidated orderbook.
     Each price level's size is capped at order_cap (C_T).
@@ -234,6 +251,7 @@ def consolidate_books_uncapped(exchange_books: ExchangeBooks) -> tuple[Levels, L
 
 
 # ---- Step 3: Price-Volume Curves (Eq. 1a-1f) ----
+
 
 def _walk_raw_curve(levels: Levels) -> dict[int, float]:
     """
@@ -301,7 +319,7 @@ def compute_price_volume_curves(
         if mid > 0:
             mid_sv[v] = (ask_pv[v] / mid) - 1
         else:
-            mid_sv[v] = float('inf')
+            mid_sv[v] = float("inf")
 
         v += spacing
 
@@ -309,6 +327,7 @@ def compute_price_volume_curves(
 
 
 # ---- Step 4: Utilized Depth (Eq. 2) ----
+
 
 def compute_utilized_depth(
     mid_sv: dict[int, float],
@@ -335,7 +354,13 @@ def compute_utilized_depth(
 
 # ---- Steps 5-6: Exponential Weighting (Eq. 3) ----
 
-def compute_brti(mid_pv: dict[int, float], utilized_depth: int, spacing: int = SPACING) -> float | None:
+
+def compute_brti(
+    mid_pv: dict[int, float],
+    utilized_depth: int,
+    spacing: int = SPACING,
+    price_decimals: int = 2,
+) -> float | None:
     """
     CCRTI_T = Σ_{v ∈ {s, 2s, ..., v̄_T}} midPV(v) * (1/NF) * λ * e^(-λv)
     λ = 1 / (0.3 * v̄_T)
@@ -367,10 +392,11 @@ def compute_brti(mid_pv: dict[int, float], utilized_depth: int, spacing: int = S
     for v, weight in raw_weights.items():
         brti += mid_pv[v] * (weight / nf)
 
-    return round(brti, 2)
+    return round(brti, max(0, min(12, int(price_decimals))))
 
 
 # ---- Full Pipeline ----
+
 
 def _filter_stale_books(
     exchange_books: ExchangeBooks,
@@ -419,6 +445,7 @@ def _drop_potentially_erroneous_books(
     )
     return {name: book for name, book in exchange_books.items() if name not in flagged}
 
+
 def calculate_brti(
     exchange_books: ExchangeBooks,
     current_time: float | None = None,
@@ -427,6 +454,7 @@ def calculate_brti(
     deviation_threshold: float = DEVIATION_THRESHOLD,
     potentially_erroneous_param: float = POTENTIALLY_ERRONEOUS_PARAM,
     stale_threshold: float = STALE_THRESHOLD,
+    price_decimals: int = 2,
 ) -> tuple[float | None, int, int]:
     """
     Full BRTI calculation per CME CF Methodology v16.5.
@@ -459,7 +487,9 @@ def calculate_brti(
         stale_threshold = STALE_THRESHOLD
 
     # --- Section 5.1: Stale data ---
-    valid_books = _filter_stale_books(exchange_books, current_time, stale_threshold=stale_threshold)
+    valid_books = _filter_stale_books(
+        exchange_books, current_time, stale_threshold=stale_threshold
+    )
 
     if not valid_books:
         return None, 0, 0
@@ -493,7 +523,9 @@ def calculate_brti(
         return None, 0, 0
 
     # --- Step 3: Price-volume curves ---
-    ask_pv, bid_pv, mid_pv, mid_sv = compute_price_volume_curves(bids, asks, spacing=spacing)
+    ask_pv, bid_pv, mid_pv, mid_sv = compute_price_volume_curves(
+        bids, asks, spacing=spacing
+    )
 
     if not mid_pv:
         return None, 0, 0
@@ -506,6 +538,11 @@ def calculate_brti(
     )
 
     # --- Steps 5-6: Exponential weighting ---
-    brti = compute_brti(mid_pv, utilized_depth, spacing=spacing)
+    brti = compute_brti(
+        mid_pv,
+        utilized_depth,
+        spacing=spacing,
+        price_decimals=price_decimals,
+    )
 
     return brti, utilized_depth, len(final_books)

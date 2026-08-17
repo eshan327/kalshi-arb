@@ -4,12 +4,11 @@ import asyncio
 import logging
 import threading
 
-from kalshi_python_sync.exceptions import UnauthorizedException
-
-from core.auth import get_authenticated_client
-from core.config import BRTI_RECALC_INTERVAL_SEC
-from engine.shadow import run_shadow_trading_loop
+from core.auth import get_ws_auth_headers
+from core.config import BRTI_RECALC_INTERVAL_SEC, EXECUTION_MODE
+from data.kalshi_trading import get_balance_summary
 from engine.streamer import run_market_streamer
+from engine.trading import run_trading_loop
 from feeds.brti_aggregator import run_brti_aggregator
 
 logger = logging.getLogger(__name__)
@@ -21,8 +20,10 @@ _services_lock = threading.Lock()
 async def _run_services() -> None:
     await asyncio.gather(
         asyncio.create_task(run_market_streamer()),
-        asyncio.create_task(run_brti_aggregator(recalc_interval=BRTI_RECALC_INTERVAL_SEC)),
-        asyncio.create_task(run_shadow_trading_loop()),
+        asyncio.create_task(
+            run_brti_aggregator(recalc_interval=BRTI_RECALC_INTERVAL_SEC)
+        ),
+        asyncio.create_task(run_trading_loop()),
     )
 
 
@@ -42,19 +43,19 @@ def start_background_services_once() -> None:
 
 
 def validate_auth_or_exit() -> None:
+    if EXECUTION_MODE == "paper":
+        try:
+            get_ws_auth_headers()
+            logger.info(
+                "Paper account enabled; live account balance will not be queried."
+            )
+            return
+        except Exception as exc:
+            logger.exception("Authentication failed: %s", exc)
+            raise SystemExit(1)
     try:
-        client = get_authenticated_client()
-        balance_res = client.get_balance()
-        logger.info("Balance: $%s", f"{balance_res.balance / 100:,.2f}")
-    except UnauthorizedException:
-        logger.error(
-            "Kalshi returned 401 Unauthorized. Most often: "
-            "KALSHI_ENV does not match where the API key was created "
-            "(demo keys from demo.kalshi.co require KALSHI_ENV=demo; "
-            "production keys from kalshi.com require KALSHI_ENV=prod), "
-            "or KALSHI_*_KEY_ID does not belong to that private key file."
-        )
-        raise SystemExit(1)
+        balance = get_balance_summary()
+        logger.info("Balance: $%s", f"{balance['balance'] / 100:,.2f}")
     except Exception as exc:
         logger.exception("Authentication failed: %s", exc)
         raise SystemExit(1)

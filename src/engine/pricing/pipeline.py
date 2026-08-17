@@ -32,7 +32,9 @@ def parse_close_time_epoch(value: str | None) -> float | None:
 def _json_safe_detail(detail: dict[str, float | int | str | None]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in detail.items():
-        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        if isinstance(value, float) and (
+            value != value or value in (float("inf"), float("-inf"))
+        ):
             out[key] = None
         else:
             out[key] = value
@@ -61,6 +63,7 @@ def _build_base_snapshot(
         "spot_index": float(spot) if isinstance(spot, (int, float)) else None,
         "sigma_annual": None,
         "sigma_samples": 0,
+        "index_age_seconds": None,
         "vol_is_fallback": False,
         "p_model": None,
         "p_model_pct": None,
@@ -143,6 +146,15 @@ def compute_pricing_snapshot(
     base["seconds_to_expiry"] = round(sec_exp, 2)
 
     points = extract_valid_index_points(ticks)
+    if not points:
+        base["reason"] = "no_index_ticks"
+        return base
+    index_age_seconds = max(0.0, now_ts - points[-1][0])
+    base["index_age_seconds"] = round(index_age_seconds, 3)
+    if index_age_seconds > _MAX_SAMPLE_STALENESS_SEC:
+        base["reason"] = "stale_index"
+        return base
+
     sigma, vol_is_fallback = _estimate_sigma(
         points,
         fallback_sigma_annual=profile.fallback_sigma_annual,
@@ -199,7 +211,9 @@ def compute_pricing_snapshot(
     base["p_model"] = round(result.p_model, 8)
     base["p_model_pct"] = round(100.0 * result.p_model, 4)
     base["regime"] = result.regime
-    base["sigma_eff"] = None if result.sigma_eff is None else round(float(result.sigma_eff), 8)
+    base["sigma_eff"] = (
+        None if result.sigma_eff is None else round(float(result.sigma_eff), 8)
+    )
     base["pricer_detail"] = _json_safe_detail(result.detail)
     base["twap_seconds_elapsed"] = twap_elapsed_seconds
     base["twap_partial_avg"] = twap_partial_avg

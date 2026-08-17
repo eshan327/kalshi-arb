@@ -24,10 +24,14 @@ class PaxosAdapter(ExchangeAdapter):
             snapshot_asks = {}
 
             for level in data.get("bids", []):
-                add_snapshot_level(snapshot_bids, level.get("price"), level.get("amount"))
+                add_snapshot_level(
+                    snapshot_bids, level.get("price"), level.get("amount")
+                )
 
             for level in data.get("asks", []):
-                add_snapshot_level(snapshot_asks, level.get("price"), level.get("amount"))
+                add_snapshot_level(
+                    snapshot_asks, level.get("price"), level.get("amount")
+                )
 
             replace_full_book(EXCHANGE, snapshot_bids, snapshot_asks)
             return True
@@ -38,6 +42,8 @@ class PaxosAdapter(ExchangeAdapter):
                 return False
 
             side = "bids" if side_raw == "BUY" else "asks"
-            return apply_book_update(EXCHANGE, side, data.get("price"), data.get("amount"))
+            return apply_book_update(
+                EXCHANGE, side, data.get("price"), data.get("amount")
+            )
 
         return False

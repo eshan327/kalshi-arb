@@ -19,7 +19,13 @@ _brti_ticks = deque(maxlen=2000)
 
 
 def reset_tick_state(asset: str) -> None:
-    global _current_brti, _current_depth, _current_exchanges, _current_brti_ts, _current_asset, _tick_version
+    global \
+        _current_brti, \
+        _current_depth, \
+        _current_exchanges, \
+        _current_brti_ts, \
+        _current_asset, \
+        _tick_version
     with _tick_lock:
         _current_brti = None
         _current_depth = 0
@@ -84,7 +90,9 @@ def get_brti_tick_version() -> int:
         return _tick_version
 
 
-def get_brti_settlement_proxy(window_seconds: int = 60) -> dict[str, float | int | None | str]:
+def get_brti_settlement_proxy(
+    window_seconds: int = 60,
+) -> dict[str, float | int | None | str]:
     with _tick_lock:
         ticks_snapshot = list(_brti_ticks)
 

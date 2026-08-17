@@ -40,8 +40,12 @@ def is_reconciliation_breach(metrics):
     if metrics["no"]["best_price_delta"] > RECONCILIATION_PRICE_TOL_CENTS:
         return True
 
-    combined_missing = metrics["yes"]["missing_from_live"] + metrics["no"]["missing_from_live"]
+    combined_missing = (
+        metrics["yes"]["missing_from_live"] + metrics["no"]["missing_from_live"]
+    )
     combined_extra = metrics["yes"]["extra_in_live"] + metrics["no"]["extra_in_live"]
-    combined_qty_mismatch = metrics["yes"]["qty_mismatch_count"] + metrics["no"]["qty_mismatch_count"]
+    combined_qty_mismatch = (
+        metrics["yes"]["qty_mismatch_count"] + metrics["no"]["qty_mismatch_count"]
+    )
 
     return (combined_missing + combined_extra + combined_qty_mismatch) > 0

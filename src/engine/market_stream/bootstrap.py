@@ -6,14 +6,20 @@ import time
 
 from engine.book_microstructure import on_live_orderbook_update
 from engine.orderbook import OrderBook
-from engine.stream_metrics import _record_top10_impact, _record_ws_event, _top10_signature
+from engine.stream_metrics import (
+    _record_top10_impact,
+    _record_ws_event,
+    _top10_signature,
+)
 
 logger = logging.getLogger(__name__)
 
 BufferedDelta = tuple[int, dict]
 
 
-def levels_from_rest_snapshot(book: OrderBook, snapshot: dict) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+def levels_from_rest_snapshot(
+    book: OrderBook, snapshot: dict
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     yes_levels = snapshot.get("yes")
     no_levels = snapshot.get("no")
 
@@ -40,12 +46,22 @@ def levels_from_rest_snapshot(book: OrderBook, snapshot: dict) -> tuple[list[tup
         if qty > 0 and px is not None:
             no_dict[px] = qty
 
-    yes_bids = sorted([(book._to_cents(p), q) for p, q in yes_dict.items()], key=lambda x: x[0], reverse=True)
-    no_bids = sorted([(book._to_cents(p), q) for p, q in no_dict.items()], key=lambda x: x[0], reverse=True)
+    yes_bids = sorted(
+        [(book._to_cents(p), q) for p, q in yes_dict.items()],
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    no_bids = sorted(
+        [(book._to_cents(p), q) for p, q in no_dict.items()],
+        key=lambda x: x[0],
+        reverse=True,
+    )
     return yes_bids, no_bids
 
 
-def replay_buffered_deltas(book: OrderBook, buffered_deltas: list[BufferedDelta]) -> int:
+def replay_buffered_deltas(
+    book: OrderBook, buffered_deltas: list[BufferedDelta]
+) -> int:
     applied = 0
     for buffered_seq, buffered_msg in sorted(buffered_deltas, key=lambda item: item[0]):
         before = _top10_signature(book)
@@ -54,11 +70,17 @@ def replay_buffered_deltas(book: OrderBook, buffered_deltas: list[BufferedDelta]
             after = _top10_signature(book)
             _record_top10_impact(buffered_seq, buffered_msg, before != after)
             on_live_orderbook_update(book)
-            _record_ws_event("orderbook_delta", buffered_seq, buffered_msg, "applied_from_buffer")
+            _record_ws_event(
+                "orderbook_delta", buffered_seq, buffered_msg, "applied_from_buffer"
+            )
         elif buffered_seq < (book.expected_seq or 0):
-            _record_ws_event("orderbook_delta", buffered_seq, buffered_msg, "stale_buffer_ignored")
+            _record_ws_event(
+                "orderbook_delta", buffered_seq, buffered_msg, "stale_buffer_ignored"
+            )
         else:
-            _record_ws_event("orderbook_delta", buffered_seq, buffered_msg, "buffer_replay_gap")
+            _record_ws_event(
+                "orderbook_delta", buffered_seq, buffered_msg, "buffer_replay_gap"
+            )
             break
     return applied
 

@@ -30,7 +30,9 @@ def _count_incoming_message(msg_type: str) -> None:
             _ws_stats["ticker_received"] += 1
 
 
-def _record_ws_event(event_type: str, seq: int | None, payload: dict[str, Any], status: str) -> None:
+def _record_ws_event(
+    event_type: str, seq: int | None, payload: dict[str, Any], status: str
+) -> None:
     entry = {
         "ts": time.time(),
         "type": event_type,
@@ -58,10 +60,15 @@ def _record_ws_event(event_type: str, seq: int | None, payload: dict[str, Any], 
 
 
 def _top10_signature(book) -> tuple:
-    yes_bids, yes_asks, no_bids, no_asks = book.get_orderbook_top_n(ORDERBOOK_VIEW_DEPTH)
+    yes_bids, yes_asks, no_bids, no_asks = book.get_orderbook_top_n(
+        ORDERBOOK_VIEW_DEPTH
+    )
 
     def _norm(levels):
-        return tuple((round(float(px), 2), float(qty)) for px, qty in levels[:ORDERBOOK_VIEW_DEPTH])
+        return tuple(
+            (round(float(px), 2), float(qty))
+            for px, qty in levels[:ORDERBOOK_VIEW_DEPTH]
+        )
 
     return (
         _norm(yes_bids),

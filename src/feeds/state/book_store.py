@@ -45,7 +45,9 @@ def update_level(exchange: str, side: str, price: float, size: float) -> None:
         _exchange_books[exchange]["last_update"] = time.time()
 
 
-def replace_full_book(exchange: str, bids: dict[float, float], asks: dict[float, float]) -> None:
+def replace_full_book(
+    exchange: str, bids: dict[float, float], asks: dict[float, float]
+) -> None:
     with _book_lock:
         if exchange not in _exchange_books:
             init_exchange_book(exchange)

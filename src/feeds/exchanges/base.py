@@ -37,7 +37,9 @@ class ExchangeAdapter(ABC):
         )
 
 
-def _parse_level(price_raw: Any, size_raw: Any, *, require_positive_size: bool) -> tuple[float, float] | None:
+def _parse_level(
+    price_raw: Any, size_raw: Any, *, require_positive_size: bool
+) -> tuple[float, float] | None:
     price = safe_float(price_raw)
     size = safe_float(size_raw)
     if price is None or size is None or price <= 0:
@@ -47,7 +49,9 @@ def _parse_level(price_raw: Any, size_raw: Any, *, require_positive_size: bool) 
     return price, size
 
 
-def add_snapshot_level(side_book: dict[float, float], price_raw: Any, size_raw: Any) -> bool:
+def add_snapshot_level(
+    side_book: dict[float, float], price_raw: Any, size_raw: Any
+) -> bool:
     parsed = _parse_level(price_raw, size_raw, require_positive_size=True)
     if parsed is None:
         return False

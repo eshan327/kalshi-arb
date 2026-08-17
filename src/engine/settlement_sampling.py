@@ -4,7 +4,9 @@ import time
 from typing import Any
 
 
-def extract_valid_index_points(ticks: list[dict[str, Any]]) -> list[tuple[float, float]]:
+def extract_valid_index_points(
+    ticks: list[dict[str, Any]],
+) -> list[tuple[float, float]]:
     points: list[tuple[float, float]] = []
     for tick in ticks:
         if not isinstance(tick, dict) or tick.get("status") != "ok":

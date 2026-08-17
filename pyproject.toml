@@ -1,19 +1,12 @@
 [project]
 name = "kalshi-arb"
 version = "0.1.0"
-description = "Add your description here"
+description = "Live and paper Kalshi 15-minute crypto algorithmic trader"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "cryptofeed>=2.4.1",
     "cryptography>=46.0.5",
     "flask>=3.1.2",
-    "kalshi-python-async>=3.2.0",
-    "kalshi-python-sync>=3.2.0",
-    "kaleido>=0.2.1",
-    "matplotlib>=3.10.8",
-    "numpy>=2.4.2",
-    "plotly>=5.20.0",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",

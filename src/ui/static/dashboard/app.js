@@ -1,5 +1,4 @@
 (function () {
-  const { bindAssetSelector, syncAssetSelectorFromState } = window.DashboardAssetSelection;
   const { buildBookTable, renderInnerCalcJson, renderPhase3Section } = window.DashboardRenderers;
   const {
     refreshReconLog,
@@ -95,9 +94,6 @@
     const settlementWindowSeconds = Number(state.settlement_window_seconds || 60);
     window.__settlementWindowSeconds = settlementWindowSeconds;
 
-    bindAssetSelector();
-    syncAssetSelectorFromState(state);
-
     const summary = document.getElementById("summary");
     summary.innerHTML =
       `<div class="summary-box"><div class="summary-label">Orderbook Status</div><div class="summary-value ${ob.initialized ? "ok" : "warn"}">${ob.initialized ? "Live and updating" : "Waiting for bootstrap"}</div></div>` +
@@ -173,25 +169,6 @@
     if (window.DashboardSettings && typeof window.DashboardSettings.onState === "function") {
       window.DashboardSettings.onState(state);
     }
-    if (window.DashboardSimulation && typeof window.DashboardSimulation.onState === "function") {
-      window.DashboardSimulation.onState(state);
-    }
-
-    const monologue = state.signal_monologue || state.shadow_runtime?.signal_monologue || {};
-    const ticker = document.getElementById("signalIntentTicker");
-    if (ticker && monologue.action_intent) {
-      ticker.textContent = String(monologue.action_intent);
-    }
-
-    const ledger = state.paper_ledger || state.shadow_runtime?.paper_ledger || {};
-    const liveLedgerSummary = document.getElementById("liveLedgerSummary");
-    if (liveLedgerSummary && ledger) {
-      const cash = Number(ledger.cash_cents || 0) / 100;
-      const equity = Number(ledger.equity_cents || 0) / 100;
-      const unrealized = Number(ledger.unrealized_pnl_cents || 0) / 100;
-      liveLedgerSummary.textContent =
-        `Cash: $${cash.toFixed(2)} | Equity: $${equity.toFixed(2)} | Unrealized: $${unrealized.toFixed(2)}`;
-    }
   }
 
   const detailsRefreshers = {
@@ -207,7 +184,7 @@
   [
     {
       task: refreshState,
-      options: { visibleMs: 600, hiddenMs: 3000, runWhenHidden: false, immediate: true },
+      options: { visibleMs: 1000, hiddenMs: 3000, runWhenHidden: false, immediate: true },
     },
     {
       task: () => refreshBrtiTicks(isDetailsPanelOpen("brtiTicks") ? 200 : 120),

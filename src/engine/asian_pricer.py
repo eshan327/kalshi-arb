@@ -12,10 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    from engine.twap import TwapCalculator
+from typing import Literal
 
 SECONDS_PER_YEAR = 365.25 * 24 * 3600.0
 _SETTLEMENT_SECONDS_DEFAULT = 60
@@ -53,7 +50,9 @@ def _fixing_times_years(seconds_to_expiry: float, n: int) -> list[float]:
     return out
 
 
-def _levy_moment_match_m2(S0: float, sigma_annual: float, t_years: list[float]) -> tuple[float, float]:
+def _levy_moment_match_m2(
+    S0: float, sigma_annual: float, t_years: list[float]
+) -> tuple[float, float]:
     """Returns (M1, M2) for A = (1/n)Σ S_{t_i} under GBM with r=0."""
     n = len(t_years)
     sig2 = sigma_annual * sigma_annual
@@ -198,45 +197,4 @@ def prob_collapsed_variance_binary(
         regime="collapsed",
         sigma_eff=sigma_annual * math.sqrt(delta_t) * w_rem,
         detail={"k": k, "n": n, "z": z, "mu_avg": mu_avg, "rem": rem},
-    )
-
-
-def price_btwap_binary(
-    spot: float,
-    strike: float,
-    sigma_annual: float,
-    seconds_to_expiry: float,
-    twap: TwapCalculator | None,
-    *,
-    settlement_seconds: int = _SETTLEMENT_SECONDS_DEFAULT,
-    mu_fwd: float | None = None,
-) -> AsianBinaryPricerResult:
-    """
-    Dispatch: ``seconds_to_expiry > settlement_seconds`` → Levy/TW branch; else collapsed.
-
-    ``twap`` should be the live :class:`TwapCalculator` (window started at settlement window open).
-    ``mu_fwd`` defaults to ``spot`` (forward proxy for remaining BRTI samples).
-    """
-    fwd = float(mu_fwd) if mu_fwd is not None else float(spot)
-    tau = float(seconds_to_expiry)
-    n = int(settlement_seconds)
-
-    if tau > n:
-        return prob_levy_tw_binary(spot, strike, sigma_annual, tau, n_fixes=n)
-
-    k = 0
-    mean_k: float | None = None
-    if twap is not None:
-        k = twap.seconds_elapsed()
-        samples = twap.discrete_samples()
-        if samples:
-            mean_k = sum(samples) / len(samples)
-
-    return prob_collapsed_variance_binary(
-        strike,
-        sigma_annual,
-        n=n,
-        k=k,
-        mean_known_samples=mean_k,
-        mu_fwd=fwd,
     )

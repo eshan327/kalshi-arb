@@ -1,5 +1,6 @@
 import logging
 import heapq
+import time
 from threading import RLock
 
 
@@ -25,6 +26,7 @@ class OrderBook:
         self.expected_seq = None
         self.initialized = False
         self.needs_resync = False
+        self.last_update_ts = None
         self.qty_epsilon = 1e-6
         self._lock = RLock()
 
@@ -36,22 +38,14 @@ class OrderBook:
         return qty
 
     @staticmethod
-    def _to_cents(price_dollars_str):
-        """Converts REST/WS prices to cents (supports dollars or cents input)."""
-        value = float(price_dollars_str)
-        if value <= 1:
-            return round(value * 100.0, 2)
-        return round(value, 2)
-
-    @staticmethod
     def _normalize_price(price_value):
-        """Normalizes REST/WS prices to integer cents."""
+        """Normalizes REST/WS prices to fixed-point cents."""
         value = float(price_value)
         if value <= 0:
             return None
 
         cents = value * 100.0 if value <= 1 else value
-        return int(round(cents))
+        return round(cents, 4)
 
     @staticmethod
     def _extract_seq(snapshot_msg):
@@ -82,9 +76,12 @@ class OrderBook:
         if depth <= 0 or not side_book:
             return []
 
-        # Internal keys are integer cents; nlargest avoids sorting the full book.
+        # nlargest avoids sorting the full book.
         top_items = heapq.nlargest(depth, side_book.items(), key=lambda item: item[0])
-        return [(float(price_cents), self._normalize_qty(qty)) for price_cents, qty in top_items]
+        return [
+            (float(price_cents), self._normalize_qty(qty))
+            for price_cents, qty in top_items
+        ]
 
     def load_ws_snapshot(self, msg):
         """
@@ -101,6 +98,7 @@ class OrderBook:
 
             self.initialized = True
             self.needs_resync = False
+            self.last_update_ts = time.time()
             logger.info("Snapshot loaded: %s yes, %s no", len(self.yes), len(self.no))
 
     def load_rest_snapshot(self, snapshot):
@@ -122,6 +120,7 @@ class OrderBook:
 
             self.initialized = True
             self.needs_resync = False
+            self.last_update_ts = time.time()
 
             seq = self._extract_seq(snapshot)
             logger.info(
@@ -165,6 +164,7 @@ class OrderBook:
                 book.pop(price, None)
             else:
                 book[price] = new_qty
+            self.last_update_ts = time.time()
 
     def check_seq(self, seq):
         """
@@ -182,7 +182,9 @@ class OrderBook:
                 return True
 
             if seq != self.expected_seq:
-                logger.warning("Seq gap detected: expected %s, got %s", self.expected_seq, seq)
+                logger.warning(
+                    "Seq gap detected: expected %s, got %s", self.expected_seq, seq
+                )
                 self.needs_resync = True
                 return False
 
@@ -206,7 +208,9 @@ class OrderBook:
                 return False
 
             if seq > self.expected_seq:
-                logger.warning("Seq gap detected: expected %s, got %s", self.expected_seq, seq)
+                logger.warning(
+                    "Seq gap detected: expected %s, got %s", self.expected_seq, seq
+                )
                 self.needs_resync = True
                 return False
 
@@ -232,6 +236,7 @@ class OrderBook:
             self.expected_seq = None
             self.initialized = False
             self.needs_resync = False
+            self.last_update_ts = None
 
     def get_orderbook(self):
         """
@@ -243,12 +248,20 @@ class OrderBook:
         """
         with self._lock:
             yes_bids = sorted(
-                [(self._to_cents(p), self._normalize_qty(q)) for p, q in self.yes.items()],
-                key=lambda x: x[0], reverse=True
+                [
+                    (float(p), self._normalize_qty(q))
+                    for p, q in self.yes.items()
+                ],
+                key=lambda x: x[0],
+                reverse=True,
             )
             no_bids = sorted(
-                [(self._to_cents(p), self._normalize_qty(q)) for p, q in self.no.items()],
-                key=lambda x: x[0], reverse=True
+                [
+                    (float(p), self._normalize_qty(q))
+                    for p, q in self.no.items()
+                ],
+                key=lambda x: x[0],
+                reverse=True,
             )
 
             yes_asks = sorted([(round(100.0 - p, 2), q) for p, q in no_bids])

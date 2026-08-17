@@ -1,287 +1,179 @@
-# kalshi-arb
+# Kalshi 15-minute crypto trader
 
-## Setup
+Fee-aware systematic and discretionary trading for Kalshi's single-asset
+15-minute crypto markets. One process trades one asset in either paper or live
+mode.
 
-### 1) Install dependencies
-
-- Install `uv` if needed.
-- Run `uv sync` from repo root.
-- Add packages with `uv add <package_name>` when needed.
-
-### 2) Create credentials
-
-- Create demo keys on `https://demo.kalshi.co` and production keys on `https://kalshi.com`.
-- Store private keys in a gitignored folder, for example: `.secrets/demo.txt` and `.secrets/prod.txt`.
-
-### 3) Create `.env`
-
-Create a `.env` in repo root. Runtime settings are loaded from `src/core/config.py`, and auth values are loaded from `src/core/auth.py`.
-
-Bootstrap from the committed template:
+## Quick start
 
 ```bash
+uv sync
 cp .env.example .env
+uv run src/main.py --paper bitcoin
 ```
 
-Template source: `.env.example`
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000), verify the status strip,
+review the default limits, then click **Arm Paper** and enter `ARM PAPER`.
 
-Recommended `.env` values:
+Supported assets: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `ADA`, `NEAR`,
+`BCH`, `HYPE`, `TON`, and `ZEC`. Names such as `bitcoin` and `solana` also work.
+
+```bash
+uv run src/main.py --paper ETH
+uv run src/main.py --live SOL
+```
+
+If the mode is omitted, paper is the safe default. If the asset is omitted,
+`KALSHI_MARKET_ASSET` is used, then BTC.
+
+## Credentials and modes
+
+Both modes need a Kalshi API key because the live orderbook WebSocket is
+authenticated. Configure the demo or production key selected by `KALSHI_ENV` in
+`.env`.
+
+### Paper
+
+`--paper` never calls Kalshi's order-entry API. It:
+
+- starts with an ephemeral $1,000 balance by default;
+- simulates IOC fills against displayed live top-of-book price and quantity;
+- applies the active Kalshi fee multiplier;
+- marks open positions to the live bid;
+- supports automated exits, discretionary orders, pause, and flatten; and
+- waits for Kalshi's finalized outcome before settling expired positions.
+
+Set `KALSHI_PAPER_STARTING_CASH_CENTS` to change the starting balance. The paper
+account resets when the process restarts.
+
+### Live
+
+`--live` sends IOC orders to the Kalshi environment selected by `KALSHI_ENV`.
+It remains unable to submit orders until this explicit gate is also set:
 
 ```env
-# -----------------------------
-# Required auth/env
-# -----------------------------
-KALSHI_ENV=demo
-
-# used when KALSHI_ENV=demo
-KALSHI_DEMO_KEY_ID=demo_key_id_here
-KALSHI_DEMO_KEY_PATH=.secrets/demo.txt
-
-# used when KALSHI_ENV=prod
-KALSHI_PROD_KEY_ID=prod_key_id_here
-KALSHI_PROD_KEY_PATH=.secrets/prod.txt
-
-# optional API/WS overrides
-# KALSHI_API_BASE_URL=https://demo-api.kalshi.co/trade-api/v2
-# KALSHI_WS_BASE_URL=wss://demo-api.kalshi.co/trade-api/ws/v2
-
-# -----------------------------
-# Market selection defaults
-# -----------------------------
-KALSHI_MARKET_ASSET=BTC
-KALSHI_MARKET_SELECTION_STATE_PATH=.runtime/market_selection.json
-
-# -----------------------------
-# Execution gate defaults
-# -----------------------------
-# observe | paper | live
-KALSHI_EXECUTION_MODE=paper
-KALSHI_EXECUTION_ENABLED=true
-KALSHI_EXECUTION_ALLOW_LIVE_IN_DEMO_ENV=false
-KALSHI_EXECUTION_LOOP_INTERVAL_SEC=0.25
-
-# -----------------------------
-# EV + paper defaults
-# -----------------------------
-KALSHI_EXECUTION_MIN_EDGE_CENTS=0.5
-KALSHI_PAPER_SIM_STARTING_CASH_CENTS=100000
-
-# -----------------------------
-# Simulation defaults
-# -----------------------------
-KALSHI_SIMULATION_OUTPUT_DIR=output
-KALSHI_SIMULATION_DEFAULT_N_PATHS=5000
-KALSHI_SIMULATION_HORIZON_SECONDS=900
-KALSHI_SIMULATION_DEFAULT_STEPS=900
+KALSHI_LIVE_TRADING_ENABLED=true
 ```
 
-Notes:
+`KALSHI_ENV=demo` sends orders to Kalshi demo. `KALSHI_ENV=prod` sends real-money
+orders. Every process starts disarmed and arming never survives a restart.
 
-- Relative key paths are resolved from repo root.
-- Only the credential pair for the active `KALSHI_ENV` is used.
-- `KALSHI_EXECUTION_MODE` is the environment gate. UI/API can toggle `observe/paper` dynamically, but `live` is only effective when env mode is also `live`.
+## Operating workflows
 
-### 4) Run the app
+### Fully systematic
 
-- Start with `uv run src/main.py`.
-- Open `http://127.0.0.1:5000`.
-- Startup validates auth and launches background services:
-  - market streamer
-  - synthetic index aggregator
-  - shadow execution loop
+1. Start in paper mode.
+2. Confirm the status strip shows the intended mode, market, fresh data, and no
+   daily-loss lock.
+3. Review **Systematic Policy** and click **Save Settings**.
+4. Leave **New Systematic Entries** enabled.
+5. Arm the process with the displayed confirmation.
+6. Monitor signal intent, model fair value, current position, equity, and daily
+   P&L.
 
-### 5) Operator checklist (what to do on your end)
+The engine evaluates once per second. Risk-reducing exits can act every cycle;
+new buys have a five-second default cooldown so account state can reconcile
+before more risk is added.
 
-1. Start app and confirm no auth failure on boot.
-2. Open dashboard and verify state is updating.
-3. Go to Settings tab and click Save Settings once.
-4. Confirm mode behavior in runtime status:
-   - requested mode is what you selected
-   - effective mode respects env gate for live
-5. In paper mode, wait for a signal/fill cycle and verify:
-   - runtime transitions to `paper_filled` or a clear rejection reason
-   - paper ledger equity/unrealized updates
-6. Optionally reset ledger with Reset Paper Ledger button.
-7. Switch to Simulation tab and click Generate Monte Carlo.
-8. Verify interactive charts render and PNG links open.
-9. Confirm generated artifacts are written under `output/`.
-10. If preparing live execution, set `KALSHI_EXECUTION_MODE=live`, restart app, then set mode to live in Settings.
+### Semi-systematic
 
-### API endpoints
+Leave systematic entries enabled and use **Discretionary IOC** only when you
+want to add or reduce a specific side. Automated position exits remain active.
+The discretionary ticket bypasses the model edge and Kelly decision, but it
+does not bypass arming, the daily-loss guard, cash buffer, order cap, position
+cap, slippage setting, or reduce-only sell checks.
 
-Core:
+### Manual-only
 
-- `GET /` dashboard UI
-- `GET /api/state` deterministic aggregate state
-- `GET /api/market-selection`
-- `POST /api/market-selection`
+1. Set **New Systematic Entries** to **Disabled** and save settings.
+2. Arm the process.
+3. Choose Buy or Sell/Reduce, YES or NO, and contract count in
+   **Discretionary IOC**.
+4. Review the displayed top quote, model fair value, held quantity, and IOC
+   protection.
+5. Submit and enter `SUBMIT PAPER` or `SUBMIT LIVE` exactly.
 
-Logs:
+Manual-only mode still retains the account-wide daily-loss guard. Automated
+signal exits are also still evaluated for existing positions; use **Pause** if
+you want all strategy submissions stopped.
 
-- `GET /api/ws-log`
-- `GET /api/top10-impact`
-- `GET /api/reconciliation-log`
-- `GET /api/brti-ticks`
-- `GET /api/brti-ws-log`
+### Stop and flatten
 
-Shadow execution + settings:
+- **Pause** disarms the engine. In live mode it also cancels this bot's resting
+  orders.
+- **Flatten Active Market** disarms, cancels, and submits a reduce-only IOC for
+  the active position. It requires `FLATTEN`.
+- A daily-loss breach disarms and attempts to flatten the active market. The
+  lock persists until the next New York trading day.
 
-- `GET /api/settings`
-- `POST /api/settings`
-- `GET /api/shadow/runtime`
-- `GET /api/shadow/events`
-- `POST /api/shadow/ledger/reset`
+## How the strategy decides
 
-Simulation:
+The model estimates the probability that Kalshi's final-minute settlement
+average finishes above the contract strike. Before buying, model value must
+clear:
 
-- `POST /api/simulation/generate`
-- `GET /api/simulation/latest`
-- `GET /output/<path:artifact_path>`
+- the current marketable IOC price;
+- the current Kalshi taker fee;
+- configured slippage; and
+- the configured minimum net edge.
 
----
+Sizing is the smallest of several ceilings:
 
-## Project layout (what lives where)
+- time-weighted quarter-Kelly on current account equity;
+- available cash after the cash buffer;
+- max order contracts;
+- max position dollars; and
+- an edge ladder where every additional held contract requires another 0.5¢ of
+  credit.
 
+Entries also require a 30-second data warm-up, a fresh orderbook, non-fallback
+volatility, model probability between 20% and 80%, a known fee policy, and at
+least ten seconds to expiry. Optional orderbook-probability confirmation can
+hard-gate entries.
+
+Existing positions can exit on probability guardrails, profit plus edge decay,
+max-position edge decay, or edge reversal. Entry gates never block these exits.
+
+## Dashboard map
+
+- **Operator strip:** mode, armed state, active market, decision-loop freshness,
+  daily P&L/lock, arm, pause, and flatten.
+- **Systematic Policy:** entry, risk, sizing, slippage, volatility, and
+  orderbook-confirmation settings.
+- **Discretionary IOC:** safe manual buy/reduce ticket for the active market.
+- **Account and Signal:** current intent, fair value, implied probability, edge,
+  cash, equity, and positions.
+- **Market, Model & Orderbook:** live YES/NO depth, synthetic index, settlement
+  proxy, probability model, and microstructure signal.
+- **Diagnostics & Audit:** reconciliation, raw streams, and calculation details;
+  these are intentionally secondary to the operator controls.
+
+## Default controls
+
+- Minimum net edge: 3¢ per contract
+- Max order: 5 contracts
+- Max position: $10 per outcome side
+- Max daily equity loss: $10
+- Cash buffer: $25
+- Entry cooldown: 5 seconds
+- Decision interval: 1 second
+- IOC slippage: 1 exchange tick
+
+Settings are process-local. Trading events are appended to
+`.runtime/execution_events.jsonl`; the paper and live daily-risk states are kept
+separate under `.runtime/`.
+
+## API
+
+- `GET /api/state`
+- `GET|POST /api/settings`
+- `GET /api/trading/runtime`
+- `GET /api/trading/events`
+- `POST /api/trading/control`
+- `POST /api/trading/manual`
+
+## Tests
+
+```bash
+uv run --with pytest pytest -q
 ```
-src/
-├── main.py                     # entrypoint (runs Flask app)
-├── core/
-│   ├── asset_context.py        # active profile context helpers
-│   ├── auth.py                 # Kalshi REST/WS auth + key loading
-│   ├── config.py               # env + runtime defaults
-│   ├── market_metadata.py      # strike extraction helpers
-│   ├── market_profiles.py      # BTC/ETH profile registry
-│   ├── market_selection.py     # persisted active/requested switch state
-│   └── settlement.py           # settlement metadata helpers
-├── data/
-│   ├── kalshi_rest.py          # markets/orderbook REST calls
-│   ├── kalshi_trading.py       # order placement adapter
-│   └── kalshi_ws.py            # authenticated WS subscription stream
-├── engine/
-│   ├── asian_pricer.py         # Asian-style TWAP probability model
-│   ├── book_microstructure.py  # OBI/TFI/MPP -> P(book)
-│   ├── live_pricing.py         # API-facing pricing snapshot wrapper/cache
-│   ├── orderbook.py            # Kalshi YES/NO L2 reconstruction
-│   ├── reconciliation.py       # REST vs WS comparison helpers
-│   ├── settlement_sampling.py  # deterministic 1Hz sample reconstruction
-│   ├── stream_metrics.py       # WS diagnostics logs/counters
-│   ├── streamer.py             # market stream runtime + rotation/re-sync
-│   ├── twap.py                 # settlement-window tracking + req avg
-│   ├── vol_estimator.py        # realized sigma estimation
-│   ├── shadow/
-│   │   ├── runtime.py          # strict mode execution loop (observe/paper/live)
-│   │   ├── signal_engine.py    # EV-primary, fee-aware trade signals
-│   │   ├── fee_model.py        # taker-fee and EV computations
-│   │   ├── fill_model.py       # paper fills crossing live spread + slippage
-│   │   ├── paper_ledger.py     # ephemeral paper PnL/accounting
-│   │   ├── settings_state.py   # dynamic mutable settings state
-│   │   ├── events.py           # event payload builder
-│   │   └── models.py
-│   ├── simulation/
-│   │   ├── gbm_engine.py       # GBM path generation
-│   │   ├── replay.py           # Monte Carlo replay through pricing assumptions
-│   │   ├── visuals.py          # Plotly HTML + PNG exports
-│   │   └── service.py          # simulation orchestrator + payload cache
-│   ├── pricing/
-│   │   └── pipeline.py         # pricing pipeline stages
-│   ├── market_stream/
-│   │   ├── bootstrap.py        # snapshot bootstrap + delta replay
-│   │   ├── discovery.py        # market discovery/selection
-│   │   ├── display.py          # display-oriented market filters
-│   │   └── reconciliation_runner.py
-├── feeds/
-│   ├── brti_aggregator.py      # feed runtime orchestrator
-│   ├── brti_calc.py            # synthetic index math
-│   ├── context.py              # feed runtime context wiring
-│   ├── calc/
-│   │   └── rti_pipeline.py     # profile-aware index calculator wrapper
-│   ├── exchanges/
-│   │   ├── __init__.py
-│   │   ├── base.py             # shared adapter contract/helpers
-│   │   ├── bitstamp.py
-│   │   ├── coinbase.py
-│   │   ├── gemini.py
-│   │   ├── kraken.py
-│   │   ├── paxos.py
-│   │   └── runtime.py          # reconnect/backoff WS runtime
-│   ├── state/
-│   │   ├── book_store.py       # per-exchange L2 state
-│   │   ├── diagnostics_store.py# feed diagnostics logs/counters
-│   │   ├── runtime_state.py    # atomic state reset helpers
-│   │   └── tick_store.py       # index tick snapshots + settlement proxy
-└── ui/
-    ├── contracts.py           # API contract keys/shapes
-    ├── market_metadata.py     # strike inference helpers
-    ├── routes/
-    │   ├── log_routes.py
-    │   ├── selection_routes.py
-    │   ├── settings_routes.py
-    │   ├── simulation_routes.py
-    │   └── state_routes.py
-    ├── services/
-    │   ├── dashboard_state_service.py
-    │   └── runtime_services.py
-    ├── static/dashboard/
-    │   ├── app.js
-    │   ├── asset_selection.js
-    │   ├── charts.js
-    │   ├── format.js
-    │   ├── logs.js
-    │   ├── settings.js
-    │   ├── simulation.js
-    │   └── renderers.js
-    ├── templates/dashboard.html
-    └── web_app.py
-```
-
----
-
-## Code Guidelines
-
-### Structure
-
-- Everything that matters is under the `src` directory
-- We're modularizing everything into subdirectories for a reason, it's more maintainable and organized
-- Separate & simplify components as much as you can, market-making project bloated to like a 1500-line `main.py` it was cooked
-
-### Best Practices
-
-- It's best to leave brief comments under both functions & important code blocks so everyone understands your code and knows what does what (important for debugging)
-- LLMs are a second resort to reading docs. It's obv useful when on a leash but will bloat the codebase into a mess without clear guidance
-- Don't let tech debt accumulate. Read this: https://www.ibm.com/think/topics/technical-debt
-- Try to make small, iterative code changes and review/cleanup every change you make before continuing
-
-### Principles
-
-Follow **DRY** (don't repeat yourself), **SOLID** (most important part is Single Responsibility), **KISS** (Keep It Short and Simple) principles, and the **MVC** pattern
-
----
-
-## Strategy
-
-Kalshi 15m BTC/ETH contracts settle on a final-minute benchmark average (BRTI/ETHUSD_RTI style). This project is building a statistical arbitrage stack around that structure. The core idea:
-
-- **Convergence (Final 60s):** as previous prices get locked into the payout, the outcome becomes more certain
-- **Asian Options Pricing (Mins 1-14):** gives us a probabilistic estimate of where the TWAP will land at expiry given the current price and elapsed average.
-- **Orderbook Pressure (OBP):** tells us what the market believes and helps us filter/confirm model signals before the final minute.
-
----
-
-## Status (May 2026)
-
-### Implemented
-
-- Strict execution-mode runtime (`observe`, `paper`, `live`) with environment-gated live behavior.
-- EV-primary signal engine that emits only when model-vs-market edge remains positive after taker-fee adjustment.
-- No default hard liquidity gate; optional `P(book)` hard gate can be enabled dynamically.
-- Realistic paper fill model that crosses live spread and applies slippage ticks.
-- Ephemeral paper ledger for open positions, average entry, realized/unrealized PnL, equity curve.
-- Dynamic settings API (`POST /api/settings`) and Settings panel in dashboard.
-- Monte Carlo simulation engine (GBM + replay), Plotly interactive charts, and PNG artifact export under `output/`.
-- Simulation tab in dashboard with manual generation and latest-run loading.
-- Initial tests for settings-mode resolution, EV signal thresholding, and replay metrics contract.
-
-### Open work
-
-- Expand unit/integration coverage around runtime event sequencing and ledger settlement edge-cases.
-- Add richer production hardening: process supervision, alerting, and persistence policy for long unattended runs.

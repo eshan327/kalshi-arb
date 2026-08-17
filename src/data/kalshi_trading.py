@@ -2,235 +2,165 @@ from __future__ import annotations
 
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 from threading import Lock
 from typing import Any
+from urllib.parse import urlparse
 
-from core.auth import get_authenticated_client
-from core.config import EXECUTION_MODE, EXECUTION_ORDER_TIME_IN_FORCE
+import requests
 
-_client_lock = Lock()
-_cached_client = None
+from core.auth import get_api_auth_headers
+from core.config import API_BASE_URL, LIVE_TRADING_ENABLED
+
+HTTP_TIMEOUT_SEC = 10.0
+CLIENT_ORDER_PREFIX = "kalshi-algo-"
+
 _api_call_lock = Lock()
+_session = requests.Session()
 
 
-def _client():
-    global _cached_client
-    with _client_lock:
-        if _cached_client is None:
-            _cached_client = get_authenticated_client()
-        return _cached_client
+def _request(
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    method = method.upper()
+    sign_path = f"{urlparse(API_BASE_URL).path.rstrip('/')}{path}"
+    headers = get_api_auth_headers(method, sign_path)
+    if body is not None:
+        headers["Content-Type"] = "application/json"
 
-
-def _to_dict(model_or_dict: Any) -> dict[str, Any]:
-    if model_or_dict is None:
-        return {}
-    if isinstance(model_or_dict, dict):
-        return dict(model_or_dict)
-    if hasattr(model_or_dict, "to_dict"):
-        return dict(model_or_dict.to_dict())
-    return {}
-
-
-def _normalize_order(order: Any) -> dict[str, Any]:
-    payload = _to_dict(order)
-    if payload.get("order_id") is None and payload.get("id") is not None:
-        payload["order_id"] = payload.get("id")
-    return payload
-
-
-def _normalize_fill(fill: Any) -> dict[str, Any]:
-    return _to_dict(fill)
-
-
-def _build_client_order_id(prefix: str = "arb") -> str:
-    return f"{prefix}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:10]}"
-
-
-def _ensure_live_mode() -> None:
-    if EXECUTION_MODE != "live":
-        raise RuntimeError(
-            "Kalshi trading adapter is disabled unless KALSHI_EXECUTION_MODE=live."
+    with _api_call_lock:
+        response = _session.request(
+            method,
+            f"{API_BASE_URL}{path}",
+            params=params,
+            json=body,
+            headers=headers,
+            timeout=HTTP_TIMEOUT_SEC,
         )
+
+    if not response.ok:
+        try:
+            detail = response.json().get("error") or response.json()
+        except ValueError:
+            detail = response.text[:500]
+        raise RuntimeError(f"Kalshi API {response.status_code}: {detail}")
+    return response.json() if response.content else {}
+
+
+def _client_order_id() -> str:
+    return f"{CLIENT_ORDER_PREFIX}{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
 
 
 def place_limit_order(
     *,
     market_ticker: str,
     side: str,
-    action: str = "buy",
-    count: int,
-    price_cents: int,
-    post_only: bool,
-    time_in_force: str | None = None,
+    action: str,
+    count: int | float | Decimal,
+    price_cents: int | float | Decimal,
     client_order_id: str | None = None,
-    expiration_ts: int | None = None,
 ) -> dict[str, Any]:
-    _ensure_live_mode()
-    c = _client()
+    """Place a V2 IOC order using outcome-side semantics at the strategy boundary."""
+    if not LIVE_TRADING_ENABLED:
+        raise RuntimeError("Live order entry requires KALSHI_LIVE_TRADING_ENABLED=true.")
 
-    side_norm = str(side).strip().lower()
-    if side_norm not in {"yes", "no"}:
-        raise ValueError(f"Invalid side '{side}'.")
+    side = side.strip().lower()
+    action = action.strip().lower()
+    if side not in {"yes", "no"} or action not in {"buy", "sell"}:
+        raise ValueError("side must be yes/no and action must be buy/sell")
+    try:
+        quantity = Decimal(str(count)).quantize(Decimal("0.01"))
+    except InvalidOperation as exc:
+        raise ValueError("count must be numeric") from exc
+    if quantity <= 0:
+        raise ValueError("count must be positive")
+    try:
+        outcome_price = Decimal(str(price_cents)).quantize(Decimal("0.01"))
+    except InvalidOperation as exc:
+        raise ValueError("price_cents must be numeric") from exc
+    if not Decimal("0") < outcome_price < Decimal("100"):
+        raise ValueError("price_cents must be between 0 and 100")
 
-    action_norm = str(action).strip().lower()
-    if action_norm not in {"buy", "sell"}:
-        raise ValueError(f"Invalid action '{action}'.")
-
-    px = max(1, min(99, int(price_cents)))
-    comp = 100 - px
-    order_id = client_order_id or _build_client_order_id(prefix="live")
-
-    req: dict[str, Any] = {
-        "ticker": str(market_ticker),
-        "client_order_id": order_id,
-        "side": side_norm,
-        "action": action_norm,
-        "count": max(1, int(count)),
-        "type": "limit",
-        "time_in_force": time_in_force or EXECUTION_ORDER_TIME_IN_FORCE,
-        "post_only": bool(post_only),
-        "cancel_order_on_pause": True,
-    }
-
-    if side_norm == "yes":
-        req["yes_price"] = px
-        req["no_price"] = comp
-    else:
-        req["no_price"] = px
-        req["yes_price"] = comp
-
-    if isinstance(expiration_ts, int) and expiration_ts > 0:
-        req["expiration_ts"] = expiration_ts
-
-    with _api_call_lock:
-        response = c.create_order(**req)
-    response_payload = _to_dict(response)
-    order_payload = _normalize_order(response_payload.get("order"))
-
-    return {
-        "ok": bool(order_payload),
-        "order": order_payload,
-        "raw": response_payload,
-        "client_order_id": order_id,
-    }
-
-
-def cancel_order(order_id: str) -> dict[str, Any]:
-    _ensure_live_mode()
-    c = _client()
-    with _api_call_lock:
-        response = c.cancel_order(order_id=str(order_id))
-    payload = _to_dict(response)
+    # V2 quotes the YES book only: bid=buy YES/sell NO, ask=sell YES/buy NO.
+    book_side = "bid" if (side == "yes") == (action == "buy") else "ask"
+    yes_price_cents = (
+        outcome_price if side == "yes" else Decimal("100") - outcome_price
+    )
+    order_id = client_order_id or _client_order_id()
+    payload = _request(
+        "POST",
+        "/portfolio/events/orders",
+        body={
+            "ticker": market_ticker,
+            "client_order_id": order_id,
+            "side": book_side,
+            "count": f"{quantity:.2f}",
+            "price": f"{yes_price_cents / Decimal('100'):.4f}",
+            "time_in_force": "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross",
+            "post_only": False,
+            "cancel_order_on_pause": True,
+            "reduce_only": action == "sell",
+        },
+    )
     return {
         "ok": True,
-        "order": _normalize_order(payload.get("order")),
-        "reduced_by": payload.get("reduced_by"),
-        "raw": payload,
+        "client_order_id": order_id,
+        "order": payload.get("order", payload),
     }
-
-
-def get_open_orders(*, market_ticker: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
-    _ensure_live_mode()
-    c = _client()
-    cursor: str | None = None
-    remaining = max(1, min(200, int(limit)))
-    out: list[dict[str, Any]] = []
-
-    while remaining > 0:
-        with _api_call_lock:
-            page = c.get_orders(
-                ticker=market_ticker,
-                status="resting",
-                limit=min(200, remaining),
-                cursor=cursor,
-            )
-        payload = _to_dict(page)
-        orders = payload.get("orders")
-        if isinstance(orders, list):
-            for item in orders:
-                out.append(_normalize_order(item))
-
-        cursor = payload.get("cursor") if isinstance(payload.get("cursor"), str) else None
-        if not cursor or not orders:
-            break
-        remaining = max(0, int(limit) - len(out))
-
-    return out
-
-
-def get_positions(*, market_ticker: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
-    _ensure_live_mode()
-    c = _client()
-    cursor: str | None = None
-    remaining = max(1, min(1000, int(limit)))
-    out: list[dict[str, Any]] = []
-
-    while remaining > 0:
-        with _api_call_lock:
-            page = c.get_positions(
-                cursor=cursor,
-                limit=min(1000, remaining),
-                count_filter="position,total_traded",
-                ticker=market_ticker,
-            )
-        payload = _to_dict(page)
-        positions = payload.get("market_positions")
-        if isinstance(positions, list):
-            for item in positions:
-                if isinstance(item, dict):
-                    out.append(dict(item))
-                elif hasattr(item, "to_dict"):
-                    out.append(dict(item.to_dict()))
-
-        cursor = payload.get("cursor") if isinstance(payload.get("cursor"), str) else None
-        if not cursor or not positions:
-            break
-        remaining = max(0, int(limit) - len(out))
-
-    return out
-
-
-def get_recent_fills(
-    *,
-    market_ticker: str | None = None,
-    min_ts: int | None = None,
-    limit: int = 200,
-) -> list[dict[str, Any]]:
-    _ensure_live_mode()
-    c = _client()
-    cursor: str | None = None
-    remaining = max(1, min(200, int(limit)))
-    out: list[dict[str, Any]] = []
-
-    while remaining > 0:
-        with _api_call_lock:
-            page = c.get_fills(
-                ticker=market_ticker,
-                min_ts=min_ts,
-                limit=min(200, remaining),
-                cursor=cursor,
-            )
-        payload = _to_dict(page)
-        fills = payload.get("fills")
-        if isinstance(fills, list):
-            for item in fills:
-                out.append(_normalize_fill(item))
-
-        cursor = payload.get("cursor") if isinstance(payload.get("cursor"), str) else None
-        if not cursor or not fills:
-            break
-        remaining = max(0, int(limit) - len(out))
-
-    return out
 
 
 def get_balance_summary() -> dict[str, int]:
-    _ensure_live_mode()
-    c = _client()
-    with _api_call_lock:
-        payload = _to_dict(c.get_balance())
+    payload = _request("GET", "/portfolio/balance")
     return {
-        "balance": int(payload.get("balance", 0) or 0),
-        "portfolio_value": int(payload.get("portfolio_value", 0) or 0),
-        "updated_ts": int(payload.get("updated_ts", 0) or 0),
+        "balance": int(payload.get("balance") or 0),
+        "portfolio_value": int(payload.get("portfolio_value") or 0),
+        "updated_ts": int(payload.get("updated_ts") or 0),
     }
+
+
+def get_positions(*, market_ticker: str | None = None) -> list[dict[str, Any]]:
+    payload = _request(
+        "GET",
+        "/portfolio/positions",
+        params={
+            "limit": 100,
+            "count_filter": "position",
+            **({"ticker": market_ticker} if market_ticker else {}),
+        },
+    )
+    positions = payload.get("market_positions")
+    return [dict(item) for item in positions] if isinstance(positions, list) else []
+
+
+def get_open_orders(*, market_ticker: str | None = None) -> list[dict[str, Any]]:
+    payload = _request(
+        "GET",
+        "/portfolio/orders",
+        params={
+            "status": "resting",
+            "limit": 100,
+            **({"ticker": market_ticker} if market_ticker else {}),
+        },
+    )
+    orders = payload.get("orders")
+    return [dict(item) for item in orders] if isinstance(orders, list) else []
+
+
+def cancel_order(order_id: str) -> dict[str, Any]:
+    return _request("DELETE", f"/portfolio/events/orders/{order_id}")
+
+
+def cancel_bot_orders(*, market_ticker: str | None = None) -> int:
+    canceled = 0
+    for order in get_open_orders(market_ticker=market_ticker):
+        client_id = str(order.get("client_order_id") or "")
+        order_id = str(order.get("order_id") or "")
+        if client_id.startswith(CLIENT_ORDER_PREFIX) and order_id:
+            cancel_order(order_id)
+            canceled += 1
+    return canceled

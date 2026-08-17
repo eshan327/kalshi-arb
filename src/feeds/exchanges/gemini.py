@@ -30,7 +30,9 @@ class GeminiAdapter(ExchangeAdapter):
                 continue
 
             side = "bids" if side_raw == "bid" else "asks"
-            if apply_book_update(EXCHANGE, side, event.get("price"), event.get("remaining")):
+            if apply_book_update(
+                EXCHANGE, side, event.get("price"), event.get("remaining")
+            ):
                 parsed = True
 
         return parsed

@@ -107,4 +107,6 @@ def realized_vol_from_price_points(
         span = max(max_ts - min_ts, 1e-3)
         samples_per_second = max((len(prices) - 1) / span, 1e-3)
 
-    return realized_vol_log_returns(prices, samples_per_second=samples_per_second, annualize=True)
+    return realized_vol_log_returns(
+        prices, samples_per_second=samples_per_second, annualize=True
+    )

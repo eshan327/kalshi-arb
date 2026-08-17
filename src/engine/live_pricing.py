@@ -63,7 +63,11 @@ def compute_live_pricing_snapshot(
     brti_state = get_brti_state()
     spot = brti_state.get("brti")
     feed_asset_raw = brti_state.get("asset")
-    feed_asset = feed_asset_raw.upper().strip() if isinstance(feed_asset_raw, str) else profile.asset
+    feed_asset = (
+        feed_asset_raw.upper().strip()
+        if isinstance(feed_asset_raw, str)
+        else profile.asset
+    )
 
     now_ts = time.time()
     second_bucket = int(now_ts)

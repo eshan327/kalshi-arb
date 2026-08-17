@@ -54,7 +54,9 @@ def mark_book_update_applied(count: int = 1) -> None:
         _exchange_ws_stats["book_updates_applied"] += max(1, int(count))
 
 
-def record_exchange_ws_message(exchange: str, raw_data: dict[str, Any], status: str) -> None:
+def record_exchange_ws_message(
+    exchange: str, raw_data: dict[str, Any], status: str
+) -> None:
     with _log_lock:
         suffix = "received" if status == "received" else "parsed"
         total_key = "total_received" if suffix == "received" else "total_parsed"
@@ -69,9 +71,15 @@ def record_exchange_ws_message(exchange: str, raw_data: dict[str, Any], status: 
                 "ts": time.time(),
                 "exchange": exchange,
                 "status": status,
-                "raw_type": raw_data.get("type") if isinstance(raw_data, dict) else None,
-                "raw_channel": raw_data.get("channel") if isinstance(raw_data, dict) else None,
-                "raw_event": raw_data.get("event") if isinstance(raw_data, dict) else None,
+                "raw_type": raw_data.get("type")
+                if isinstance(raw_data, dict)
+                else None,
+                "raw_channel": raw_data.get("channel")
+                if isinstance(raw_data, dict)
+                else None,
+                "raw_event": raw_data.get("event")
+                if isinstance(raw_data, dict)
+                else None,
             }
         )
 

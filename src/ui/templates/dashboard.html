@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kalshi Arb Dashboard</title>
+  <title>Kalshi 15m Crypto Trader</title>
   <style>
     :root {
       --bg: #0c1118;
@@ -43,27 +43,6 @@
       grid-template-columns: repeat(2, minmax(220px, 1fr));
       gap: 8px;
       margin-bottom: 12px;
-    }
-    .asset-selector-row {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      margin-bottom: 10px;
-      flex-wrap: wrap;
-    }
-    .asset-select {
-      background: #0f1724;
-      color: var(--text);
-      border: 1px solid #31435e;
-      border-radius: 8px;
-      padding: 4px 8px;
-      font-family: var(--mono);
-      font-size: 12px;
-    }
-    .asset-status {
-      font-family: var(--mono);
-      font-size: 12px;
-      color: var(--muted);
     }
     .summary-box {
       border: 1px solid #31435e;
@@ -171,29 +150,36 @@
     .span-2 {
       grid-column: 1 / -1;
     }
-    .tab-row {
+    #tradingCard { order: -1; }
+    .operator-bar {
       display: flex;
+      justify-content: space-between;
+      align-items: center;
       gap: 10px;
-      margin-bottom: 12px;
-      border-bottom: 1px solid #2a3a52;
-      padding-bottom: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+      border: 1px solid #31435e;
+      border-radius: 10px;
+      background: #0d1520;
+    }
+    .status-pills,
+    .operator-actions {
+      display: flex;
+      gap: 7px;
+      align-items: center;
       flex-wrap: wrap;
     }
-    .tab-btn {
-      background: #0f1724;
+    .status-pill {
+      border: 1px solid #40516a;
+      border-radius: 999px;
+      padding: 4px 9px;
       color: var(--muted);
-      border: 1px solid #31435e;
-      border-radius: 9px;
-      padding: 6px 10px;
-      font-family: var(--mono);
-      font-size: 12px;
-      cursor: pointer;
+      background: #111a27;
+      font: 11px var(--mono);
     }
-    .tab-btn.active {
-      color: var(--text);
-      border-color: #4d93c7;
-      box-shadow: 0 0 0 1px rgba(77, 147, 199, 0.2) inset;
-    }
+    .status-pill.ok-state { color: #8bf0be; border-color: #2f815e; }
+    .status-pill.warn-state { color: var(--warn); border-color: #8e713a; }
+    .status-pill.danger-state { color: #ffb2bd; border-color: #a74c5c; }
     .control-grid {
       display: grid;
       gap: 10px;
@@ -239,25 +225,21 @@
       border-color: #4f95c8;
       color: #e6f4ff;
     }
+    .btn.danger {
+      background: #3b1b22;
+      border-color: #a74c5c;
+      color: #ffd8df;
+    }
+    .btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
     .panel-note {
       font-family: var(--mono);
       font-size: 11px;
       color: var(--muted);
       margin-top: 6px;
       white-space: pre-wrap;
-    }
-    .sim-visual {
-      border: 1px solid #2a3a52;
-      border-radius: 10px;
-      padding: 8px;
-      background: #0d1520;
-      margin-bottom: 12px;
-    }
-    .sim-assets {
-      font-family: var(--mono);
-      font-size: 12px;
-      color: var(--muted);
-      line-height: 1.6;
     }
     .settings-live-grid {
       display: grid;
@@ -275,6 +257,38 @@
       margin-bottom: 8px;
       font-size: 14px;
       color: #c8d9ef;
+    }
+    .section-title {
+      margin: 2px 0 8px;
+      color: #c8d9ef;
+      font-size: 14px;
+    }
+    .trade-ticket {
+      margin-top: 14px;
+      padding: 10px;
+      border: 1px solid #40516a;
+      border-radius: 10px;
+      background: #101926;
+    }
+    .policy-details {
+      margin: 0 0 12px;
+      padding: 9px 10px;
+      border: 1px solid #2a3a52;
+      border-radius: 10px;
+      background: #101926;
+    }
+    .policy-details > summary {
+      margin: 0;
+      color: #c8d9ef;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .policy-details[open] > summary { margin-bottom: 10px; }
+    .manual-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(120px, 1fr));
+      gap: 8px;
+      margin: 8px 0;
     }
     .signal-ticker {
       font-family: var(--mono);
@@ -330,12 +344,6 @@
     .ledger-table th:first-child,
     .ledger-table td:first-child {
       text-align: left;
-    }
-    .pos-up {
-      color: #77e5a2;
-    }
-    .pos-down {
-      color: #f59f9f;
     }
     .phase3-bottom h3 {
       color: #b8d4f0;
@@ -409,21 +417,15 @@
       .summary-grid { grid-template-columns: 1fr; }
       .control-grid { grid-template-columns: 1fr; }
       .settings-live-grid { grid-template-columns: 1fr; }
+      .operator-bar { align-items: stretch; flex-direction: column; }
+      .manual-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
     <section class="card">
-      <h2>Kalshi Reconstructed Orderbook</h2>
-      <div class="asset-selector-row">
-        <label class="mono" for="assetSelector">15m Market Asset</label>
-        <select id="assetSelector" class="asset-select">
-          <option value="BTC">Bitcoin</option>
-          <option value="ETH">Ethereum</option>
-        </select>
-        <span id="assetSelectorStatus" class="asset-status">Loading market selection...</span>
-      </div>
+      <h2>Market, Model &amp; Orderbook</h2>
       <div class="summary-grid" id="summary"></div>
 
       <div class="grid2">
@@ -495,7 +497,7 @@
     </section>
 
     <section class="card">
-      <h2>Verification Streams</h2>
+      <h2>Diagnostics &amp; Audit</h2>
       <div class="badge">Kalshi messages tracked end-to-end</div>
       <div class="badge">Index exchange messages tracked end-to-end</div>
 
@@ -533,142 +535,157 @@
       </details>
     </section>
 
-    <section class="card span-2" id="settingsSimulationCard">
-      <h2>Execution Settings and Monte Carlo Simulation</h2>
-      <div class="tab-row">
-        <button class="tab-btn active" id="settingsTabBtn" type="button">Settings</button>
-        <button class="tab-btn" id="simulationTabBtn" type="button">Simulation</button>
+    <section class="card span-2" id="tradingCard">
+      <h2 id="tradingHeading">Algorithmic Trading</h2>
+      <div class="operator-bar">
+        <div class="status-pills" role="status" aria-live="polite">
+          <span class="status-pill" id="modeStatus">Mode —</span>
+          <span class="status-pill" id="armedStatus">Disarmed</span>
+          <span class="status-pill" id="marketStatus">Market —</span>
+          <span class="status-pill" id="dataStatus">Data —</span>
+          <span class="status-pill" id="riskStatus">Risk —</span>
+        </div>
+        <div class="operator-actions">
+          <button class="btn primary" id="tradingArmBtn" type="button">Arm</button>
+          <button class="btn" id="tradingPauseBtn" type="button">Pause</button>
+          <button class="btn danger" id="tradingFlattenBtn" type="button">Flatten Active Market</button>
+        </div>
       </div>
-
-      <div id="settingsPanel">
-        <div class="settings-live-grid">
-          <div>
-            <div class="control-grid">
-              <label class="control">Execution Mode
-                <select id="settingExecutionMode">
-                  <option value="observe">OBSERVE</option>
-                  <option value="paper">PAPER</option>
-                  <option value="live">LIVE</option>
-                </select>
-              </label>
-              <label class="control">Min Edge (cents)
-                <input id="settingMinEdge" type="number" step="0.1" min="0" />
-              </label>
-              <label class="control">Slippage (ticks)
-                <input id="settingSlippage" type="number" step="1" min="0" max="10" />
-              </label>
-              <label class="control">Trade Size (% bankroll)
-                <input id="settingTradePct" type="number" step="0.01" min="0.001" max="1" />
-              </label>
-              <label class="control">Max Position (USD)
-                <input id="settingMaxPosition" type="number" step="1" min="1" />
-              </label>
-              <label class="control">Volatility Override (annual, optional)
-                <input id="settingVolOverride" type="number" step="0.01" min="0.01" placeholder="blank = auto" />
-              </label>
-              <label class="control">Levy Responsiveness
-                <input id="settingLevyResponsiveness" type="number" step="0.05" min="0.1" max="3" />
-              </label>
-              <label class="control">Hard Gate On P(book)
-                <select id="settingPbookGate">
-                  <option value="false">Disabled</option>
-                  <option value="true">Enabled</option>
-                </select>
-              </label>
-            </div>
-
-            <div class="button-row">
-              <button class="btn primary" id="settingsSaveBtn" type="button">Save Settings</button>
-              <button class="btn" id="settingsResetBtn" type="button">Reset Defaults</button>
-              <button class="btn" id="ledgerResetBtn" type="button">Reset Paper Ledger</button>
-            </div>
-
-            <div class="panel-note" id="settingsStatus">Settings not loaded yet.</div>
-            <div class="panel-note" id="runtimeStatus">Runtime state unavailable.</div>
+      <div class="panel-note" id="runtimeStatus" aria-live="polite">Runtime state unavailable.</div>
+      <div class="settings-live-grid">
+        <div>
+          <details class="policy-details">
+          <summary>Systematic Policy &amp; Risk Limits</summary>
+          <div class="control-grid">
+            <label class="control">New Systematic Entries
+              <select id="settingEntriesEnabled">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </label>
+            <label class="control">Minimum Net Edge (cents)
+              <input id="settingMinEdge" type="number" step="0.5" min="0.5" max="25" />
+            </label>
+            <label class="control">Max Order (contracts)
+              <input id="settingMaxOrderContracts" type="number" step="1" min="1" max="25" />
+            </label>
+            <label class="control">Max Position (USD)
+              <input id="settingMaxPosition" type="number" step="1" min="1" max="50" />
+            </label>
+            <label class="control">Max Daily Loss (USD)
+              <input id="settingMaxDailyLoss" type="number" step="1" min="1" max="100" />
+            </label>
+            <label class="control">Cash Buffer (USD)
+              <input id="settingCashBuffer" type="number" step="1" min="0" />
+            </label>
+            <label class="control">Entry Cooldown (seconds)
+              <input id="settingCooldown" type="number" step="1" min="1" max="900" />
+            </label>
+            <label class="control">IOC Slippage (ticks)
+              <input id="settingSlippage" type="number" step="1" min="0" max="5" />
+            </label>
+            <label class="control">Volatility Override (annual, optional)
+              <input id="settingVolOverride" type="number" step="0.01" min="0.01" max="5" placeholder="blank = realized vol" />
+            </label>
+            <label class="control">Volatility Scale
+              <input id="settingVolatilityScale" type="number" step="0.05" min="0.5" max="2" />
+            </label>
+            <label class="control">Orderbook Probability Gate
+              <select id="settingPbookGate">
+                <option value="false">Disabled</option>
+                <option value="true">Enabled</option>
+              </select>
+            </label>
+            <label class="control">Max Model/Book Divergence
+              <input id="settingPbookDivergence" type="number" step="0.01" min="0.01" max="0.49" />
+            </label>
           </div>
 
-          <aside class="brain-panel">
-            <h3>Live Paper Ledger and Signal</h3>
-            <div class="signal-ticker" id="signalIntentTicker">Signal engine warming up...</div>
+          <div class="button-row">
+            <button class="btn primary" id="settingsSaveBtn" type="button">Save Settings</button>
+            <button class="btn" id="settingsResetBtn" type="button">Reset Defaults</button>
+          </div>
 
-            <div class="brain-metrics">
-              <div class="brain-metric-box">
-                Model Fair Value
-                <span class="brain-metric-value" id="signalFairValue">--</span>
-              </div>
-              <div class="brain-metric-box">
-                Market Implied
-                <span class="brain-metric-value" id="signalImpliedProb">--</span>
-              </div>
-              <div class="brain-metric-box">
-                Lean Side
-                <span class="brain-metric-value" id="signalLeanSide">--</span>
-              </div>
-              <div class="brain-metric-box">
-                Best Edge
-                <span class="brain-metric-value" id="signalBestEdge">--</span>
-              </div>
+          <div class="panel-note" id="settingsStatus" aria-live="polite">Settings not loaded yet.</div>
+          </details>
+
+          <section class="trade-ticket" aria-labelledby="manualTicketHeading">
+            <h3 class="section-title" id="manualTicketHeading">Discretionary IOC</h3>
+            <p class="panel-note">Uses the active market, live top of book, configured slippage, order cap, position cap, cash buffer, and daily-loss guard. Disable systematic entries first for manual-only operation.</p>
+            <div class="manual-grid">
+              <label class="control">Action
+                <select id="manualAction">
+                  <option value="buy">Buy</option>
+                  <option value="sell">Sell / Reduce</option>
+                </select>
+              </label>
+              <label class="control">Outcome
+                <select id="manualSide">
+                  <option value="yes">YES</option>
+                  <option value="no">NO</option>
+                </select>
+              </label>
+              <label class="control">Contracts
+                <input id="manualCount" type="number" inputmode="numeric" step="1" min="1" value="1" />
+              </label>
             </div>
-
-            <div class="ledger-summary" id="liveLedgerSummary">Ledger not loaded yet.</div>
-            <table class="ledger-table" id="liveLedgerTable">
-              <thead>
-                <tr>
-                  <th>Market</th>
-                  <th>Side</th>
-                  <th>Qty</th>
-                  <th>Avg</th>
-                  <th>Mark</th>
-                  <th>uPnL</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr><td colspan="6">No positions.</td></tr>
-              </tbody>
-            </table>
-          </aside>
-        </div>
-      </div>
-
-      <div id="simulationPanel" style="display:none;">
-        <div class="control-grid">
-          <label class="control">Path Count
-            <input id="simPaths" type="number" step="100" min="100" value="5000" />
-          </label>
-          <label class="control">Horizon (seconds)
-            <input id="simHorizon" type="number" step="30" min="60" value="900" />
-          </label>
-          <label class="control">Step Count
-            <input id="simSteps" type="number" step="30" min="60" value="900" />
-          </label>
-          <label class="control">Annual Drift
-            <input id="simDrift" type="number" step="0.01" value="0.00" />
-          </label>
+            <div class="signal-ticker" id="manualQuoteSummary">Waiting for a live quote...</div>
+            <div class="button-row">
+              <button class="btn primary" id="manualSubmitBtn" type="button" disabled>Submit IOC</button>
+            </div>
+            <div class="panel-note" id="manualStatus" aria-live="polite">Arm trading to enable discretionary orders.</div>
+          </section>
         </div>
 
-        <div class="button-row">
-          <button class="btn primary" id="simulationGenerateBtn" type="button">Generate Monte Carlo</button>
-          <button class="btn" id="simulationRefreshBtn" type="button">Load Latest</button>
-        </div>
+        <aside class="brain-panel">
+          <h3 id="accountHeading">Account and Signal</h3>
+          <div class="signal-ticker" id="signalIntentTicker">Signal engine warming up...</div>
 
-        <div class="panel-note" id="simulationStatus">No simulation generated yet.</div>
-        <div class="sim-visual" id="simulationMetrics"></div>
-        <div class="sim-visual" id="simulationEquityDiv"></div>
-        <div class="sim-visual" id="simulationEdgeDiv"></div>
-        <div class="sim-visual" id="simulationTearsheetDiv"></div>
-        <div class="sim-assets" id="simulationAssets"></div>
+          <div class="brain-metrics">
+            <div class="brain-metric-box">
+              Model Fair Value
+              <span class="brain-metric-value" id="signalFairValue">--</span>
+            </div>
+            <div class="brain-metric-box">
+              Market Implied
+              <span class="brain-metric-value" id="signalImpliedProb">--</span>
+            </div>
+            <div class="brain-metric-box">
+              Lean Side
+              <span class="brain-metric-value" id="signalLeanSide">--</span>
+            </div>
+            <div class="brain-metric-box">
+              Net Edge
+              <span class="brain-metric-value" id="signalBestEdge">--</span>
+            </div>
+          </div>
+
+          <div class="ledger-summary" id="liveAccountSummary">Account not loaded yet.</div>
+          <table class="ledger-table" id="livePositionTable">
+            <thead>
+              <tr>
+                <th>Market</th>
+                <th>Side</th>
+                <th>Qty</th>
+                <th>Avg</th>
+                <th>Exposure</th>
+                <th>Realized</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="6">No positions.</td></tr>
+            </tbody>
+          </table>
+        </aside>
       </div>
     </section>
   </div>
 
-  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <script src="{{ url_for('static', filename='dashboard/format.js') }}" defer></script>
-  <script src="{{ url_for('static', filename='dashboard/asset_selection.js') }}" defer></script>
   <script src="{{ url_for('static', filename='dashboard/charts.js') }}" defer></script>
   <script src="{{ url_for('static', filename='dashboard/renderers.js') }}" defer></script>
   <script src="{{ url_for('static', filename='dashboard/logs.js') }}" defer></script>
   <script src="{{ url_for('static', filename='dashboard/settings.js') }}" defer></script>
-  <script src="{{ url_for('static', filename='dashboard/simulation.js') }}" defer></script>
   <script src="{{ url_for('static', filename='dashboard/app.js') }}" defer></script>
 </body>
 </html>
