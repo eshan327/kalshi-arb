@@ -1,5 +1,6 @@
 import pytest
 
+from engine.market_stream.bootstrap import levels_from_rest_snapshot
 from engine.orderbook import OrderBook
 from engine.trading.fees import expected_value_cents, taker_fee_cents_per_contract
 from engine.trading.paper import PaperAccount
@@ -9,6 +10,21 @@ from engine.trading.strategy import (
     build_trade_signal,
     slipped_price_cents,
 )
+
+
+def test_rest_snapshot_levels_are_normalized_to_cents() -> None:
+    book = OrderBook("TEST")
+
+    assert levels_from_rest_snapshot(
+        book,
+        {
+            "yes_dollars_fp": [[0.59, 10]],
+            "no_dollars_fp": [[0.40, 2]],
+        },
+    ) == ([(59.0, 10.0)], [(40.0, 2.0)])
+    assert levels_from_rest_snapshot(
+        book, {"yes": [[59, 10]], "no": [[40, 2]]}
+    ) == ([(59.0, 10.0)], [(40.0, 2.0)])
 
 
 def test_each_additional_contract_demands_more_credit() -> None:
@@ -104,7 +120,7 @@ def test_fee_aware_signal_is_small_and_actionable() -> None:
     assert signal.edge_cents >= settings.min_edge_cents
 
 
-def test_trading_styles_control_strategy_orders() -> None:
+def test_systematic_strategy_manages_open_positions() -> None:
     book = OrderBook("TEST")
     book.load_rest_snapshot(
         {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
@@ -124,16 +140,9 @@ def test_trading_styles_control_strategy_orders() -> None:
         "runtime_uptime_seconds": 60,
     }
 
-    signal, reason, _ = build_trade_signal(
-        **inputs, settings=TradingSettings(trading_style="semi")
-    )
+    signal, reason, _ = build_trade_signal(**inputs, settings=TradingSettings())
     assert signal is not None and signal.action == "sell"
     assert reason == "edge_reversal_exit_yes"
-
-    signal, reason, _ = build_trade_signal(
-        **inputs, settings=TradingSettings(trading_style="click")
-    )
-    assert signal is None and reason == "click_trading"
 
 
 def test_fee_rounding_matches_order_level_formula() -> None:

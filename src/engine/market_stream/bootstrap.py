@@ -6,11 +6,6 @@ import time
 
 from engine.book_microstructure import on_live_orderbook_update
 from engine.orderbook import OrderBook
-from engine.stream_metrics import (
-    _record_top10_impact,
-    _record_ws_event,
-    _top10_signature,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -46,16 +41,8 @@ def levels_from_rest_snapshot(
         if qty > 0 and px is not None:
             no_dict[px] = qty
 
-    yes_bids = sorted(
-        [(book._to_cents(p), q) for p, q in yes_dict.items()],
-        key=lambda x: x[0],
-        reverse=True,
-    )
-    no_bids = sorted(
-        [(book._to_cents(p), q) for p, q in no_dict.items()],
-        key=lambda x: x[0],
-        reverse=True,
-    )
+    yes_bids = sorted(yes_dict.items(), reverse=True)
+    no_bids = sorted(no_dict.items(), reverse=True)
     return yes_bids, no_bids
 
 
@@ -64,23 +51,12 @@ def replay_buffered_deltas(
 ) -> int:
     applied = 0
     for buffered_seq, buffered_msg in sorted(buffered_deltas, key=lambda item: item[0]):
-        before = _top10_signature(book)
         if book.apply_delta_with_seq(buffered_seq, buffered_msg):
             applied += 1
-            after = _top10_signature(book)
-            _record_top10_impact(buffered_seq, buffered_msg, before != after)
             on_live_orderbook_update(book)
-            _record_ws_event(
-                "orderbook_delta", buffered_seq, buffered_msg, "applied_from_buffer"
-            )
         elif buffered_seq < (book.expected_seq or 0):
-            _record_ws_event(
-                "orderbook_delta", buffered_seq, buffered_msg, "stale_buffer_ignored"
-            )
+            continue
         else:
-            _record_ws_event(
-                "orderbook_delta", buffered_seq, buffered_msg, "buffer_replay_gap"
-            )
             break
     return applied
 
@@ -105,7 +81,6 @@ def try_bootstrap_from_rest(
     rest_seq = book.load_rest_snapshot(rest_snapshot)
     seq_anchor = rest_seq if isinstance(rest_seq, int) else ws_snapshot_seq
     book.set_expected_seq(seq_anchor + 1)
-    _record_ws_event("bootstrap", seq_anchor, {}, "rest_snapshot_loaded")
 
     applied = replay_buffered_deltas(book, buffered_deltas)
     recalibration_ts = time.monotonic()

@@ -21,14 +21,12 @@ if KALSHI_ENV == "prod":
 else:
     WS_BASE_URL = os.getenv("KALSHI_WS_BASE_URL", _DEFAULT_DEMO_WS)
 
-# Flask app defaults
+# Reflex app defaults
 WEB_HOST = "127.0.0.1"
-WEB_PORT = 5000
+WEB_PORT = 3000
 
 # Dashboard/view defaults
 ORDERBOOK_VIEW_DEPTH = 10
-WS_LOG_MAXLEN = 5000
-WS_LOG_DEFAULT_LIMIT = 200
 
 # Data/compute cadence defaults
 BRTI_RECALC_INTERVAL_SEC = 1.0

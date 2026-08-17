@@ -351,9 +351,6 @@ def build_trade_signal(
         )
         return signal, signal.reason, diagnostics
 
-    if settings.trading_style == "click":
-        return None, "click_trading", diagnostics
-
     fee_policy_ready = fee_multiplier is not None and fee_type in {
         "quadratic",
         "quadratic_with_maker_fees",
@@ -420,9 +417,6 @@ def build_trade_signal(
                 reason=f"edge_reversal_exit_{name}",
                 trigger=f"{name}_bid_above_fair",
             )
-
-    if settings.trading_style == "semi":
-        return None, "manual_entries", diagnostics
 
     if diagnostics.get("technical_warmup_remaining_seconds") is not None:
         return None, "technical_warmup", diagnostics

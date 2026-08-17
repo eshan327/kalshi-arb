@@ -5,7 +5,6 @@ import random
 from collections.abc import Callable
 import websockets
 from feeds.state.book_store import init_exchange_book
-from feeds.state.diagnostics_store import record_exchange_ws_message
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +51,7 @@ async def run_exchange_stream(
 
                 async for message in ws:
                     data = json.loads(message)
-                    record_exchange_ws_message(exchange, data, "received")
-
-                    if handle_message(data):
-                        record_exchange_ws_message(exchange, data, "parsed")
+                    handle_message(data)
 
         except (
             websockets.ConnectionClosed,

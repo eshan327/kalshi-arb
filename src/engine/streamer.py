@@ -31,12 +31,6 @@ from engine.market_stream.discovery import (
 from engine.market_stream.display import top_levels_for_display
 from engine.market_stream.reconciliation_runner import run_recalibration
 from engine.orderbook import OrderBook
-from engine.stream_metrics import (
-    _count_incoming_message,
-    _record_top10_impact,
-    _record_ws_event,
-    _top10_signature,
-)
 
 logger = logging.getLogger(__name__)
 RECONNECT_DELAY_SEC = 5
@@ -73,7 +67,7 @@ def _set_live_market_info(profile, market: dict | None = None) -> None:
 
 
 def get_live_orderbook_snapshot(depth: int = 10) -> dict:
-    """Returns a JSON-serializable orderbook snapshot for UI/API consumers."""
+    """Returns a serializable orderbook snapshot for UI consumers."""
     book = live_book
     if book is None or not book.initialized:
         return {
@@ -145,38 +139,26 @@ async def _stream_with_sync(
                 seq = data.get("seq")
                 msg_payload = data.get("msg", {})
 
-                _count_incoming_message(msg_type or "unknown")
-                _record_ws_event(msg_type or "unknown", seq, msg_payload, "received")
-
                 if msg_type == "orderbook_snapshot":
                     if isinstance(seq, int):
                         ws_snapshot_seq = seq
-                        _record_ws_event(msg_type, seq, msg_payload, "anchor_seen")
                     continue
 
                 if msg_type == "orderbook_delta":
                     msg = msg_payload
 
                     if not isinstance(seq, int):
-                        _record_ws_event(msg_type, seq, msg, "invalid_seq_ignored")
                         continue
 
                     if not bootstrapped:
                         buffered_deltas.append((seq, msg))
-                        _record_ws_event(msg_type, seq, msg, "buffered")
                         continue
 
-                    before = _top10_signature(book)
                     if not book.apply_delta_with_seq(seq, msg):
                         if seq < (book.expected_seq or 0):
-                            _record_ws_event(msg_type, seq, msg, "stale_ignored")
                             continue
-                        _record_ws_event(msg_type, seq, msg, "seq_gap")
                         break
 
-                    _record_ws_event(msg_type, seq, msg, "applied")
-                    after = _top10_signature(book)
-                    _record_top10_impact(seq, msg, before != after)
                     on_live_orderbook_update(book)
 
                 elif msg_type == "subscribed":

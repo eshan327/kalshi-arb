@@ -1,7 +1,7 @@
 # Kalshi 15-minute crypto trader
 
-Fee-aware systematic, semi-systematic, and click trading for Kalshi's
-single-asset 15-minute crypto markets.
+Fee-aware systematic trading for Kalshi's single-asset 15-minute crypto
+markets, with optional discretionary overrides.
 
 ## Quick start
 
@@ -11,9 +11,9 @@ cp .env.example .env
 uv run src/main.py bitcoin
 ```
 
-Open [http://127.0.0.1:5000](http://127.0.0.1:5000), choose a trading style,
-then click **Start Paper** or **Start Live**. The process starts stopped and
-neither destination has a confirmation step.
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000), then click **Start Paper**
+or **Start Live**. The process starts stopped and neither destination has a
+confirmation step.
 
 Supported assets: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `ADA`, `NEAR`,
 `BCH`, `HYPE`, `TON`, and `ZEC`. Names such as `bitcoin` and `solana` also work.
@@ -50,33 +50,20 @@ account resets when the process restarts.
 disables order entry. Switching from live to paper also cancels this bot's
 resting live orders.
 
-## Operating workflows
+## Operating workflow
 
-There is one dashboard. The trading-style selector changes who submits strategy
-orders; it does not hide tools or move the operator into another GUI.
-
-### Systematic
-
-Select **Systematic — auto in/out**. The engine submits both model entries and
-model exits. The click ticket remains available for discretionary overrides.
+The engine always submits model entries and exits while it is running. The
+dashboard's collapsed **Operator Controls** contains model/risk settings and a
+click ticket for discretionary overrides.
 
 The engine evaluates once per second. Risk-reducing exits can act every cycle;
 new buys have a five-second default cooldown so account state can reconcile
 before more risk is added.
 
-### Semi-systematic
-
-Select **Semi — click in, auto out**. You enter positions from **Click Order**;
-the engine continues to manage model exits.
-
-### Click trading
-
-Select **Click trading — manual in/out**. The engine displays its model but does
-not submit model entries or exits. Choose Buy or Sell/Reduce, YES or NO, and a
-contract count in **Click Order**, then submit.
-
-Click orders use the active market, top of book, configured slippage, order and
-position limits, cash buffer, reduce-only checks, and daily-loss guard.
+Choose Buy or Sell/Reduce, YES or NO, and a contract count in **Click Order**.
+These discretionary orders use the active market, top of book, configured
+slippage, order and position limits, cash buffer, reduce-only checks, and
+daily-loss guard. They do not disable the systematic engine.
 
 ### Stop and flatten
 
@@ -123,17 +110,13 @@ edge-reversal exit.
 
 ## Dashboard map
 
-- **Operator strip:** trading style, paper/live start, running state, active
-  market, data freshness, daily P&L/lock, stop, and flatten.
-- **Systematic Policy:** entry, risk, sizing, slippage, volatility, and
-  model/orderbook agreement settings.
-- **Click Order:** manual buy/reduce ticket for the active market.
+- **Operator strip:** paper/live start, running state, active market, data
+  freshness, daily P&L/lock, stop, and flatten.
 - **Account and Signal:** current intent, fair value, implied probability, edge,
   cash, equity, and positions.
 - **Market, Model & Orderbook:** live YES/NO depth, synthetic index, settlement
   proxy, probability model, and microstructure signal.
-- **Diagnostics & Audit:** reconciliation, raw streams, and calculation details;
-  these are intentionally secondary to the operator controls.
+- **Operator Controls:** model/risk settings and discretionary ticket.
 
 ## Default controls
 
@@ -149,15 +132,6 @@ edge-reversal exit.
 Settings are process-local. Trading events are appended to
 `.runtime/execution_events.jsonl`; the paper and live daily-risk states are kept
 separate under `.runtime/`.
-
-## API
-
-- `GET /api/state`
-- `GET|POST /api/settings`
-- `GET /api/trading/runtime`
-- `GET /api/trading/events`
-- `POST /api/trading/control`
-- `POST /api/trading/manual`
 
 ## Tests
 

@@ -6,11 +6,9 @@ from core.asset_context import get_active_market_profile
 from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
 from engine.book_microstructure import get_last_p_book_snapshot
 from engine.live_pricing import compute_live_pricing_snapshot
-from engine.stream_metrics import get_ws_message_log_size, get_ws_processing_stats
 from engine.streamer import get_live_market_info, get_live_orderbook_snapshot
 from engine.trading.runtime import get_trading_runtime_snapshot
 from engine.trading.settings import get_trading_settings_snapshot
-from feeds.state.diagnostics_store import get_brti_ws_stats
 from feeds.state.tick_store import get_brti_settlement_proxy, get_brti_state
 
 
@@ -25,10 +23,6 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
 
     snapshot = get_live_orderbook_snapshot(depth=depth)
     brti = get_brti_state()
-    log_size = get_ws_message_log_size()
-    kalshi_stats = get_ws_processing_stats()
-    brti_stats = get_brti_ws_stats()
-
     active_asset = profile.asset
     feed_asset = str(brti.get("asset") or active_asset)
     asset_syncing = feed_asset != active_asset
@@ -77,9 +71,6 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         "orderbook": snapshot,
         "brti": brti,
         "synthetic_settlement_proxy": settlement_proxy,
-        "ws_log_size": log_size,
-        "kalshi_ws_stats": kalshi_stats,
-        "brti_ws_stats": brti_stats,
         "market_info": market_info,
         "asset": profile.asset,
         "asset_display": profile.display_name,

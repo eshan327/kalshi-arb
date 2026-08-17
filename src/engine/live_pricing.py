@@ -1,4 +1,4 @@
-"""Live index + vol + Asian pricer snapshot for the Flask API."""
+"""Live index + vol + Asian pricer snapshot for the operator dashboard."""
 
 from __future__ import annotations
 

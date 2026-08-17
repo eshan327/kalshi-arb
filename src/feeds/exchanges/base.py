@@ -5,7 +5,6 @@ from typing import Any
 
 from core.market_profiles import MarketProfile
 from feeds.state.book_store import safe_float, update_level
-from feeds.state.diagnostics_store import mark_book_update_applied
 from feeds.exchanges.runtime import run_exchange_stream
 
 
@@ -66,5 +65,4 @@ def apply_book_update(exchange: str, side: str, price_raw: Any, size_raw: Any) -
         return False
     price, size = parsed
     update_level(exchange, side, price, size)
-    mark_book_update_applied()
     return True

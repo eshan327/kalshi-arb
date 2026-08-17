@@ -27,9 +27,9 @@ def main() -> None:
             f"{', '.join(get_supported_assets())}"
         )
     os.environ["KALSHI_MARKET_ASSET"] = asset
-    from ui.web_app import run_web_app
+    from reflex.reflex import cli
 
-    run_web_app()
+    cli.main(args=["run"], prog_name="reflex")
 
 
 if __name__ == "__main__":
