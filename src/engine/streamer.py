@@ -1,39 +1,37 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import random
 import threading
-import time
 from typing import Optional
 
 import websockets
 
 from core.asset_context import get_active_market_profile
-from core.config import (
-    RECONCILIATION_CONSECUTIVE_BREACHES,
-    RECONCILIATION_TOP_N,
-    SNAPSHOT_RECALIBRATION_SEC,
-)
-from data.kalshi_rest import get_market_orderbook, get_open_markets
-from data.kalshi_ws import connect_and_subscribe
+from data.kalshi_rest import get_open_markets
+from data.kalshi_ws import connect_and_subscribe, request_orderbook_snapshot
 from engine.book_microstructure import (
     on_live_orderbook_update,
     reset_book_microstructure_for_new_market,
 )
 from engine.live_pricing import reset_live_pricing_for_new_market
-from engine.market_stream.bootstrap import BufferedDelta, try_bootstrap_from_rest
+from engine.market_stream.bootstrap import BufferedDelta, replay_buffered_deltas
 from engine.market_stream.discovery import (
     is_market_closed,
     parse_iso8601_to_epoch,
     select_target_market,
 )
 from engine.market_stream.display import top_levels_for_display
-from engine.market_stream.reconciliation_runner import run_recalibration
 from engine.orderbook import OrderBook
 
 logger = logging.getLogger(__name__)
 RECONNECT_DELAY_SEC = 5
+WS_RECONNECT_MIN_SEC = 0.5
+WS_RECONNECT_MAX_SEC = 8.0
+SNAPSHOT_RECOVERY_TIMEOUT_SEC = 3.0
 
 # Live orderbook instance (accessible by other modules)
 live_book: Optional[OrderBook] = None
@@ -69,7 +67,7 @@ def _set_live_market_info(profile, market: dict | None = None) -> None:
 def get_live_orderbook_snapshot(depth: int = 10) -> dict:
     """Returns a serializable orderbook snapshot for UI consumers."""
     book = live_book
-    if book is None or not book.initialized:
+    if book is None or not book.initialized or book.needs_resync:
         return {
             "initialized": False,
             "market_ticker": None,
@@ -100,7 +98,8 @@ def get_live_orderbook_snapshot(depth: int = 10) -> dict:
 async def _stream_with_sync(
     market_ticker: str, book: OrderBook, market_close_ts: float | None = None
 ) -> None:
-    """WS stream loop with REST snapshot bootstrap and sequence-safe delta replay."""
+    """Maintain a sequence-aligned book and recover gaps on the same socket."""
+    reconnect_delay = WS_RECONNECT_MIN_SEC
     while True:
         if is_market_closed(market_close_ts):
             logger.info(
@@ -108,24 +107,36 @@ async def _stream_with_sync(
             )
             return
 
+        ws = None
         try:
             book.reset()
             buffered_deltas: list[BufferedDelta] = []
             bootstrapped = False
-            ws_snapshot_seq: int | None = None
-            last_recalibration_at = time.monotonic()
-            consecutive_recon_breaches = 0
-
-            rest_snapshot_task = asyncio.create_task(
-                asyncio.to_thread(get_market_orderbook, market_ticker)
-            )
+            orderbook_sid: int | None = None
+            snapshot_deadline: float | None = None
 
             ws = await connect_and_subscribe(market_ticker)
-            logger.info(
-                "Subscribed to %s. Bootstrapping from REST snapshot...", market_ticker
-            )
+            logger.info("Subscribed to %s. Waiting for snapshot...", market_ticker)
 
-            async for message in ws:
+            while True:
+                timeout = (
+                    max(0.0, snapshot_deadline - asyncio.get_running_loop().time())
+                    if snapshot_deadline is not None
+                    else None
+                )
+                try:
+                    message = (
+                        await asyncio.wait_for(ws.recv(), timeout)
+                        if timeout is not None
+                        else await ws.recv()
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "Orderbook snapshot recovery timed out for %s; reconnecting...",
+                        market_ticker,
+                    )
+                    break
+
                 if is_market_closed(market_close_ts):
                     logger.info(
                         "Market %s reached close time; reconnect loop stopped.",
@@ -134,14 +145,31 @@ async def _stream_with_sync(
                     await ws.close()
                     return
 
-                data = json.loads(message)
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    logger.warning("Ignoring malformed Kalshi WebSocket message.")
+                    continue
+                if not isinstance(data, dict):
+                    logger.warning("Ignoring non-object Kalshi WebSocket message.")
+                    continue
                 msg_type = data.get("type")
                 seq = data.get("seq")
-                msg_payload = data.get("msg", {})
+                raw_payload = data.get("msg")
+                msg_payload = raw_payload if isinstance(raw_payload, dict) else {}
 
                 if msg_type == "orderbook_snapshot":
-                    if isinstance(seq, int):
-                        ws_snapshot_seq = seq
+                    if not isinstance(seq, int):
+                        break
+                    book.load_ws_snapshot(msg_payload, seq)
+                    bootstrapped = True
+                    replay_buffered_deltas(book, buffered_deltas)
+                    buffered_deltas.clear()
+                    snapshot_deadline = None
+                    if book.needs_resync:
+                        break
+                    reconnect_delay = WS_RECONNECT_MIN_SEC
+                    on_live_orderbook_update(book)
                     continue
 
                 if msg_type == "orderbook_delta":
@@ -157,62 +185,67 @@ async def _stream_with_sync(
                     if not book.apply_delta_with_seq(seq, msg):
                         if seq < (book.expected_seq or 0):
                             continue
-                        break
+                        if orderbook_sid is None:
+                            break
+                        logger.warning(
+                            "Orderbook sequence gap; requesting an in-band snapshot..."
+                        )
+                        book.reset()
+                        buffered_deltas.clear()
+                        bootstrapped = False
+                        snapshot_deadline = (
+                            asyncio.get_running_loop().time()
+                            + SNAPSHOT_RECOVERY_TIMEOUT_SEC
+                        )
+                        await request_orderbook_snapshot(
+                            ws, market_ticker, orderbook_sid
+                        )
+                        continue
 
                     on_live_orderbook_update(book)
 
                 elif msg_type == "subscribed":
+                    channel = msg_payload.get("channel")
+                    sid = msg_payload.get("sid")
+                    if channel == "orderbook_delta" and isinstance(sid, int):
+                        orderbook_sid = sid
                     logger.info(
                         "[SERVER] Subscription confirmed: %s",
-                        data.get("msg", {}).get("channel"),
+                        channel,
                     )
 
-                if book.needs_resync:
-                    logger.warning("Resync triggered, reconnecting...")
+                elif msg_type == "error":
+                    logger.warning("Kalshi WebSocket error: %s", msg_payload)
                     break
 
-                if not bootstrapped:
-                    bootstrapped, reconnect_now, last_recalibration_at = (
-                        try_bootstrap_from_rest(
-                            book=book,
-                            rest_snapshot_task=rest_snapshot_task,
-                            ws_snapshot_seq=ws_snapshot_seq,
-                            buffered_deltas=buffered_deltas,
-                        )
-                    )
-                    if reconnect_now:
+                if book.needs_resync:
+                    if orderbook_sid is None:
                         break
-
-                if (
-                    bootstrapped
-                    and time.monotonic() - last_recalibration_at
-                    >= SNAPSHOT_RECALIBRATION_SEC
-                ):
-                    consecutive_recon_breaches, action = await run_recalibration(
-                        market_ticker=market_ticker,
-                        book=book,
-                        consecutive_recon_breaches=consecutive_recon_breaches,
-                        recon_top_n=RECONCILIATION_TOP_N,
-                        recon_consecutive_breaches=RECONCILIATION_CONSECUTIVE_BREACHES,
+                    logger.warning(
+                        "Invalid orderbook state; requesting an in-band snapshot..."
                     )
-                    last_recalibration_at = time.monotonic()
+                    book.reset()
+                    buffered_deltas.clear()
+                    bootstrapped = False
+                    snapshot_deadline = (
+                        asyncio.get_running_loop().time()
+                        + SNAPSHOT_RECOVERY_TIMEOUT_SEC
+                    )
+                    await request_orderbook_snapshot(ws, market_ticker, orderbook_sid)
 
-                    if action == "trigger_resync":
-                        logger.warning(
-                            "Reconciliation drift threshold breached; forcing resync..."
-                        )
-                        break
-
-            await ws.close()
-            if not rest_snapshot_task.done():
-                rest_snapshot_task.cancel()
-
-        except (websockets.ConnectionClosed, ConnectionError, OSError) as exc:
+        except (websockets.ConnectionClosed, ConnectionError, OSError, TimeoutError) as exc:
             logger.warning(
-                "WebSocket dropped (%s), reconnecting in %ss", exc, RECONNECT_DELAY_SEC
+                "WebSocket dropped (%s); reconnecting...", exc
             )
+        finally:
+            if ws is not None:
+                with contextlib.suppress(websockets.ConnectionClosed, OSError):
+                    await ws.close()
 
-        await asyncio.sleep(RECONNECT_DELAY_SEC)
+        delay = reconnect_delay * random.uniform(0.8, 1.2)
+        logger.info("Reconnecting WebSocket in %.2fs...", delay)
+        await asyncio.sleep(delay)
+        reconnect_delay = min(WS_RECONNECT_MAX_SEC, reconnect_delay * 2)
 
 
 async def run_market_streamer() -> None:

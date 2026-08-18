@@ -11,11 +11,9 @@ class OrderBook:
     Maintains a live L2 orderbook for a single Kalshi market.
 
     Algorithm:
-    1. Fetch REST snapshot and load yes/no levels
-    2. Buffer incoming WS orderbook_delta events while bootstrapping
-    3. Initialize expected sequence using snapshot anchor
-    4. Replay buffered deltas in-order and ignore stale seqs
-    5. Apply live deltas continuously; reconnect on any seq gap
+    1. Load the sequence-aligned WebSocket snapshot
+    2. Replay buffered deltas in-order and ignore stale seqs
+    3. Apply live deltas continuously; reconnect on any gap or crossed book
     """
 
     def __init__(self, market_ticker):
@@ -37,13 +35,13 @@ class OrderBook:
         return qty
 
     @staticmethod
-    def _normalize_price(price_value):
+    def _normalize_price(price_value, *, dollars=None):
         """Normalizes REST/WS prices to fixed-point cents."""
         value = float(price_value)
         if value <= 0:
             return None
 
-        cents = value * 100.0 if value <= 1 else value
+        cents = value * 100.0 if dollars is True or (dollars is None and value <= 1) else value
         return round(cents, 4)
 
     @staticmethod
@@ -55,7 +53,7 @@ class OrderBook:
                 return seq
         return None
 
-    def _load_levels(self, levels, destination):
+    def _load_levels(self, levels, destination, *, dollars, invert_price=False):
         """Loads [price, qty] levels into a destination side dict."""
         destination.clear()
         for level in levels:
@@ -63,12 +61,21 @@ class OrderBook:
                 continue
             price_raw, qty_raw = level[0], level[1]
             qty = self._normalize_qty(qty_raw)
-            price_cents = self._normalize_price(price_raw)
+            price_cents = self._normalize_price(price_raw, dollars=dollars)
             if qty <= 0:
                 continue
             if price_cents is None:
                 continue
+            if invert_price:
+                price_cents = round(100.0 - price_cents, 4)
             destination[price_cents] = qty
+
+    def _is_crossed_unlocked(self):
+        return bool(
+            self.yes
+            and self.no
+            and max(self.yes) + max(self.no) >= 100.0
+        )
 
     def _top_n_levels(self, side_book, depth):
         """Returns top-N descending bid levels from an internal side map."""
@@ -92,15 +99,16 @@ class OrderBook:
             yes_levels = snapshot.get("yes")
             no_levels = snapshot.get("no")
 
-            if yes_levels is None or no_levels is None:
+            dollars = yes_levels is None or no_levels is None
+            if dollars:
                 yes_levels = snapshot.get("yes_dollars_fp", [])
                 no_levels = snapshot.get("no_dollars_fp", [])
 
-            self._load_levels(yes_levels or [], self.yes)
-            self._load_levels(no_levels or [], self.no)
+            self._load_levels(yes_levels or [], self.yes, dollars=dollars)
+            self._load_levels(no_levels or [], self.no, dollars=dollars)
 
             self.initialized = True
-            self.needs_resync = False
+            self.needs_resync = self._is_crossed_unlocked()
             self.last_update_ts = time.time()
 
             seq = self._extract_seq(snapshot)
@@ -112,6 +120,25 @@ class OrderBook:
             )
             return seq
 
+    def load_ws_snapshot(self, snapshot, seq):
+        """Load a unified-YES-price WebSocket snapshot at its exact sequence."""
+        with self._lock:
+            self._load_levels(
+                snapshot.get("yes_dollars_fp", []),
+                self.yes,
+                dollars=True,
+            )
+            self._load_levels(
+                snapshot.get("no_dollars_fp", []),
+                self.no,
+                dollars=True,
+                invert_price=True,
+            )
+            self.expected_seq = seq + 1 if isinstance(seq, int) else None
+            self.initialized = True
+            self.needs_resync = self._is_crossed_unlocked()
+            self.last_update_ts = time.time()
+
     def set_expected_seq(self, expected_seq):
         """Sets the next expected sequence id."""
         with self._lock:
@@ -121,12 +148,13 @@ class OrderBook:
     def apply_delta(self, msg):
         """
         Applies a single WS orderbook_delta message.
-        msg keys: price_dollars, delta_fp, side, ts
+        msg keys: price_dollars, delta_fp, side, ts. WebSocket prices use the
+        unified YES scale and are converted to the internal YES/NO leg scales.
         delta_fp is the CHANGE in quantity (positive = add, negative = remove).
         """
         with self._lock:
             side_str = msg.get("side")
-            price = self._normalize_price(msg.get("price_dollars"))
+            price = self._normalize_price(msg.get("price_dollars"), dollars=True)
             delta = self._normalize_qty(msg.get("delta_fp", 0))
 
             if price is None:
@@ -136,6 +164,7 @@ class OrderBook:
                 book = self.yes
             elif side_str == "no":
                 book = self.no
+                price = round(100.0 - price, 4)
             else:
                 return
 
@@ -145,6 +174,7 @@ class OrderBook:
                 book.pop(price, None)
             else:
                 book[price] = new_qty
+            self.needs_resync = self.needs_resync or self._is_crossed_unlocked()
             self.last_update_ts = time.time()
 
     def apply_delta_with_seq(self, seq, msg):
@@ -193,6 +223,8 @@ class OrderBook:
         """Returns top-N slices of the current orderbook in cents for low-latency read paths."""
         with self._lock:
             depth = max(0, int(depth))
+            if self.needs_resync or self._is_crossed_unlocked():
+                return [], [], [], []
             yes_bids = self._top_n_levels(self.yes, depth)
             no_bids = self._top_n_levels(self.no, depth)
 

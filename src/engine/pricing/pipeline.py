@@ -187,15 +187,18 @@ def compute_pricing_snapshot(
         max_staleness_sec=_MAX_SAMPLE_STALENESS_SEC,
     )
     base["proxy_anchor_samples"] = len(anchor_samples)
-    if (
-        anchor_elapsed != settlement_seconds
-        or len(anchor_samples) < _MIN_ANCHOR_SAMPLES
-    ):
-        base["reason"] = "proxy_anchor_unavailable"
-        return base
-
-    proxy_reference_avg = sum(anchor_samples) / len(anchor_samples)
-    proxy_basis_adjustment = float(strike) - proxy_reference_avg
+    proxy_anchor_ready = (
+        anchor_elapsed == settlement_seconds
+        and len(anchor_samples) >= _MIN_ANCHOR_SAMPLES
+    )
+    proxy_reference_avg = (
+        sum(anchor_samples) / len(anchor_samples) if proxy_anchor_ready else None
+    )
+    proxy_basis_adjustment = (
+        float(strike) - proxy_reference_avg
+        if proxy_reference_avg is not None
+        else 0.0
+    )
     adjusted_spot = float(spot) + proxy_basis_adjustment
     adjusted_points = [
         (ts, value + proxy_basis_adjustment)
@@ -213,11 +216,15 @@ def compute_pricing_snapshot(
             "spot_index": adjusted_spot,
             "model_strike_usd": model_strike,
             "rounding_half_unit": rounding_half_unit,
-            "proxy_reference_avg": round(proxy_reference_avg, settlement_decimals + 2),
+            "proxy_reference_avg": (
+                round(proxy_reference_avg, settlement_decimals + 2)
+                if proxy_reference_avg is not None
+                else None
+            ),
             "proxy_basis_adjustment": round(
                 proxy_basis_adjustment, settlement_decimals + 2
             ),
-            "proxy_anchor_ready": True,
+            "proxy_anchor_ready": proxy_anchor_ready,
         }
     )
 

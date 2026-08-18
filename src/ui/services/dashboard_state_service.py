@@ -63,7 +63,8 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
     )
     signal_monologue = (
         trading_runtime.get("signal_monologue")
-        if isinstance(trading_runtime.get("signal_monologue"), dict)
+        if snapshot.get("initialized")
+        and isinstance(trading_runtime.get("signal_monologue"), dict)
         else {}
     )
 

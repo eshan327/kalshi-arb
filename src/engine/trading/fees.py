@@ -1,24 +1,38 @@
 from __future__ import annotations
 
-import math
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 TAKER_FEE_COEFF = 7.0
 
 
-def _price_probability(price_cents: float) -> float:
-    return max(0.01, min(99.99, float(price_cents))) / 100.0
-
-
 def taker_fee_cents_per_contract(
-    price_cents: float, count: int = 1, fee_multiplier: float = 1.0
+    price_cents: float,
+    count: int = 1,
+    fee_multiplier: float = 1.0,
+    action: str = "buy",
 ) -> float:
-    """Current general Kalshi taker formula, including whole-cent order rounding."""
+    """Kalshi taker fee plus the order's cent-alignment rounding."""
+    if action not in {"buy", "sell"}:
+        raise ValueError("action must be buy or sell")
     contracts = max(1, int(count))
-    p = _price_probability(price_cents)
-    raw_fee = (
-        TAKER_FEE_COEFF * max(0.0, float(fee_multiplier)) * contracts * p * (1.0 - p)
+    price = Decimal(str(max(0.01, min(99.99, float(price_cents)))))
+    p = price / Decimal("100")
+    trade_fee = (
+        Decimal(str(TAKER_FEE_COEFF))
+        * Decimal(str(max(0.0, float(fee_multiplier))))
+        * contracts
+        * p
+        * (1 - p)
+    ).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    notional = price * contracts
+    effective_fee = (
+        (notional + trade_fee).quantize(Decimal("1"), rounding=ROUND_CEILING)
+        - notional
+        if action == "buy"
+        else notional
+        - (notional - trade_fee).quantize(Decimal("1"), rounding=ROUND_FLOOR)
     )
-    return math.ceil(raw_fee) / contracts
+    return float(effective_fee / contracts)
 
 
 def kelly_fraction_binary(*, p_win: float, cost_cents: float) -> float:

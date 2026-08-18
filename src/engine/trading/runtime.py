@@ -52,7 +52,7 @@ _NY = ZoneInfo("America/New_York")
 _lock = RLock()
 _execution_lock = RLock()
 _events: deque[dict[str, Any]] = deque(maxlen=max(500, EXECUTION_EVENTS_MAXLEN))
-_runtime_started_ts = time.time()
+_market_started_ts = time.time()
 _execution_mode: str | None = None
 _armed = False
 _last_submission_ts = 0.0
@@ -75,7 +75,7 @@ _runtime_state: dict[str, Any] = {
     "daily_risk": {},
     "fee_policy": {},
     "settings": get_trading_settings_snapshot(),
-    "signal_monologue": {"action_intent": "Choose Paper or Live to start."},
+    "signal_monologue": {"action_intent": "Choose Sim or Live to start."},
 }
 
 
@@ -147,7 +147,7 @@ def _fetch_account_snapshot(execution_mode: str | None = None) -> dict[str, Any]
     if mode == "paper":
         return _paper_account.snapshot()
     if mode != "live":
-        raise RuntimeError("Choose Paper or Live first.")
+        raise RuntimeError("Choose Sim or Live first.")
     balance = get_balance_summary()
     positions = [
         position
@@ -155,11 +155,12 @@ def _fetch_account_snapshot(execution_mode: str | None = None) -> dict[str, Any]
         if (position := _position_payload(raw)) is not None
     ]
     cash_cents = int(balance["balance"])
-    portfolio_value_cents = int(balance["portfolio_value"])
+    # Kalshi portfolio_value is total account equity, including available balance.
+    equity_cents = int(balance["portfolio_value"])
     return {
         "cash_cents": cash_cents,
-        "portfolio_value_cents": portfolio_value_cents,
-        "equity_cents": cash_cents + portfolio_value_cents,
+        "portfolio_value_cents": equity_cents - cash_cents,
+        "equity_cents": equity_cents,
         "positions": positions,
         "updated_ts": int(balance["updated_ts"]),
         "refreshed_ts": time.time(),
@@ -203,7 +204,7 @@ def _sync_daily_risk(
 ) -> tuple[dict[str, Any], bool]:
     mode = execution_mode or _get_execution_mode()
     if mode not in {"paper", "live"}:
-        raise RuntimeError("Choose Paper or Live first.")
+        raise RuntimeError("Choose Sim or Live first.")
     with _lock:
         day = _risk_day()
         risk_state = _risk_states.get(mode) or _load_risk_state(mode)
@@ -295,20 +296,44 @@ def _monologue(
     elif signal is not None:
         lean, edge = signal.side, signal.edge_cents
 
-    implied = signal.market_implied_probability if signal is not None else None
-    if implied is None and lean in {"yes", "no"}:
-        quote = diagnostics.get(f"{lean}_ask_cents")
-        if isinstance(quote, (int, float)):
-            implied = float(quote) / 100.0
+    yes_bid = diagnostics.get("yes_bid_cents")
+    yes_ask = diagnostics.get("yes_ask_cents")
+    implied = (
+        (float(yes_bid) + float(yes_ask)) / 200.0
+        if isinstance(yes_bid, (int, float)) and isinstance(yes_ask, (int, float))
+        else None
+    )
+
+    reason_text = {
+        "at_target_allocation": "target allocation reached",
+        "credit_size_target_reached": "edge supports no additional size",
+        "edge_below_threshold": "edge below minimum",
+        "entry_cutoff": "too close to settlement",
+        "ev_signal_ready": "positive expected value",
+        "fee_policy_unavailable": "fee schedule unavailable",
+        "insufficient_available_cash": "insufficient available cash",
+        "invalid_model_probability": "model probability unavailable",
+        "missing_best_quotes": "best bid or ask unavailable",
+        "market_probability_out_of_bounds": "market midpoint outside tradable range",
+        "market_probability_unavailable": "market midpoint unavailable",
+        "p_book_direction_conflict": "model and order book disagree",
+        "p_book_divergence_high": "model and order book differ too much",
+        "p_book_unavailable": "order-book signal unavailable",
+        "position_notional_cap_reached": "position cap reached",
+        "pricing_not_ready": "model warming up",
+        "stale_orderbook": "order book is stale",
+        "technical_warmup": "technical warm-up",
+        "volatility_fallback": "waiting for realized volatility",
+    }.get(reason, reason.replace("_", " "))
 
     if signal is not None:
         verb = "SELL" if signal.action == "sell" else "BUY"
         text = (
             f"{verb} {signal.count} {signal.side.upper()} @ "
-            f"{signal.quote_price_cents}c: {signal.reason}"
+            f"{signal.quote_price_cents}c — {reason_text}"
         )
     else:
-        text = f"PASS: {reason.replace('_', ' ')}"
+        text = f"PASS — {reason_text}"
     return {
         "ts": time.time(),
         "action_intent": text,
@@ -362,7 +387,7 @@ def _place_order(
             fee_multiplier=fee_multiplier,
         )
     if execution_mode != "live":
-        raise RuntimeError("Choose Paper or Live first.")
+        raise RuntimeError("Choose Sim or Live first.")
     return place_limit_order(
         market_ticker=market_ticker,
         side=side,
@@ -438,7 +463,7 @@ def submit_manual_order(*, side: str, action: str, count: Any) -> dict[str, Any]
     with _execution_lock:
         execution_mode = _get_execution_mode()
         if execution_mode not in {"paper", "live"}:
-            raise RuntimeError("Choose Paper or Live first.")
+            raise RuntimeError("Choose Sim or Live first.")
         if not _is_armed():
             raise RuntimeError("Start trading before submitting a discretionary order.")
         settings = get_trading_settings_model()
@@ -627,7 +652,7 @@ def control_trading(operation: str, execution_mode: str = "") -> dict[str, Any]:
         if not market_ticker:
             raise RuntimeError("No active market to flatten.")
         if mode not in {"paper", "live"}:
-            raise RuntimeError("Choose Paper or Live first.")
+            raise RuntimeError("Choose Sim or Live first.")
         account = _fetch_account_snapshot(mode)
         result = _flatten_market(account, market_ticker, mode)
         _set_state(status="flatten_submitted", last_reason="flattened_by_operator")
@@ -716,7 +741,7 @@ def _enforce_daily_loss_lock(
 
 
 async def _run_single_cycle() -> None:
-    global _last_market_ticker
+    global _last_market_ticker, _last_submission_ts, _market_started_ts
 
     cycle_ts = time.time()
     settings = get_trading_settings_model()
@@ -757,11 +782,14 @@ async def _run_single_cycle() -> None:
         )
         return
 
-    if _last_market_ticker and _last_market_ticker != market_ticker:
-        if execution_mode == "live":
+    if _last_market_ticker != market_ticker:
+        if _last_market_ticker and execution_mode == "live":
             await asyncio.to_thread(
                 cancel_bot_orders, market_ticker=_last_market_ticker
             )
+        _last_submission_ts = 0.0
+        _market_started_ts = cycle_ts
+        _set_state(last_signal=None, last_order=None)
     _last_market_ticker = market_ticker
 
     strike = extract_suggested_strike(market_info)
@@ -821,7 +849,7 @@ async def _run_single_cycle() -> None:
         open_no_contracts=no_qty,
         open_yes_avg_entry_cents=yes_avg,
         open_no_avg_entry_cents=no_avg,
-        runtime_uptime_seconds=cycle_ts - _runtime_started_ts,
+        runtime_uptime_seconds=cycle_ts - _market_started_ts,
         available_cash_cents=max(
             0, int(account["cash_cents"]) - round(settings.cash_buffer_usd * 100)
         ),

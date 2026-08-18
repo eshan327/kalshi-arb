@@ -26,17 +26,10 @@ WEB_HOST = "127.0.0.1"
 WEB_PORT = 3000
 
 # Dashboard/view defaults
-ORDERBOOK_VIEW_DEPTH = 10
+ORDERBOOK_VIEW_DEPTH = 6
 
 # Data/compute cadence defaults
 BRTI_RECALC_INTERVAL_SEC = 1.0
-SNAPSHOT_RECALIBRATION_SEC = 30.0
-
-# Reconciliation policy defaults
-RECONCILIATION_TOP_N = 10
-RECONCILIATION_PRICE_TOL_CENTS = 0.01
-RECONCILIATION_QTY_TOL = 1.0
-RECONCILIATION_CONSECUTIVE_BREACHES = 3
 
 # Market selection defaults
 MARKET_ASSET_DEFAULT = os.getenv("KALSHI_MARKET_ASSET", "BTC").upper()
@@ -62,7 +55,7 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-# Execution starts stopped; the operator chooses Paper or Live in the dashboard.
+# Execution starts stopped; the operator chooses Sim or Live in the dashboard.
 PAPER_STARTING_CASH_CENTS = max(
     100, _env_int("KALSHI_PAPER_STARTING_CASH_CENTS", 100_000)
 )

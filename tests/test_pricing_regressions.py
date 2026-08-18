@@ -79,7 +79,7 @@ def test_pricing_is_anchored_to_the_official_opening_reference(monkeypatch) -> N
     assert snapshot["model_strike_usd"] == pytest.approx(100.025)
 
 
-def test_pricing_blocks_when_opening_proxy_reference_is_missing(monkeypatch) -> None:
+def test_pricing_can_start_mid_market_without_opening_proxy_reference(monkeypatch) -> None:
     monkeypatch.setattr(pipeline.time, "time", lambda: 1_200.0)
     snapshot = pipeline.compute_pricing_snapshot(
         profile=get_market_profile("DOGE"),
@@ -93,8 +93,12 @@ def test_pricing_blocks_when_opening_proxy_reference_is_missing(monkeypatch) -> 
         source_exchanges=2,
     )
 
-    assert snapshot["ready"] is False
-    assert snapshot["reason"] == "proxy_anchor_unavailable"
+    assert snapshot["ready"] is True
+    assert snapshot["reason"] is None
+    assert snapshot["proxy_anchor_ready"] is False
+    assert snapshot["proxy_reference_avg"] is None
+    assert snapshot["proxy_basis_adjustment"] == 0
+    assert snapshot["spot_index"] == pytest.approx(0.2)
 
 
 def test_dynamic_index_depth_handles_fractional_and_large_asset_sizes() -> None:

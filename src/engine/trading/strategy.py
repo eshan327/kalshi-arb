@@ -15,8 +15,8 @@ from engine.trading.fees import (
 from engine.trading.models import TradeSignal
 from engine.trading.settings import TradingSettings
 
-PROBABILITY_LOWER_BOUND = 0.20
-PROBABILITY_UPPER_BOUND = 0.80
+PROBABILITY_LOWER_BOUND = 0.05
+PROBABILITY_UPPER_BOUND = 0.95
 MAX_POSITION_USD_HARD_CAP = 50.0
 TECHNICAL_WARMUP_SECONDS = 30.0
 ENTRY_CUTOFF_SECONDS_TO_EXPIRY = 20.0
@@ -33,7 +33,7 @@ def _safe_float(value: Any) -> float | None:
 def _best_quotes(
     book: OrderBook | None,
 ) -> tuple[float | None, float | None, float | None, float | None]:
-    if book is None or not book.initialized:
+    if book is None or not book.initialized or book.needs_resync:
         return None, None, None, None
 
     yes_bid, yes_ask, no_bid, no_ask = book.get_best_prices()
@@ -374,7 +374,9 @@ def build_trade_signal(
         )
         exit_fee = (
             taker_fee_cents_per_contract(
-                float(exit_quote), fee_multiplier=float(fee_multiplier)
+                float(exit_quote),
+                fee_multiplier=float(fee_multiplier),
+                action="sell",
             )
             if exit_quote is not None and fee_policy_ready
             else None
@@ -431,14 +433,32 @@ def build_trade_signal(
         if divergence > settings.p_book_max_divergence:
             return None, "p_book_divergence_high", diagnostics
 
-    if not (PROBABILITY_LOWER_BOUND <= float(p_model_value) <= PROBABILITY_UPPER_BOUND):
+    market_probability = (
+        (float(yes_bid) + float(yes_ask)) / 200.0
+        if yes_bid is not None and yes_ask is not None
+        else None
+    )
+    diagnostics["market_probability"] = market_probability
+    if market_probability is None:
+        return None, "market_probability_unavailable", diagnostics
+    pricer_detail = pricing.get("pricer_detail") or {}
+    required_future_avg = _safe_float(pricer_detail.get("required_future_avg"))
+    deterministic_outcome = pricing.get("regime") == "terminal" or (
+        pricing.get("regime") == "collapsed"
+        and required_future_avg is not None
+        and required_future_avg <= 0
+    )
+    diagnostics["deterministic_outcome"] = deterministic_outcome
+    if not deterministic_outcome and not (
+        PROBABILITY_LOWER_BOUND <= market_probability <= PROBABILITY_UPPER_BOUND
+    ):
         diagnostics.update(
             {
                 "probability_lower_bound": PROBABILITY_LOWER_BOUND,
                 "probability_upper_bound": PROBABILITY_UPPER_BOUND,
             }
         )
-        return None, "model_probability_out_of_bounds", diagnostics
+        return None, "market_probability_out_of_bounds", diagnostics
 
     if bool(pricing.get("vol_is_fallback")):
         return None, "volatility_fallback", diagnostics

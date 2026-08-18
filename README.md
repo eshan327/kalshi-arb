@@ -11,7 +11,7 @@ cp .env.example .env
 uv run src/main.py bitcoin
 ```
 
-Open [http://127.0.0.1:3000](http://127.0.0.1:3000), then click **Start Paper**
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000), choose **Sim**, then click **Start**
 or **Start Live**. The process starts stopped and neither destination has a
 confirmation step.
 
@@ -31,9 +31,13 @@ Both modes need a Kalshi API key because the live orderbook WebSocket is
 authenticated. Configure the demo or production key selected by `KALSHI_ENV` in
 `.env`.
 
-### Paper and live
+The orderbook uses Kalshi's sequenced WebSocket snapshot and deltas. A sequence
+gap pauses book consumers while the same subscription requests a fresh snapshot;
+only a failed recovery reconnects the socket.
 
-**Start Paper** never calls Kalshi's order-entry API. It:
+### Sim and live
+
+**Sim** never calls Kalshi's order-entry API. It:
 
 - starts with an ephemeral $1,000 balance by default;
 - simulates IOC fills against displayed live top-of-book price and quantity;
@@ -77,9 +81,9 @@ daily-loss guard. They do not disable the systematic engine.
 ## How the strategy decides
 
 The model estimates the probability that Kalshi's final-minute settlement
-average finishes at or above the rounded contract strike. The synthetic index
-is first anchored to the market's official opening reference, so a persistent
-proxy/index basis is not treated as a price move. Before buying, model value must
+average finishes at or above the rounded contract strike. When the opening
+reference is available, the synthetic index is basis-anchored to it; a
+mid-market start uses the live index unadjusted. Before buying, model value must
 clear:
 
 - the current marketable IOC price;
@@ -96,13 +100,10 @@ Sizing is the smallest of several ceilings:
 - an edge ladder where every additional held contract requires another 0.5¢ of
   credit.
 
-Entries also require a 30-second data warm-up, an orderbook no more than two
-seconds old, at least two clean index constituents, at least 55 of the 60 proxy
-prints needed to anchor the official opening reference, non-fallback volatility,
-model probability between 20% and 80%, a known fee policy, and at least 20
-seconds to expiry. Start the process at least 90 seconds before a market begins;
-if the opening reference cannot be reconstructed, that market is intentionally
-not traded. Optional model/orderbook agreement can hard-gate entries.
+Entries also require a 30-second warm-up after each market change, an orderbook no more than two
+seconds old, at least two clean index constituents, non-fallback volatility,
+model probability between 5% and 95%, a known fee policy, and at least 20
+seconds to expiry. Optional model/orderbook agreement can hard-gate entries.
 
 Existing positions exit when the executable bid, after slippage and fees,
 exceeds model fair value by the configured edge. Entry gates never block this
@@ -110,13 +111,17 @@ edge-reversal exit.
 
 ## Dashboard map
 
-- **Operator strip:** paper/live start, running state, active market, data
-  freshness, daily P&L/lock, stop, and flatten.
-- **Account and Signal:** current intent, fair value, implied probability, edge,
-  cash, equity, and positions.
-- **Market, Model & Orderbook:** live YES/NO depth, synthetic index, settlement
-  proxy, probability model, and microstructure signal.
-- **Operator Controls:** model/risk settings and discretionary ticket.
+- **Autotrader strip:** sim/live mode, session P&L, start, stop, and flatten.
+- **Positions:** cash, marked position value, open contracts, and realized P&L.
+- **Market & Model:** index, model/market probability, edge, pricing, and
+  realized-volatility fit.
+- **Order book:** live YES/NO bids, asks, and depth.
+- **High-Touch Trading:** model/risk parameters and manual orders.
+
+Model probability, microstructure, cooldown, and the settlement-average line
+reset at each 15-minute boundary. The rolling synthetic index and realized
+volatility carry across markets; cash, daily P&L, risk locks, and settlement
+tracking continue.
 
 ## Default controls
 
@@ -127,7 +132,7 @@ edge-reversal exit.
 - Cash buffer: $25
 - Entry cooldown: 5 seconds
 - Decision interval: 1 second
-- IOC slippage: 1 exchange tick
+- IOC tolerance: 1 exchange tick
 
 Settings are process-local. Trading events are appended to
 `.runtime/execution_events.jsonl`; the paper and live daily-risk states are kept

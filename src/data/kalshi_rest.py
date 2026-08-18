@@ -42,17 +42,3 @@ def get_event(event_ticker: str) -> dict[str, Any]:
 
 def get_market(market_ticker: str) -> dict[str, Any]:
     return _get_json(f"{API_BASE_URL}/markets/{market_ticker}").get("market", {})
-
-
-def get_market_orderbook(market_ticker: str) -> dict[str, Any]:
-    """Fetches the raw orderbook of a specific market."""
-
-    url = f"{API_BASE_URL}/markets/{market_ticker}/orderbook"
-    payload = _get_json(url)
-    book = payload.get("orderbook_fp") or payload.get("orderbook") or {}
-    if "yes_dollars" in book or "no_dollars" in book:
-        return {
-            "yes_dollars_fp": book.get("yes_dollars", []),
-            "no_dollars_fp": book.get("no_dollars", []),
-        }
-    return book

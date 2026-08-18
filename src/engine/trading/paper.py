@@ -82,7 +82,10 @@ class PaperAccount:
         price = float(fill_price)
         fees = (
             taker_fee_cents_per_contract(
-                price, count=quantity, fee_multiplier=fee_multiplier
+                price,
+                count=quantity,
+                fee_multiplier=fee_multiplier,
+                action=action,
             )
             * quantity
         )
@@ -124,7 +127,10 @@ class PaperAccount:
                 quantity = min(quantity, old_quantity)
                 fees = (
                     taker_fee_cents_per_contract(
-                        price, count=quantity, fee_multiplier=fee_multiplier
+                        price,
+                        count=quantity,
+                        fee_multiplier=fee_multiplier,
+                        action=action,
                     )
                     * quantity
                 )

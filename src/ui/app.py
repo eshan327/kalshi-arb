@@ -10,14 +10,19 @@ from typing import Any
 import reflex as rx
 
 from core.config import ORDERBOOK_VIEW_DEPTH
-from engine.trading.runtime import control_trading, submit_manual_order
+from engine.settlement_sampling import extract_valid_index_points
+from engine.market_stream.discovery import parse_iso8601_to_epoch
+from engine.trading.runtime import control_trading
 from engine.trading.settings import reset_trading_settings, update_trading_settings
+from engine.vol_estimator import realized_vol_from_price_points
 from feeds.state.tick_store import get_brti_ticks
 from ui.services.dashboard_state_service import build_dashboard_state_payload
 from ui.services.runtime_services import (
     run_background_services,
     validate_auth_or_exit,
 )
+
+_PLOT_WINDOW_SECONDS = 4 * 60
 
 
 def _number(value: Any) -> float | None:
@@ -31,7 +36,7 @@ def _money(cents: Any) -> str:
 
 def _cents(value: Any) -> str:
     number = _number(value)
-    return f"{number:.2f}¢" if number is not None else "—"
+    return f"{number:.2f}".rstrip("0").rstrip(".") + "¢" if number is not None else "—"
 
 
 def _percent(value: Any, *, ratio: bool = False) -> str:
@@ -58,14 +63,64 @@ def _book_rows(book: dict[str, Any], side: str) -> list[dict[str, str]]:
             "side": label.upper(),
             "tone": label,
             "price": _cents(level[0]),
-            "size": f"{float(level[1]):,.0f}",
+            "size": f"{float(level[1]):,.2f}".rstrip("0").rstrip("."),
             "depth": f"{max(4, float(level[1]) / maximum * 100):.1f}%",
         }
         for label, level in levels
     ]
 
 
-def moving_average(rows: list[dict[str, Any]], window_seconds: int) -> list[dict[str, Any]]:
+def _position_rows(
+    account: dict[str, Any], book: dict[str, Any], market_ticker: str
+) -> list[dict[str, str]]:
+    rows = []
+    for position in account.get("positions") or []:
+        side = str(position.get("side") or "").lower()
+        contracts = _number(position.get("contracts")) or 0.0
+        cost_basis = _number(position.get("avg_entry_cents"))
+        bids = book.get(f"{side}_bids") or []
+        mark = (
+            _number(bids[0][0])
+            if position.get("market_ticker") == market_ticker and bids
+            else None
+        )
+        unrealized = (
+            contracts * (mark - cost_basis)
+            if mark is not None and cost_basis is not None
+            else None
+        )
+        rows.append(
+            {
+                "side": side.upper() or "—",
+                "contracts": f"{contracts:g}",
+                "cost_basis": _cents(cost_basis),
+                "cost": _money(position.get("market_exposure_cents")),
+                "unrealized_pnl": _money(unrealized),
+            }
+        )
+    return rows
+
+
+def recent_rows(
+    rows: list[dict[str, Any]], window_seconds: int, now_ts: float | None = None
+) -> list[dict[str, Any]]:
+    timestamps = [_number(row.get("ts")) for row in rows]
+    valid = [timestamp for timestamp in timestamps if timestamp is not None]
+    if not valid:
+        return []
+    cutoff = (max(valid) if now_ts is None else float(now_ts)) - window_seconds
+    return [
+        row
+        for row, timestamp in zip(rows, timestamps)
+        if timestamp is not None and timestamp >= cutoff
+    ]
+
+
+def moving_average(
+    rows: list[dict[str, Any]],
+    window_seconds: int,
+    average_start_ts: float | None = None,
+) -> list[dict[str, Any]]:
     points = sorted(
         (
             (float(row["ts"]), float(row["brti"]))
@@ -76,35 +131,57 @@ def moving_average(rows: list[dict[str, Any]], window_seconds: int) -> list[dict
     )
     result: list[dict[str, Any]] = []
     left = 0
+    display_left = 0
     running_sum = 0.0
+    display_sum = 0.0
+    average_started = False
     for right, (timestamp, spot) in enumerate(points):
-        running_sum += spot
-        while timestamp - points[left][0] > window_seconds:
-            running_sum -= points[left][1]
-            left += 1
+        display_sum += spot
+        while timestamp - points[display_left][0] > 5:
+            display_sum -= points[display_left][1]
+            display_left += 1
+        average = None
+        if average_start_ts is None or timestamp >= average_start_ts:
+            if not average_started:
+                left = right
+                running_sum = 0.0
+                average_started = True
+            running_sum += spot
+            while timestamp - points[left][0] > window_seconds:
+                running_sum -= points[left][1]
+                left += 1
+            average = round(running_sum / (right - left + 1), 2)
         result.append(
             {
                 "time": datetime.fromtimestamp(timestamp).strftime("%H:%M:%S"),
-                "spot": round(spot, 2),
-                "average": round(running_sum / (right - left + 1), 2),
+                "spot": round(display_sum / (right - display_left + 1), 2),
+                "average": average,
             }
         )
     return result
 
 
+def market_open_time(close_time_iso: str | None) -> float | None:
+    close_ts = parse_iso8601_to_epoch(close_time_iso)
+    return None if close_ts is None else close_ts - 15 * 60
+
+
+def market_ticks(rows: list[dict[str, Any]], close_time_iso: str | None) -> list[dict[str, Any]]:
+    market_open_ts = market_open_time(close_time_iso)
+    if market_open_ts is None:
+        return rows
+    return [row for row in rows if (_number(row.get("ts")) or 0) >= market_open_ts]
+
+
 class DashboardState(rx.State):
     asset = "—"
     market = "Waiting for market"
-    runtime_status = "Stopped"
-    runtime_detail = "Choose Paper or Live to begin."
     selected_mode = "paper"
     armed = False
     pnl = "$0.00"
-    pnl_tone = "flat"
 
     cash = "—"
     portfolio = "—"
-    equity = "—"
     positions: list[dict[str, str]] = []
 
     spot = "—"
@@ -117,10 +194,10 @@ class DashboardState(rx.State):
     lean = "—"
     signal = "Model warming up…"
     model_history: list[dict[str, Any]] = []
+    vol_history: list[dict[str, Any]] = []
     price_history: list[dict[str, Any]] = []
     yes_book: list[dict[str, str]] = []
     no_book: list[dict[str, str]] = []
-    book_status = "Connecting"
 
     min_edge = "5"
     max_order = "5"
@@ -133,15 +210,9 @@ class DashboardState(rx.State):
     vol_scale = "1"
     settings_status = ""
 
-    manual_action = "buy"
-    manual_side = "yes"
-    manual_count = "1"
-    manual_quote = "Waiting for a live quote."
-    manual_status = "Start Paper or Live to enable orders."
-    can_submit = False
-
     _snapshot: dict[str, Any] = {}
     _settings: dict[str, Any] = {}
+    _history_market = ""
 
     def _apply_settings(self, settings: dict[str, Any]) -> None:
         self._settings = settings
@@ -156,41 +227,6 @@ class DashboardState(rx.State):
         self.vol_override = "" if override is None else str(override)
         self.vol_scale = str(settings.get("volatility_scale", 1))
 
-    def _refresh_manual_quote(self) -> None:
-        book = self._snapshot.get("orderbook") or {}
-        runtime = self._snapshot.get("trading_runtime") or {}
-        risk = runtime.get("daily_risk") or {}
-        key = f"{self.manual_side}_{'asks' if self.manual_action == 'buy' else 'bids'}"
-        levels = book.get(key) or []
-        quote = levels[0][0] if levels else None
-        pricing = self._snapshot.get("pricing") or {}
-        probability = _number(pricing.get("p_model"))
-        fair = None if probability is None else (probability if self.manual_side == "yes" else 1 - probability) * 100
-        held = next(
-            (
-                item.get("contracts", 0)
-                for item in (self._snapshot.get("account") or {}).get("positions", [])
-                if item.get("market_ticker") == runtime.get("current_market_ticker")
-                and item.get("side") == self.manual_side
-            ),
-            0,
-        )
-        quote_name = "ask" if self.manual_action == "buy" else "bid"
-        self.manual_quote = (
-            f"{self.manual_side.upper()} {quote_name} {_cents(quote)} · fair {_cents(fair)} · held {held:g}"
-            if _number(quote) is not None
-            else f"No current {self.manual_side.upper()} {quote_name}."
-        )
-        self.can_submit = bool(runtime.get("armed") and book.get("initialized") and not risk.get("locked") and quote is not None)
-        if not runtime.get("armed"):
-            self.manual_status = "Start Paper or Live to enable orders."
-        elif risk.get("locked"):
-            self.manual_status = "Daily-loss guard is locked."
-        elif quote is None:
-            self.manual_status = "Waiting for a current quote."
-        else:
-            self.manual_status = "Ready for immediate-or-cancel execution."
-
     def _refresh(self) -> None:
         try:
             state = build_dashboard_state_payload(depth=ORDERBOOK_VIEW_DEPTH)
@@ -202,59 +238,87 @@ class DashboardState(rx.State):
             monologue = state.get("signal_monologue") or {}
             book = state.get("orderbook") or {}
             brti = state.get("brti") or {}
+            ticks = get_brti_ticks(limit=4000)
+            market_info = state.get("market_info") or {}
+            history_ticks = recent_rows(ticks, _PLOT_WINDOW_SECONDS)
+            sigma_fit = realized_vol_from_price_points(
+                extract_valid_index_points(ticks),
+                window_seconds=300,
+                min_samples=8,
+            )
 
             self.asset = str(state.get("asset_display") or state.get("asset") or "—")
-            self.market = str(runtime.get("current_market_ticker") or book.get("market_ticker") or "Waiting for market")
+            market_ticker = str(runtime.get("current_market_ticker") or book.get("market_ticker") or "")
+            self.market = market_ticker or "Waiting for market"
+            if market_ticker and market_ticker != self._history_market:
+                self.model_history = []
+                self._history_market = market_ticker
             self.armed = bool(runtime.get("armed"))
             if runtime.get("execution_mode") in {"paper", "live"}:
                 self.selected_mode = runtime["execution_mode"]
-            self.runtime_status = "Risk locked" if risk.get("locked") else "Trading" if self.armed else "Stopped"
-            self.runtime_detail = str(runtime.get("last_error") or runtime.get("last_reason") or self.runtime_status)
-            drawdown = _number(risk.get("drawdown_cents")) or 0.0
-            self.pnl = _money(drawdown)
-            self.pnl_tone = "positive" if drawdown > 0 else "negative" if drawdown < 0 else "flat"
+            equity_change = _number(risk.get("drawdown_cents")) or 0.0
+            self.pnl = _money(equity_change)
 
             self.cash = _money(account.get("cash_cents"))
             self.portfolio = _money(account.get("portfolio_value_cents"))
-            self.equity = _money(account.get("equity_cents"))
-            self.positions = [
-                {
-                    "side": str(position.get("side") or "—").upper(),
-                    "contracts": f"{float(position.get('contracts') or 0):g}",
-                    "average": _cents(position.get("avg_entry_cents")),
-                    "exposure": _money(position.get("market_exposure_cents")),
-                    "realized": _money(position.get("realized_pnl_cents")),
-                }
-                for position in account.get("positions") or []
-            ]
+            self.positions = _position_rows(account, book, market_ticker)
 
             spot = _number(brti.get("brti"))
             strike = _number(pricing.get("strike_usd") or state.get("suggested_strike"))
             self.spot = f"${spot:,.2f}" if spot is not None else "—"
             self.strike = f"${strike:,.0f}" if strike is not None else "—"
             self.expires = _duration(pricing.get("seconds_to_expiry"))
-            self.volatility = _percent(pricing.get("sigma_annual"), ratio=True)
+            self.volatility = _percent(sigma_fit, ratio=True)
             self.probability = _percent(pricing.get("p_model_pct")) if pricing.get("ready") else "—"
             self.implied = _percent(monologue.get("market_implied_probability"), ratio=True)
             self.edge = _cents(monologue.get("best_edge_cents"))
             self.lean = str(monologue.get("lean_side") or "—").upper()
-            self.signal = str(monologue.get("action_intent") or "Model evaluating market…")
+            self.signal = str(monologue.get("action_intent") or "") if self.armed else ""
             probability = _number(pricing.get("p_model_pct"))
+            market_probability = _number(monologue.get("market_implied_probability"))
+            history_ts = datetime.now().timestamp()
+            now = datetime.fromtimestamp(history_ts).strftime("%H:%M:%S")
             if pricing.get("ready") and probability is not None:
-                point = {"time": datetime.now().strftime("%H:%M:%S"), "probability": round(probability, 2)}
+                point = {
+                    "ts": history_ts,
+                    "time": now,
+                    "model": round(probability, 2),
+                    "market": (
+                        round(market_probability * 100, 2)
+                        if market_probability is not None
+                        else None
+                    ),
+                }
                 if not self.model_history or self.model_history[-1] != point:
-                    self.model_history = [*self.model_history[-179:], point]
+                    self.model_history = recent_rows(
+                        [*self.model_history, point],
+                        _PLOT_WINDOW_SECONDS,
+                        history_ts,
+                    )
+            sigma = _number(sigma_fit)
+            if sigma is not None:
+                point = {"ts": history_ts, "time": now, "volatility": round(sigma * 100, 2)}
+                if not self.vol_history or self.vol_history[-1] != point:
+                    self.vol_history = recent_rows(
+                        [*self.vol_history, point],
+                        _PLOT_WINDOW_SECONDS,
+                        history_ts,
+                    )
             window = int(state.get("settlement_window_seconds") or 60)
-            self.price_history = moving_average(get_brti_ticks(limit=200), window)
+            self.price_history = [
+                {**point, "strike": strike}
+                for point in moving_average(
+                    history_ticks,
+                    window,
+                    average_start_ts=market_open_time(market_info.get("close_time")),
+                )
+            ]
             self.yes_book = _book_rows(book, "yes")
             self.no_book = _book_rows(book, "no")
-            self.book_status = "Live depth" if book.get("initialized") else "Waiting for bootstrap"
             if not self._settings:
                 self._apply_settings(state.get("trading_settings") or {})
-            self._refresh_manual_quote()
         except Exception as exc:
-            self.runtime_status = "Disconnected"
-            self.runtime_detail = str(exc)
+            self.signal = str(exc)
 
     @rx.event
     def load(self) -> None:
@@ -271,8 +335,8 @@ class DashboardState(rx.State):
 
     def _control(self, operation: str) -> None:
         try:
-            result = control_trading(operation, self.selected_mode if operation == "start" else "")
-            self.settings_status = f"Trading {result.get('status', operation)}."
+            control_trading(operation, self.selected_mode if operation == "start" else "")
+            self.settings_status = ""
         except (ValueError, RuntimeError) as exc:
             self.settings_status = str(exc)
         self._refresh()
@@ -310,14 +374,14 @@ class DashboardState(rx.State):
             if errors:
                 raise ValueError(" · ".join(errors))
             self._apply_settings(settings)
-            self.settings_status = "Settings saved."
+            self.settings_status = "Settings applied."
         except (TypeError, ValueError) as exc:
             self.settings_status = str(exc)
 
     @rx.event
     def reset_settings(self) -> None:
         self._apply_settings(reset_trading_settings())
-        self.settings_status = "Conservative defaults restored."
+        self.settings_status = "Defaults restored."
 
     @rx.event
     def set_min_edge(self, value: str) -> None:
@@ -355,37 +419,9 @@ class DashboardState(rx.State):
     def set_vol_scale(self, value: str) -> None:
         self.vol_scale = value
 
-    @rx.event
-    def set_manual_count(self, value: str) -> None:
-        self.manual_count = value
-
-    @rx.event
-    def choose_action(self, value: str) -> None:
-        self.manual_action = value
-        self._refresh_manual_quote()
-
-    @rx.event
-    def choose_side(self, value: str) -> None:
-        self.manual_side = value
-        self._refresh_manual_quote()
-
-    @rx.event
-    def submit_order(self) -> None:
-        try:
-            result = submit_manual_order(
-                side=self.manual_side,
-                action=self.manual_action,
-                count=self.manual_count,
-            )
-            self.manual_status = f"Order {result.get('status', 'submitted')}."
-        except (ValueError, RuntimeError) as exc:
-            self.manual_status = str(exc)
-        self._refresh()
-
-
-def _panel_header(kicker: str, title: str, trailing: rx.Component | None = None) -> rx.Component:
+def _panel_header(title: str, trailing: rx.Component | None = None) -> rx.Component:
     return rx.hstack(
-        rx.box(rx.text(kicker, class_name="kicker"), rx.heading(title, as_="h2")),
+        rx.heading(title, as_="h2"),
         trailing or rx.fragment(),
         class_name="panel-header",
     )
@@ -404,7 +440,7 @@ def _book_row(row: dict[str, Any]) -> rx.Component:
         rx.el.td(rx.text(row["side"], class_name=row["tone"])),
         rx.el.td(row["price"]),
         rx.el.td(
-            rx.box(class_name="depth-fill", width=row["depth"]),
+            rx.box(class_name=f"depth-fill {row['tone']}", width=row["depth"]),
             rx.text(row["size"], class_name="depth-value"),
             class_name="depth-cell",
         ),
@@ -413,11 +449,14 @@ def _book_row(row: dict[str, Any]) -> rx.Component:
 
 def _book(title: str, rows: Any, tone: str) -> rx.Component:
     return rx.box(
-        rx.hstack(rx.heading(title, as_="h3"), rx.text("PRICE / SIZE"), class_name=f"book-title {tone}"),
-        rx.el.table(
-            rx.el.thead(rx.el.tr(rx.el.th("Side"), rx.el.th("Price"), rx.el.th("Size"))),
-            rx.el.tbody(rx.foreach(rows, _book_row)),
-            class_name="data-table book-table",
+        rx.hstack(rx.heading(title, as_="h3"), class_name=f"book-title {tone}"),
+        rx.box(
+            rx.el.table(
+                rx.el.thead(rx.el.tr(rx.el.th("Side"), rx.el.th("Price"), rx.el.th("Size"))),
+                rx.el.tbody(rx.foreach(rows, _book_row)),
+                class_name="data-table book-table",
+            ),
+            class_name="book-scroll",
         ),
         class_name="book-side",
     )
@@ -427,9 +466,9 @@ def _position_row(position: dict[str, Any]) -> rx.Component:
     return rx.el.tr(
         rx.el.td(position["side"]),
         rx.el.td(position["contracts"]),
-        rx.el.td(position["average"]),
-        rx.el.td(position["exposure"]),
-        rx.el.td(position["realized"]),
+        rx.el.td(position["cost_basis"]),
+        rx.el.td(position["cost"]),
+        rx.el.td(position["unrealized_pnl"]),
     )
 
 
@@ -443,15 +482,15 @@ def _field(label: str, value: Any, handler: Any, **props: Any) -> rx.Component:
 
 def _chart(data: Any, lines: list[rx.Component], *, domain: list[int] | None = None) -> rx.Component:
     return rx.recharts.line_chart(
-        rx.recharts.cartesian_grid(stroke="#253137", stroke_dasharray="2 5", vertical=False),
+        rx.recharts.cartesian_grid(stroke="#252e37", stroke_dasharray="2 5", vertical=False),
         rx.recharts.x_axis(data_key="time", axis_line=False, tick_line=False, min_tick_gap=44),
         rx.recharts.y_axis(domain=domain or ["auto", "auto"], axis_line=False, tick_line=False, width=54),
         rx.recharts.graphing_tooltip(),
         *lines,
         data=data,
-        height=230,
+        height="100%",
         width="100%",
-        margin={"top": 10, "right": 12, "bottom": 0, "left": 0},
+        margin={"top": 8, "right": 10, "bottom": 0, "left": 0},
     )
 
 
@@ -460,18 +499,14 @@ def index() -> rx.Component:
         rx.moment(interval=1000, on_change=DashboardState.refresh.temporal, display="none"),
         rx.box(
             rx.el.header(
-                rx.box(
-                    rx.text("KALSHI / 15 MINUTE CRYPTO", class_name="eyebrow"),
-                    rx.heading("Operator Console", as_="h1"),
-                ),
+                rx.heading("Autotrader", as_="h1"),
                 rx.hstack(
                     _metric("Asset", DashboardState.asset),
                     _metric("Session P&L", DashboardState.pnl),
-                    _metric("Status", DashboardState.runtime_status),
                     class_name="session-strip",
                 ),
                 rx.hstack(
-                    rx.button("Paper", on_click=lambda: DashboardState.choose_mode("paper"), class_name=rx.cond(DashboardState.selected_mode == "paper", "mode active", "mode")),
+                    rx.button("Sim", on_click=lambda: DashboardState.choose_mode("paper"), class_name=rx.cond(DashboardState.selected_mode == "paper", "mode active", "mode")),
                     rx.button("Live", on_click=lambda: DashboardState.choose_mode("live"), class_name=rx.cond(DashboardState.selected_mode == "live", "mode active live", "mode")),
                     rx.button("Start", on_click=DashboardState.start, disabled=DashboardState.armed, class_name="button start"),
                     rx.button("Stop", on_click=DashboardState.stop, disabled=~DashboardState.armed, class_name="button stop"),
@@ -482,17 +517,16 @@ def index() -> rx.Component:
             ),
             rx.el.main(
                 rx.box(
-                    _panel_header("ACCOUNT", "Positions", rx.text(DashboardState.runtime_detail, class_name="status-note")),
+                    _panel_header("Position"),
                     rx.box(
                         rx.hstack(
                             _metric("Cash", DashboardState.cash),
-                            _metric("Portfolio", DashboardState.portfolio),
-                            _metric("Equity", DashboardState.equity),
+                            _metric("Position value", DashboardState.portfolio),
                             class_name="account-stats",
                         ),
                         rx.box(
                             rx.el.table(
-                                rx.el.thead(rx.el.tr(rx.el.th("Outcome"), rx.el.th("Contracts"), rx.el.th("Average"), rx.el.th("Exposure"), rx.el.th("Realized"))),
+                                rx.el.thead(rx.el.tr(rx.el.th("Outcome"), rx.el.th("Contracts"), rx.el.th("Cost Basis"), rx.el.th("Cost"), rx.el.th("Unrealized P&L"))),
                                 rx.el.tbody(
                                     rx.cond(
                                         DashboardState.positions.length() > 0,
@@ -510,7 +544,7 @@ def index() -> rx.Component:
                 ),
                 rx.box(
                     rx.box(
-                        _panel_header("DECISION VIEW", "Market & Model", rx.text(DashboardState.market, class_name="market-tag")),
+                        _panel_header("Market & Model", rx.text(DashboardState.market, class_name="market-tag")),
                         rx.box(
                             rx.box(
                                 _metric("Composite index", DashboardState.spot, large=True),
@@ -519,21 +553,26 @@ def index() -> rx.Component:
                             ),
                             rx.box(
                                 rx.hstack(_metric("Model probability", DashboardState.probability, large=True), rx.text(DashboardState.lean, class_name="lean-pill"), class_name="probability-row"),
-                                rx.hstack(_metric("Market implied", DashboardState.implied), _metric("Net edge", DashboardState.edge), class_name="model-metrics"),
-                                rx.text(DashboardState.signal, class_name="signal"),
+                                rx.hstack(_metric("Market Fair", DashboardState.implied), _metric("Edge", DashboardState.edge), class_name="model-metrics"),
+                                rx.cond(DashboardState.signal != "", rx.text(DashboardState.signal, class_name="signal")),
                                 class_name="model-block",
                             ),
                             class_name="market-overview",
                         ),
                         rx.box(
                             rx.box(
-                                rx.heading("Model history", as_="h3"),
-                                _chart(DashboardState.model_history, [rx.recharts.line(data_key="probability", stroke="#7cf4c2", stroke_width=2, dot=False, type_="monotone")], domain=[0, 100]),
+                                rx.heading("Probability", as_="h3"),
+                                _chart(DashboardState.model_history, [rx.recharts.line(data_key="model", name="Model", stroke="#55c2b1", stroke_width=2, dot=False, type_="monotone"), rx.recharts.line(data_key="market", name="Market", stroke="#d8ad63", stroke_width=2, dot=False, type_="monotone")], domain=[0, 100]),
                                 class_name="chart",
                             ),
                             rx.box(
-                                rx.heading("Index / settlement average", as_="h3"),
-                                _chart(DashboardState.price_history, [rx.recharts.line(data_key="spot", stroke="#d8f6ea", stroke_width=2, dot=False, type_="monotone"), rx.recharts.line(data_key="average", stroke="#e9b872", stroke_width=2, dot=False, type_="monotone")]),
+                                rx.heading("Pricing", as_="h3"),
+                                _chart(DashboardState.price_history, [rx.recharts.line(data_key="spot", name="Index", stroke="#d4dae1", stroke_width=2, dot=False, type_="monotone"), rx.recharts.line(data_key="average", name="Settlement average", stroke="#d8ad63", stroke_width=2, dot=False, type_="monotone"), rx.recharts.line(data_key="strike", name="Strike", stroke="#7f8a96", stroke_width=1, stroke_dasharray="4 4", dot=False, type_="linear")]),
+                                class_name="chart",
+                            ),
+                            rx.box(
+                                rx.heading("Volatility", as_="h3"),
+                                _chart(DashboardState.vol_history, [rx.recharts.line(data_key="volatility", stroke="#a999e8", stroke_width=2, dot=False, type_="monotone")]),
                                 class_name="chart",
                             ),
                             class_name="charts",
@@ -541,52 +580,34 @@ def index() -> rx.Component:
                         class_name="surface market-panel",
                     ),
                     rx.box(
-                        _panel_header("LIQUIDITY", "Order book", rx.text(DashboardState.book_status, class_name="status-note")),
+                        _panel_header("Orderbook"),
                         rx.box(_book("YES", DashboardState.yes_book, "yes"), _book("NO", DashboardState.no_book, "no"), class_name="book-grid"),
                         class_name="surface book-panel",
                     ),
                     class_name="workspace",
                 ),
                 rx.box(
-                    _panel_header("EXECUTION", "Operator controls"),
+                    _panel_header("High-Touch Trading"),
                     rx.box(
                         rx.box(
-                            rx.heading("Policy & risk", as_="h3"),
-                            rx.box(
-                                _field("Minimum edge (¢)", DashboardState.min_edge, DashboardState.set_min_edge, step="0.5", min="0.5", max="25"),
-                                _field("Max order", DashboardState.max_order, DashboardState.set_max_order, step="1", min="1", max="25"),
-                                _field("Max position ($)", DashboardState.max_position, DashboardState.set_max_position, step="1", min="1", max="50"),
-                                _field("Daily loss limit ($)", DashboardState.max_daily_loss, DashboardState.set_max_daily_loss, step="1", min="1", max="100"),
-                                _field("Cash buffer ($)", DashboardState.cash_buffer, DashboardState.set_cash_buffer, step="1", min="0"),
-                                _field("Cooldown (s)", DashboardState.cooldown, DashboardState.set_cooldown, step="1", min="1", max="900"),
-                                _field("IOC slippage", DashboardState.slippage, DashboardState.set_slippage, step="1", min="0", max="5"),
-                                _field("Volatility override", DashboardState.vol_override, DashboardState.set_vol_override, step="0.01", min="0.01", max="5", placeholder="Realized"),
-                                _field("Volatility scale", DashboardState.vol_scale, DashboardState.set_vol_scale, step="0.05", min="0.5", max="2"),
-                                class_name="control-grid",
-                            ),
-                            rx.hstack(
-                                rx.button("Save settings", on_click=DashboardState.save_settings, class_name="button primary"),
-                                rx.button("Reset", on_click=DashboardState.reset_settings, class_name="button"),
-                                rx.text(DashboardState.settings_status, class_name="status-note"),
-                                class_name="button-row",
-                            ),
-                            class_name="risk-controls",
+                            _field("Minimum net edge (¢)", DashboardState.min_edge, DashboardState.set_min_edge, step="0.5", min="0.5", max="25"),
+                            _field("Contracts per order", DashboardState.max_order, DashboardState.set_max_order, step="1", min="1", max="25"),
+                            _field("Position cap ($)", DashboardState.max_position, DashboardState.set_max_position, step="1", min="1", max="50"),
+                            _field("Daily loss cap ($)", DashboardState.max_daily_loss, DashboardState.set_max_daily_loss, step="1", min="1", max="100"),
+                            _field("Reserve cash ($)", DashboardState.cash_buffer, DashboardState.set_cash_buffer, step="1", min="0"),
+                            _field("Re-entry cooldown (s)", DashboardState.cooldown, DashboardState.set_cooldown, step="1", min="1", max="900"),
+                            _field("IOC tolerance (ticks)", DashboardState.slippage, DashboardState.set_slippage, step="1", min="0", max="5"),
+                            _field("Annualized volatility override", DashboardState.vol_override, DashboardState.set_vol_override, step="0.01", min="0.01", max="5", placeholder="Realized"),
+                            _field("Volatility adjustment", DashboardState.vol_scale, DashboardState.set_vol_scale, step="0.05", min="0.5", max="2"),
+                            class_name="control-grid",
                         ),
-                        rx.box(
-                            rx.text("DISCRETIONARY", class_name="kicker"),
-                            rx.heading("Manual IOC", as_="h3"),
-                            rx.box(
-                                rx.el.label(rx.text("Action"), rx.select(["buy", "sell"], value=DashboardState.manual_action, on_change=DashboardState.choose_action), class_name="field"),
-                                rx.el.label(rx.text("Outcome"), rx.select(["yes", "no"], value=DashboardState.manual_side, on_change=DashboardState.choose_side), class_name="field"),
-                                _field("Contracts", DashboardState.manual_count, DashboardState.set_manual_count, step="1", min="1"),
-                                class_name="ticket-grid",
-                            ),
-                            rx.text(DashboardState.manual_quote, class_name="quote"),
-                            rx.button("Submit IOC", on_click=DashboardState.submit_order, disabled=~DashboardState.can_submit, class_name="button submit"),
-                            rx.text(DashboardState.manual_status, class_name="status-note"),
-                            class_name="trade-ticket",
+                        rx.hstack(
+                            rx.button("Apply settings", on_click=DashboardState.save_settings, class_name="button primary"),
+                            rx.button("Reset", on_click=DashboardState.reset_settings, class_name="button"),
+                            rx.text(DashboardState.settings_status, class_name="status-note"),
+                            class_name="button-row",
                         ),
-                        class_name="execution-layout",
+                        class_name="risk-controls",
                     ),
                     class_name="surface controls-panel",
                 ),
@@ -611,5 +632,5 @@ async def runtime_lifespan():
 
 
 app = rx.App(stylesheets=["/dashboard.css"])
-app.add_page(index, route="/", title="Kalshi Operator Console", on_load=DashboardState.load)
+app.add_page(index, route="/", title="Autotrader", on_load=DashboardState.load)
 app.register_lifespan_task(runtime_lifespan)
