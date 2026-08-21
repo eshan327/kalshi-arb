@@ -2,10 +2,13 @@
 Order-book microstructure skew for a Kalshi YES contract: run on each orderbook update.
 
 Computes:
-  * **OBI** — order book imbalance from resting bid vs ask depth (top-N levels on the YES book).
-  * **MPP** — mid-price drift: change in YES probability mid over a short lookback, spread-normalized.
+  * **OBI** — order book imbalance from resting bid vs ask depth
+    (top-N levels on the YES book).
+  * **MPP** — mid-price drift: change in YES probability mid over a short
+    lookback, spread-normalized.
 
-Combined via a logistic sigmoid into ``P_book ∈ (0, 1)`` (higher = more upward pressure on YES fair).
+Combined via a logistic sigmoid into ``P_book ∈ (0, 1)``
+(higher = more upward pressure on YES fair).
 """
 
 from __future__ import annotations
@@ -33,7 +36,8 @@ def resting_obi(
     depth: int,
 ) -> float:
     """
-    (V_bid - V_ask) / (V_bid + V_ask) on the YES book (prices in cents, qty = contracts).
+    (V_bid - V_ask) / (V_bid + V_ask) on the YES book.
+    Prices are cents and quantity is contracts.
     """
     if depth <= 0:
         return 0.0
@@ -83,7 +87,8 @@ class BookMicrostructureState:
         self, mid: float, now: float, spread_cents: float
     ) -> float:
         """
-        Mid change vs first snapshot at or after ``now - mpp_window_sec``, normalized by spread.
+        Mid change versus the first snapshot at or after the lookback,
+        normalized by spread.
         """
         self._purge_mids(now)
         target_t = now - self.mpp_window_sec
@@ -140,6 +145,7 @@ def on_live_orderbook_update(book: OrderBook) -> dict[str, Any] | None:
         return None
     yes_bids, yes_asks, _, _ = book.get_orderbook()
     _LAST_P_BOOK = _GLOBAL_MICRO.compute(yes_bids, yes_asks)
+    _LAST_P_BOOK["market_ticker"] = book.market_ticker
     return _LAST_P_BOOK
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 TAKER_FEE_COEFF = 7.0
 
@@ -26,8 +26,7 @@ def taker_fee_cents_per_contract(
     ).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
     notional = price * contracts
     effective_fee = (
-        (notional + trade_fee).quantize(Decimal("1"), rounding=ROUND_CEILING)
-        - notional
+        (notional + trade_fee).quantize(Decimal("1"), rounding=ROUND_CEILING) - notional
         if action == "buy"
         else notional
         - (notional - trade_fee).quantize(Decimal("1"), rounding=ROUND_FLOOR)

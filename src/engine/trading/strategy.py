@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -7,21 +8,12 @@ from typing import Any
 from engine.asian_pricer import prob_collapsed_variance_binary, prob_levy_tw_binary
 from engine.book_microstructure import get_last_p_book_snapshot
 from engine.orderbook import OrderBook
-from engine.trading.fees import (
-    expected_value_cents,
-    quarter_kelly_fraction_binary,
-    taker_fee_cents_per_contract,
-)
+from engine.trading.fees import kelly_fraction_binary, taker_fee_cents_per_contract
 from engine.trading.models import TradeSignal
 from engine.trading.settings import TradingSettings
 
-PROBABILITY_LOWER_BOUND = 0.05
-PROBABILITY_UPPER_BOUND = 0.95
-MAX_POSITION_USD_HARD_CAP = 50.0
-TECHNICAL_WARMUP_SECONDS = 30.0
 ENTRY_CUTOFF_SECONDS_TO_EXPIRY = 20.0
 MAX_ORDERBOOK_AGE_SECONDS = 2.0
-MARGINAL_CREDIT_STEP_CENTS = 0.5
 
 
 def _safe_float(value: Any) -> float | None:
@@ -95,30 +87,51 @@ def _kelly_target_contracts(
     quote_price_cents: float,
     bankroll_cents: int,
     max_position_usd: float,
+    max_position_fraction: float,
+    kelly_scale: float,
     fee_cents: float,
-) -> tuple[int, float, float]:
+) -> tuple[int, float, float, float]:
     all_in_cost = max(0.01, float(quote_price_cents) + max(0.0, float(fee_cents)))
-    kelly_fraction_quarter = quarter_kelly_fraction_binary(
+    scaled_kelly_fraction = max(
+        0.0, min(1.0, float(kelly_scale))
+    ) * kelly_fraction_binary(
         p_win=float(p_win),
         cost_cents=all_in_cost,
     )
 
-    cap_by_kelly = float(max(0, int(bankroll_cents))) * kelly_fraction_quarter
-    cap_by_fixed = min(float(max_position_usd), MAX_POSITION_USD_HARD_CAP) * 100.0
-    notional_cap_cents = max(0.0, min(cap_by_kelly, cap_by_fixed))
+    bankroll = float(max(0, int(bankroll_cents)))
+    cap_by_kelly = bankroll * scaled_kelly_fraction
+    cap_by_bankroll = bankroll * max(0.0, float(max_position_fraction))
+    cap_by_fixed = max(0.0, float(max_position_usd)) * 100.0
+    notional_cap_cents = max(0.0, min(cap_by_kelly, cap_by_bankroll, cap_by_fixed))
     target_contracts = max(0, int(notional_cap_cents // all_in_cost))
-    return target_contracts, kelly_fraction_quarter, all_in_cost
+    return target_contracts, scaled_kelly_fraction, all_in_cost, notional_cap_cents
 
 
-def _credit_target_contracts(
-    *, credit_cents: float, minimum_credit_cents: float
-) -> int:
-    if credit_cents < minimum_credit_cents:
-        return 0
-    return 1 + int(
-        (float(credit_cents) - float(minimum_credit_cents))
-        // MARGINAL_CREDIT_STEP_CENTS
-    )
+def _price_at_or_below(
+    price_cents: float, price_ranges: list[dict[str, Any]] | None = None
+) -> float:
+    target = max(0.01, min(99.99, float(price_cents)))
+    levels: list[float] = []
+    try:
+        for price_range in price_ranges or []:
+            current = Decimal(str(price_range["start"]))
+            end = Decimal(str(price_range["end"]))
+            step = Decimal(str(price_range["step"]))
+            if step <= 0:
+                continue
+            while current <= end and len(levels) < 20_000:
+                cents = float(current * 100)
+                if 0 < cents < 100:
+                    levels.append(cents)
+                current += step
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        levels.clear()
+    if levels:
+        return round(
+            max((level for level in levels if level <= target + 1e-8), default=0.01), 4
+        )
+    return round(max(0.01, math.floor(target + 1e-8)), 4)
 
 
 def _build_sell_signal(
@@ -129,6 +142,7 @@ def _build_sell_signal(
     count: int,
     quote_price_cents: float,
     fair_price_cents: float,
+    fee_cents: float,
     p_model: float,
     reason: str,
     diagnostics: dict[str, Any],
@@ -138,6 +152,8 @@ def _build_sell_signal(
         float(p_model) if normalized_side == "yes" else (1.0 - float(p_model))
     )
     implied_probability = float(quote_price_cents) / 100.0
+    net_exit_cents = float(quote_price_cents) - max(0.0, float(fee_cents))
+    edge_cents = net_exit_cents - float(fair_price_cents)
 
     return TradeSignal(
         ts=float(ts),
@@ -147,9 +163,9 @@ def _build_sell_signal(
         count=max(1, int(count)),
         quote_price_cents=round(float(quote_price_cents), 4),
         fair_price_cents=round(float(fair_price_cents), 6),
-        credit_cents=round(float(fair_price_cents) - float(quote_price_cents), 6),
-        edge_cents=round(float(fair_price_cents) - float(quote_price_cents), 6),
-        edge_probability=round(float(model_side_probability - implied_probability), 8),
+        credit_cents=round(edge_cents, 6),
+        edge_cents=round(edge_cents, 6),
+        edge_probability=round(float(implied_probability - model_side_probability), 8),
         confidence=round(abs(float(p_model) - 0.5), 8),
         model_probability=round(float(p_model), 8),
         market_implied_probability=round(float(implied_probability), 8),
@@ -241,12 +257,6 @@ def build_trade_signal(
     if isinstance(runtime_uptime_seconds, (int, float)):
         uptime = max(0.0, float(runtime_uptime_seconds))
         diagnostics["runtime_uptime_seconds"] = round(float(uptime), 6)
-        diagnostics["technical_warmup_seconds"] = float(TECHNICAL_WARMUP_SECONDS)
-        if uptime < float(TECHNICAL_WARMUP_SECONDS):
-            diagnostics["technical_warmup_remaining_seconds"] = round(
-                float(TECHNICAL_WARMUP_SECONDS) - float(uptime),
-                6,
-            )
 
     if not isinstance(pricing, dict) or not bool(pricing.get("ready")):
         return None, "pricing_not_ready", diagnostics
@@ -254,6 +264,9 @@ def build_trade_signal(
     p_model_value = _safe_float(pricing.get("p_model"))
     if p_model_value is None or not (0.0 < p_model_value < 1.0):
         return None, "invalid_model_probability", diagnostics
+
+    if book is None or book.market_ticker != market_ticker:
+        return None, "orderbook_market_mismatch", diagnostics
 
     yes_bid, yes_ask, no_bid, no_ask = _best_quotes(book)
     diagnostics.update(
@@ -305,6 +318,21 @@ def build_trade_signal(
     p_book_snapshot = get_last_p_book_snapshot() or {}
     p_book = _safe_float(p_book_snapshot.get("p_book"))
     diagnostics["p_book"] = p_book
+    diagnostics["p_book_obi"] = _safe_float(p_book_snapshot.get("obi"))
+    diagnostics["p_book_mpp"] = _safe_float(p_book_snapshot.get("mpp"))
+
+    yes_levels, yes_asks, _, no_asks = book.get_orderbook_top_n(1)
+    if yes_levels and yes_asks:
+        bid_price, bid_size = yes_levels[0]
+        ask_price, ask_size = yes_asks[0]
+        total_size = float(bid_size) + float(ask_size)
+        diagnostics["market_microprice"] = (
+            (float(ask_price) * float(bid_size) + float(bid_price) * float(ask_size))
+            / total_size
+            / 100.0
+            if total_size > 0
+            else None
+        )
 
     sides: tuple[dict[str, Any], ...] = (
         {
@@ -345,6 +373,7 @@ def build_trade_signal(
                 price_ranges,
             ),
             fair_price_cents=float(side["fair"]),
+            fee_cents=float(side.get("exit_fee") or 0.0),
             p_model=float(p_model_value),
             reason=reason,
             diagnostics=diagnostics,
@@ -392,6 +421,7 @@ def build_trade_signal(
             unrealized=unrealized,
             hold_edge=hold_edge,
             net_exit=net_exit,
+            exit_fee=exit_fee,
         )
         diagnostics[f"{name}_deployed_cents"] = round(deployed, 6)
         diagnostics[f"{name}_unrealized_cents"] = (
@@ -420,11 +450,14 @@ def build_trade_signal(
                 trigger=f"{name}_bid_above_fair",
             )
 
-    if diagnostics.get("technical_warmup_remaining_seconds") is not None:
-        return None, "technical_warmup", diagnostics
-
     if settings.use_p_book_hard_gate:
-        if p_book is None:
+        p_book_ts = _safe_float(p_book_snapshot.get("ts"))
+        if (
+            p_book is None
+            or p_book_snapshot.get("market_ticker") != market_ticker
+            or p_book_ts is None
+            or ts - p_book_ts > MAX_ORDERBOOK_AGE_SECONDS
+        ):
             return None, "p_book_unavailable", diagnostics
         divergence = abs(float(p_model_value) - float(p_book))
         diagnostics["p_book_divergence"] = divergence
@@ -449,22 +482,19 @@ def build_trade_signal(
         and required_future_avg <= 0
     )
     diagnostics["deterministic_outcome"] = deterministic_outcome
-    if not deterministic_outcome and not (
-        PROBABILITY_LOWER_BOUND <= market_probability <= PROBABILITY_UPPER_BOUND
-    ):
-        diagnostics.update(
-            {
-                "probability_lower_bound": PROBABILITY_LOWER_BOUND,
-                "probability_upper_bound": PROBABILITY_UPPER_BOUND,
-            }
-        )
-        return None, "market_probability_out_of_bounds", diagnostics
 
     if bool(pricing.get("vol_is_fallback")):
         return None, "volatility_fallback", diagnostics
 
     seconds_to_expiry = _safe_float(pricing.get("seconds_to_expiry"))
-    if seconds_to_expiry is None or seconds_to_expiry < ENTRY_CUTOFF_SECONDS_TO_EXPIRY:
+    if (
+        seconds_to_expiry is None
+        or seconds_to_expiry <= 0
+        or (
+            seconds_to_expiry < ENTRY_CUTOFF_SECONDS_TO_EXPIRY
+            and not deterministic_outcome
+        )
+    ):
         return None, "entry_cutoff", diagnostics
 
     diagnostics["fee_type"] = fee_type
@@ -472,135 +502,168 @@ def build_trade_signal(
     if not fee_policy_ready:
         return None, "fee_policy_unavailable", diagnostics
 
-    yes_limit = slipped_price_cents(
-        yes_ask, settings.slippage_ticks, "up", price_ranges
+    required_taker_edge = (
+        float(settings.deterministic_min_edge_cents)
+        if deterministic_outcome
+        else float(settings.min_edge_cents)
     )
-    no_limit = slipped_price_cents(no_ask, settings.slippage_ticks, "up", price_ranges)
-    edge_yes = expected_value_cents(
-        p_win=p_model_value,
-        price_cents=yes_limit,
-        fee_multiplier=fee_multiplier,
-    )
-    edge_no = expected_value_cents(
-        p_win=1.0 - p_model_value,
-        price_cents=no_limit,
-        fee_multiplier=fee_multiplier,
-    )
-    diagnostics["edge_yes_cents"] = round(edge_yes, 6)
-    diagnostics["edge_no_cents"] = round(edge_no, 6)
-    diagnostics["credit_yes_cents"] = round(fair_yes_cents - yes_limit, 6)
-    diagnostics["credit_no_cents"] = round(fair_no_cents - no_limit, 6)
+    diagnostics["required_taker_edge_cents"] = required_taker_edge
+    diagnostics["kelly_scale"] = float(settings.kelly_fraction)
+    diagnostics["max_position_fraction"] = float(settings.max_position_fraction)
 
-    if edge_yes >= edge_no:
-        side = "yes"
-        ask = yes_limit
-        model_side_prob = float(p_model_value)
-        edge_cents = float(edge_yes)
-        credit_cents = fair_yes_cents - float(ask)
-        fair_price_cents = fair_yes_cents
-        current_contracts = int(open_yes_contracts)
-        current_avg_entry = float(yes_avg_entry)
-    else:
-        side = "no"
-        ask = no_limit
-        model_side_prob = 1.0 - float(p_model_value)
-        edge_cents = float(edge_no)
-        credit_cents = fair_no_cents - float(ask)
-        fair_price_cents = fair_no_cents
-        current_contracts = int(open_no_contracts)
-        current_avg_entry = float(no_avg_entry)
+    side_inputs = [
+        {
+            "name": "yes",
+            "bid": yes_bid,
+            "ask": yes_ask,
+            "top_size": int(yes_asks[0][1]) if yes_asks else 0,
+            "fair": fair_yes_cents,
+            "probability": float(p_model_value),
+            "contracts": int(open_yes_contracts),
+            "avg_entry": float(yes_avg_entry),
+        },
+        {
+            "name": "no",
+            "bid": no_bid,
+            "ask": no_ask,
+            "top_size": int(no_asks[0][1]) if no_asks else 0,
+            "fair": fair_no_cents,
+            "probability": 1.0 - float(p_model_value),
+            "contracts": int(open_no_contracts),
+            "avg_entry": float(no_avg_entry),
+        },
+    ]
+    for candidate in side_inputs:
+        slipped_limit = slipped_price_cents(
+            float(candidate["ask"]), settings.slippage_ticks, "up", price_ranges
+        )
+        limit_fee = taker_fee_cents_per_contract(
+            slipped_limit, fee_multiplier=float(fee_multiplier)
+        )
+        maximum_limit = _price_at_or_below(
+            float(candidate["fair"]) - required_taker_edge - limit_fee,
+            price_ranges,
+        )
+        candidate["taker_limit"] = min(slipped_limit, maximum_limit)
+        candidate["taker_fee"] = taker_fee_cents_per_contract(
+            float(candidate["ask"]), fee_multiplier=float(fee_multiplier)
+        )
+        candidate["taker_edge"] = (
+            float(candidate["fair"])
+            - float(candidate["ask"])
+            - float(candidate["taker_fee"])
+        )
+        name = str(candidate["name"])
+        diagnostics[f"edge_{name}_cents"] = round(float(candidate["taker_edge"]), 6)
+        diagnostics[f"credit_{name}_cents"] = round(
+            float(candidate["fair"]) - float(candidate["ask"]), 6
+        )
 
-    edge_probability = model_side_prob - (float(ask) / 100.0)
-    confidence = abs(float(p_model_value) - 0.5)
+    def allocation(candidate: dict[str, Any], fee_cents: float) -> dict[str, Any]:
+        target, scaled_kelly, all_in_cost, notional_cap = _kelly_target_contracts(
+            p_win=float(candidate["probability"]),
+            quote_price_cents=float(candidate["price"]),
+            bankroll_cents=max(0, int(bankroll_cents)),
+            max_position_usd=float(settings.max_position_usd),
+            max_position_fraction=float(settings.max_position_fraction),
+            kelly_scale=float(settings.kelly_fraction),
+            fee_cents=fee_cents,
+        )
+        current = int(candidate["contracts"])
+        current_notional = current * float(candidate["avg_entry"])
+        headroom = max(0.0, notional_cap - current_notional)
+        max_by_notional = int(headroom // all_in_cost)
+        max_by_cash = (
+            int(available_cash_cents // all_in_cost)
+            if isinstance(available_cash_cents, int) and available_cash_cents >= 0
+            else None
+        )
+        count = min(
+            int(settings.max_order_contracts),
+            max(0, target - current),
+            max_by_notional,
+            max_by_cash
+            if max_by_cash is not None
+            else int(settings.max_order_contracts),
+        )
+        return {
+            "count": count,
+            "target": target,
+            "scaled_kelly": scaled_kelly,
+            "all_in_cost": all_in_cost,
+            "notional_cap": notional_cap,
+            "current_notional": current_notional,
+            "headroom": headroom,
+            "max_by_notional": max_by_notional,
+            "max_by_cash": max_by_cash,
+        }
 
-    if edge_cents < float(settings.min_edge_cents):
-        return None, "edge_below_threshold", diagnostics
+    def record_allocation(candidate: dict[str, Any], result: dict[str, Any]) -> None:
+        target = int(result["target"])
+        signed_target = target if candidate["name"] == "yes" else -target
+        diagnostics.update(
+            {
+                "target_side": str(candidate["name"]),
+                "credit_cents": round(
+                    float(candidate["fair"]) - float(candidate["price"]), 6
+                ),
+                "target_position_contracts": signed_target,
+                "current_signed_position_contracts": int(open_yes_contracts)
+                - int(open_no_contracts),
+                "scaled_kelly_fraction": round(float(result["scaled_kelly"]), 8),
+                "all_in_cost_cents": round(float(result["all_in_cost"]), 6),
+                "kelly_target_contracts": target,
+                "current_contracts": int(candidate["contracts"]),
+                "clip_contracts": int(result["count"]),
+                "position_notional_cap_cents": round(float(result["notional_cap"]), 6),
+                "current_side_notional_cents": round(
+                    float(result["current_notional"]), 6
+                ),
+                "remaining_notional_headroom_cents": round(
+                    float(result["headroom"]), 6
+                ),
+                "max_by_notional_cap": int(result["max_by_notional"]),
+                "max_by_cash": result["max_by_cash"],
+            }
+        )
 
-    fee_cents = taker_fee_cents_per_contract(ask, fee_multiplier=float(fee_multiplier))
-    target_contracts, kelly_fraction_quarter, all_in_cost = _kelly_target_contracts(
-        p_win=model_side_prob,
-        quote_price_cents=ask,
-        bankroll_cents=max(0, int(bankroll_cents)),
-        max_position_usd=float(settings.max_position_usd),
-        fee_cents=fee_cents,
-    )
+    best_taker = max(side_inputs, key=lambda candidate: float(candidate["taker_edge"]))
+    if float(best_taker["taker_edge"]) >= required_taker_edge and float(
+        best_taker["taker_limit"]
+    ) >= float(best_taker["ask"]):
+        best_taker["price"] = float(best_taker["ask"])
+        result = allocation(best_taker, float(best_taker["taker_fee"]))
+        result["count"] = min(int(result["count"]), int(best_taker["top_size"]))
+        diagnostics["max_by_top_of_book"] = int(best_taker["top_size"])
+        record_allocation(best_taker, result)
+        if int(result["count"]) <= 0:
+            if int(result["max_by_notional"]) <= 0:
+                return None, "position_notional_cap_reached", diagnostics
+            if result["max_by_cash"] is not None and int(result["max_by_cash"]) <= 0:
+                return None, "insufficient_available_cash", diagnostics
+            return None, "at_target_allocation", diagnostics
+        signal = TradeSignal(
+            ts=ts,
+            market_ticker=str(market_ticker),
+            side=str(best_taker["name"]),
+            action="buy",
+            count=int(result["count"]),
+            quote_price_cents=round(float(best_taker["taker_limit"]), 4),
+            fair_price_cents=round(float(best_taker["fair"]), 6),
+            credit_cents=round(
+                float(best_taker["fair"]) - float(best_taker["price"]), 6
+            ),
+            edge_cents=round(float(best_taker["taker_edge"]), 6),
+            edge_probability=round(
+                float(best_taker["probability"]) - float(best_taker["price"]) / 100.0,
+                8,
+            ),
+            confidence=round(abs(float(p_model_value) - 0.5), 8),
+            model_probability=round(float(p_model_value), 8),
+            market_implied_probability=round(float(best_taker["price"]) / 100.0, 8),
+            reason="ev_signal_ready",
+            diagnostics=diagnostics,
+        )
+        return signal, signal.reason, diagnostics
 
-    remaining_to_target = max(0, int(target_contracts) - int(current_contracts))
-    minimum_credit_cents = float(settings.min_edge_cents) + fee_cents
-    credit_target_contracts = _credit_target_contracts(
-        credit_cents=credit_cents,
-        minimum_credit_cents=minimum_credit_cents,
-    )
-    remaining_by_credit = max(0, int(credit_target_contracts) - int(current_contracts))
-    count = min(
-        int(settings.max_order_contracts),
-        int(remaining_to_target),
-        int(remaining_by_credit),
-    )
-
-    notional_cap_cents = (
-        min(float(settings.max_position_usd), float(MAX_POSITION_USD_HARD_CAP)) * 100.0
-    )
-    current_side_notional_cents = float(current_contracts) * float(current_avg_entry)
-    remaining_notional_headroom_cents = max(
-        0.0, float(notional_cap_cents) - float(current_side_notional_cents)
-    )
-    max_by_notional_cap = int(remaining_notional_headroom_cents // all_in_cost)
-    count = min(int(count), int(max_by_notional_cap))
-
-    max_by_cash: int | None = None
-    if isinstance(available_cash_cents, int) and available_cash_cents >= 0:
-        max_by_cash = int(available_cash_cents // all_in_cost)
-        count = min(int(count), int(max_by_cash))
-
-    diagnostics["kelly_fraction_quarter"] = round(float(kelly_fraction_quarter), 8)
-    diagnostics["all_in_cost_cents"] = round(float(all_in_cost), 6)
-    diagnostics["kelly_target_contracts"] = int(target_contracts)
-    diagnostics["credit_cents"] = round(float(credit_cents), 6)
-    diagnostics["minimum_credit_cents"] = round(float(minimum_credit_cents), 6)
-    diagnostics["marginal_credit_step_cents"] = MARGINAL_CREDIT_STEP_CENTS
-    diagnostics["credit_target_contracts"] = int(credit_target_contracts)
-    diagnostics["remaining_by_credit"] = int(remaining_by_credit)
-    diagnostics["next_contract_required_credit_cents"] = round(
-        minimum_credit_cents + current_contracts * MARGINAL_CREDIT_STEP_CENTS,
-        6,
-    )
-    diagnostics["current_contracts"] = int(current_contracts)
-    diagnostics["clip_contracts"] = int(count)
-    diagnostics["position_notional_cap_cents"] = round(float(notional_cap_cents), 6)
-    diagnostics["current_side_notional_cents"] = round(
-        float(current_side_notional_cents), 6
-    )
-    diagnostics["remaining_notional_headroom_cents"] = round(
-        float(remaining_notional_headroom_cents), 6
-    )
-    diagnostics["max_by_notional_cap"] = int(max_by_notional_cap)
-    diagnostics["max_by_cash"] = None if max_by_cash is None else int(max_by_cash)
-
-    if count <= 0:
-        if max_by_notional_cap <= 0:
-            return None, "position_notional_cap_reached", diagnostics
-        if max_by_cash is not None and max_by_cash <= 0:
-            return None, "insufficient_available_cash", diagnostics
-        if remaining_by_credit <= 0:
-            return None, "credit_size_target_reached", diagnostics
-        return None, "at_target_allocation", diagnostics
-
-    signal = TradeSignal(
-        ts=ts,
-        market_ticker=str(market_ticker),
-        side=side,
-        action="buy",
-        count=int(count),
-        quote_price_cents=round(float(ask), 4),
-        fair_price_cents=round(float(fair_price_cents), 6),
-        credit_cents=round(float(credit_cents), 6),
-        edge_cents=round(float(edge_cents), 6),
-        edge_probability=round(float(edge_probability), 8),
-        confidence=round(float(confidence), 8),
-        model_probability=round(float(p_model_value), 8),
-        market_implied_probability=round(float(ask) / 100.0, 8),
-        reason="ev_signal_ready",
-        diagnostics=diagnostics,
-    )
-    return signal, signal.reason, diagnostics
+    return None, "edge_below_threshold", diagnostics

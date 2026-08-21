@@ -49,10 +49,9 @@ only a failed recovery reconnects the socket.
 Set `KALSHI_PAPER_STARTING_CASH_CENTS` to change the starting balance. The paper
 account resets when the process restarts.
 
-**Start Live** sends IOC orders to the Kalshi environment selected by
-`KALSHI_ENV`: `demo` uses Kalshi demo and `prod` uses production. **Stop**
-disables order entry. Switching from live to paper also cancels this bot's
-resting live orders.
+**Start Live** sends IOC orders to the Kalshi environment selected by `KALSHI_ENV`:
+`demo` uses Kalshi demo and `prod` uses production. **Stop** disables order
+entry. Switching from live to paper also cancels any of this bot's live orders.
 
 ## Operating workflow
 
@@ -83,27 +82,32 @@ daily-loss guard. They do not disable the systematic engine.
 The model estimates the probability that Kalshi's final-minute settlement
 average finishes at or above the rounded contract strike. When the opening
 reference is available, the synthetic index is basis-anchored to it; a
-mid-market start uses the live index unadjusted. Before buying, model value must
-clear:
+mid-market start uses the live index unadjusted. Before taking liquidity, model
+value must clear:
 
 - the current marketable IOC price;
 - the current Kalshi taker fee;
 - configured slippage; and
 - the configured minimum net edge.
 
-Sizing is the smallest of several ceilings:
+The desired outcome-side position is the smallest of several ceilings:
 
-- fee-inclusive quarter-Kelly on current account equity;
+- configurable fractional Kelly on current account equity;
+- a percentage-of-equity cap for the active market;
 - available cash after the cash buffer;
 - max order contracts;
-- max position dollars; and
-- an edge ladder where every additional held contract requires another 0.5¢ of
-  credit.
+- displayed top-of-book quantity; and
+- an absolute position-dollar circuit breaker.
 
-Entries also require a 30-second warm-up after each market change, an orderbook no more than two
-seconds old, at least two clean index constituents, non-fallback volatility,
-model probability between 5% and 95%, a known fee policy, and at least 20
-seconds to expiry. Optional model/orderbook agreement can hard-gate entries.
+The systematic strategy is deliberately taker-only and never posts resting
+quotes.
+
+Entries require a current-market orderbook no more than two seconds old, at
+least two clean index constituents, non-fallback volatility, a known fee
+policy, and at least 20 seconds to expiry. A mathematically locked outcome may
+trade inside the cutoff through its lower-edge path. Rolling index and
+volatility history are available immediately after rollover; contract-specific
+book features reset. Optional model/orderbook agreement can hard-gate entries.
 
 Existing positions exit when the executable bid, after slippage and fees,
 exceeds model fair value by the configured edge. Entry gates never block this
@@ -125,9 +129,12 @@ tracking continue.
 
 ## Default controls
 
-- Minimum net edge: 5¢ per contract
-- Max order: 5 contracts
-- Max position: $10 per outcome side
+- Minimum taker edge: 2¢ per contract
+- Locked-outcome edge: 0.5¢ per contract
+- Kelly fraction: 0.25
+- Active-market bankroll cap: 5%
+- Max order: 10 contracts
+- Absolute position circuit breaker: $50 per outcome side
 - Max daily equity loss: $10
 - Cash buffer: $25
 - Entry cooldown: 5 seconds

@@ -58,6 +58,7 @@ _armed = False
 _last_submission_ts = 0.0
 _last_market_ticker: str | None = None
 _risk_states: dict[str, dict[str, Any]] = {}
+_session_start_equities: dict[str, int] = {}
 _paper_account = PaperAccount(PAPER_STARTING_CASH_CENTS)
 
 _runtime_state: dict[str, Any] = {
@@ -155,12 +156,11 @@ def _fetch_account_snapshot(execution_mode: str | None = None) -> dict[str, Any]
         if (position := _position_payload(raw)) is not None
     ]
     cash_cents = int(balance["balance"])
-    # Kalshi portfolio_value is total account equity, including available balance.
-    equity_cents = int(balance["portfolio_value"])
+    portfolio_value_cents = int(balance["portfolio_value"])
     return {
         "cash_cents": cash_cents,
-        "portfolio_value_cents": equity_cents - cash_cents,
-        "equity_cents": equity_cents,
+        "portfolio_value_cents": portfolio_value_cents,
+        "equity_cents": cash_cents + portfolio_value_cents,
         "positions": positions,
         "updated_ts": int(balance["updated_ts"]),
         "refreshed_ts": time.time(),
@@ -200,12 +200,18 @@ def _risk_state_path(execution_mode: str) -> Path:
 
 
 def _sync_daily_risk(
-    equity_cents: int, max_daily_loss_usd: float, execution_mode: str | None = None
+    equity_cents: int,
+    max_daily_loss_usd: float,
+    execution_mode: str | None = None,
+    *,
+    reset_session: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     mode = execution_mode or _get_execution_mode()
     if mode not in {"paper", "live"}:
         raise RuntimeError("Choose Sim or Live first.")
     with _lock:
+        if reset_session or mode not in _session_start_equities:
+            _session_start_equities[mode] = int(equity_cents)
         day = _risk_day()
         risk_state = _risk_states.get(mode) or _load_risk_state(mode)
         if risk_state.get("day") != day:
@@ -231,6 +237,7 @@ def _sync_daily_risk(
             **risk_state,
             "current_equity_cents": int(equity_cents),
             "drawdown_cents": int(drawdown),
+            "session_pnl_cents": int(equity_cents) - _session_start_equities[mode],
             "max_daily_loss_cents": round(float(max_daily_loss_usd) * 100),
         }
         return snapshot, bool(snapshot["locked"] and not was_locked)
@@ -306,7 +313,6 @@ def _monologue(
 
     reason_text = {
         "at_target_allocation": "target allocation reached",
-        "credit_size_target_reached": "edge supports no additional size",
         "edge_below_threshold": "edge below minimum",
         "entry_cutoff": "too close to settlement",
         "ev_signal_ready": "positive expected value",
@@ -314,15 +320,14 @@ def _monologue(
         "insufficient_available_cash": "insufficient available cash",
         "invalid_model_probability": "model probability unavailable",
         "missing_best_quotes": "best bid or ask unavailable",
-        "market_probability_out_of_bounds": "market midpoint outside tradable range",
         "market_probability_unavailable": "market midpoint unavailable",
+        "orderbook_market_mismatch": "order book is rotating",
         "p_book_direction_conflict": "model and order book disagree",
         "p_book_divergence_high": "model and order book differ too much",
         "p_book_unavailable": "order-book signal unavailable",
         "position_notional_cap_reached": "position cap reached",
         "pricing_not_ready": "model warming up",
         "stale_orderbook": "order book is stale",
-        "technical_warmup": "technical warm-up",
         "volatility_fallback": "waiting for realized volatility",
     }.get(reason, reason.replace("_", " "))
 
@@ -534,10 +539,11 @@ def submit_manual_order(*, side: str, action: str, count: Any) -> dict[str, Any]
                 if position is not None
                 else 0.0
             )
-            if (
-                current_notional + quantity * limit_price
-                > settings.max_position_usd * 100
-            ):
+            position_cap = min(
+                settings.max_position_usd * 100,
+                float(account["equity_cents"]) * settings.max_position_fraction,
+            )
+            if current_notional + quantity * limit_price > position_cap:
                 raise ValueError("order would exceed the configured position limit")
             fee_multiplier = _current_fee_multiplier()
             worst_case_cost = (
@@ -600,14 +606,18 @@ def control_trading(operation: str, execution_mode: str = "") -> dict[str, Any]:
         if mode not in {"paper", "live"}:
             raise ValueError("execution_mode must be paper or live")
         with _execution_lock:
-            if _get_execution_mode() == "live" and mode != "live":
+            previous_mode = _get_execution_mode()
+            if previous_mode == "live" and mode != "live":
                 cancel_bot_orders()
             account = _fetch_account_snapshot(mode)
             _set_armed(False)
             _set_execution_mode(mode)
             settings = get_trading_settings_model()
             daily_risk, _ = _sync_daily_risk(
-                int(account["equity_cents"]), settings.max_daily_loss_usd, mode
+                int(account["equity_cents"]),
+                settings.max_daily_loss_usd,
+                mode,
+                reset_session=True,
             )
             if daily_risk["locked"]:
                 raise RuntimeError(
@@ -700,7 +710,8 @@ async def _refresh_paper_account(
 ) -> None:
     if execution_mode != "paper":
         return
-    _paper_account.mark_to_market(active_market_ticker, get_live_book())
+    book = get_live_book()
+    _paper_account.mark_to_market(active_market_ticker, book)
     for market_ticker in _paper_account.market_tickers() - {active_market_ticker}:
         try:
             market = await asyncio.to_thread(get_market, market_ticker)
@@ -898,6 +909,8 @@ async def _run_single_cycle() -> None:
             )
             return
         assert placed is not None
+        if not bool(placed.get("ok", True)):
+            raise RuntimeError(f"Order rejected: {placed.get('order', {})}")
         order = placed.get("order", {})
         fill_count = _decimal(order.get("fill_count"))
         status = f"{execution_mode}_{'filled' if fill_count > 0 else 'unfilled'}"

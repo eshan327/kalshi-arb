@@ -71,14 +71,12 @@ def place_limit_order(
     client_order_id: str | None = None,
     allow_when_stopped: bool = False,
 ) -> dict[str, Any]:
-    """Place a V2 IOC order using outcome-side semantics at the strategy boundary."""
+    """Place a V2 IOC order using outcome-side semantics."""
     side = side.strip().lower()
     action = action.strip().lower()
     if side not in {"yes", "no"} or action not in {"buy", "sell"}:
         raise ValueError("side must be yes/no and action must be buy/sell")
-    if not _live_order_entry_enabled and not (
-        allow_when_stopped and action == "sell"
-    ):
+    if not _live_order_entry_enabled and not (allow_when_stopped and action == "sell"):
         raise RuntimeError("Start live trading before submitting orders.")
     try:
         quantity = Decimal(str(count)).quantize(Decimal("0.01"))
@@ -95,9 +93,7 @@ def place_limit_order(
 
     # V2 quotes the YES book only: bid=buy YES/sell NO, ask=sell YES/buy NO.
     book_side = "bid" if (side == "yes") == (action == "buy") else "ask"
-    yes_price_cents = (
-        outcome_price if side == "yes" else Decimal("100") - outcome_price
-    )
+    yes_price_cents = outcome_price if side == "yes" else Decimal("100") - outcome_price
     order_id = client_order_id or _client_order_id()
     payload = _request(
         "POST",

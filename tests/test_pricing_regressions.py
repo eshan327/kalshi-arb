@@ -79,7 +79,9 @@ def test_pricing_is_anchored_to_the_official_opening_reference(monkeypatch) -> N
     assert snapshot["model_strike_usd"] == pytest.approx(100.025)
 
 
-def test_pricing_can_start_mid_market_without_opening_proxy_reference(monkeypatch) -> None:
+def test_pricing_can_start_mid_market_without_opening_proxy_reference(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(pipeline.time, "time", lambda: 1_200.0)
     snapshot = pipeline.compute_pricing_snapshot(
         profile=get_market_profile("DOGE"),
@@ -131,19 +133,22 @@ def test_crossed_consolidated_volume_is_removed_and_kelly_uses_fees() -> None:
     bids, asks = uncross_consolidated_book(
         [(101.0, 1.0), (99.0, 2.0)], [(100.0, 0.5), (102.0, 2.0)]
     )
-    target, fraction, all_in = _kelly_target_contracts(
+    target, fraction, all_in, notional_cap = _kelly_target_contracts(
         p_win=0.70,
         quote_price_cents=60.0,
         fee_cents=2.0,
         bankroll_cents=10_000,
         max_position_usd=50.0,
+        max_position_fraction=0.5,
+        kelly_scale=0.25,
     )
 
     assert bids[0] == pytest.approx((101.0, 0.5))
     assert asks[0] == pytest.approx((102.0, 2.0))
     assert all_in == 62.0
     assert fraction > 0
-    assert target == int(min(10_000 * fraction, 5_000) // all_in)
+    assert notional_cap == min(10_000 * fraction, 5_000)
+    assert target == int(notional_cap // all_in)
 
 
 def test_market_profiles_use_only_configured_benchmark_constituents() -> None:

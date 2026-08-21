@@ -12,9 +12,12 @@ from core.config import KALSHI_ENV
 class TradingSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    min_edge_cents: float = Field(default=5.0, ge=0.5, le=25.0)
-    max_position_usd: float = Field(default=10.0, ge=1.0, le=50.0)
-    max_order_contracts: int = Field(default=5, ge=1, le=25)
+    min_edge_cents: float = Field(default=2.0, ge=0.5, le=25.0)
+    deterministic_min_edge_cents: float = Field(default=0.5, ge=0.0, le=5.0)
+    kelly_fraction: float = Field(default=0.25, ge=0.01, le=0.5)
+    max_position_fraction: float = Field(default=0.05, ge=0.005, le=0.25)
+    max_position_usd: float = Field(default=50.0, ge=1.0, le=50.0)
+    max_order_contracts: int = Field(default=10, ge=1, le=25)
     max_daily_loss_usd: float = Field(default=10.0, ge=1.0, le=100.0)
     cash_buffer_usd: float = Field(default=25.0, ge=0.0, le=10_000.0)
     cooldown_seconds: int = Field(default=5, ge=1, le=900)
