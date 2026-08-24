@@ -12,8 +12,8 @@ uv run src/main.py bitcoin
 ```
 
 Open [http://127.0.0.1:3000](http://127.0.0.1:3000), choose **Sim**, then click **Start**
-or **Start Live**. The process starts stopped and neither destination has a
-confirmation step.
+or **Start Live**. The process starts stopped; live start and live manual orders
+require confirmation.
 
 Supported assets: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `ADA`, `NEAR`,
 `BCH`, `HYPE`, `TON`, and `ZEC`. Names such as `bitcoin` and `solana` also work.
@@ -56,8 +56,8 @@ entry. Switching from live to paper also cancels any of this bot's live orders.
 ## Operating workflow
 
 The engine always submits model entries and exits while it is running. The
-dashboard's collapsed **Operator Controls** contains model/risk settings and a
-click ticket for discretionary overrides.
+dashboard's open-by-default **High-Touch Trading** panel contains model/risk
+settings and an IOC ticket for discretionary overrides.
 
 The engine evaluates once per second. Risk-reducing exits can act every cycle;
 new buys have a five-second default cooldown so account state can reconcile
@@ -115,8 +115,8 @@ edge-reversal exit.
 
 ## Dashboard map
 
-- **Autotrader strip:** sim/live mode, session P&L, start, stop, and flatten.
-- **Positions:** cash, marked position value, open contracts, and realized P&L.
+- **Autotrader strip:** sim/live mode, session change in NAV, start, stop, and flatten.
+- **Positions:** cash, average cost, bid mark, gross mark-to-market P&L, and daily loss capacity.
 - **Market & Model:** index, model/market probability, edge, pricing, and
   realized-volatility fit.
 - **Order book:** live YES/NO bids, asks, and depth.

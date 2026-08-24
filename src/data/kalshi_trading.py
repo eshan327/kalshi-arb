@@ -132,7 +132,7 @@ def get_positions(*, market_ticker: str | None = None) -> list[dict[str, Any]]:
         "GET",
         "/portfolio/positions",
         params={
-            "limit": 100,
+            "limit": 1000,
             "count_filter": "position",
             **({"ticker": market_ticker} if market_ticker else {}),
         },
@@ -147,7 +147,7 @@ def get_open_orders(*, market_ticker: str | None = None) -> list[dict[str, Any]]
         "/portfolio/orders",
         params={
             "status": "resting",
-            "limit": 100,
+            "limit": 1000,
             **({"ticker": market_ticker} if market_ticker else {}),
         },
     )

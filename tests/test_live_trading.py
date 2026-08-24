@@ -33,9 +33,14 @@ def test_orderbook_quotes_and_market_midpoint_use_yes_probability() -> None:
         None,
         "at_target_allocation",
         {"p_model": 0.216},
-        {"yes_bid_cents": 25.0, "yes_ask_cents": 28.0},
+        {
+            "yes_bid_cents": 25.0,
+            "yes_ask_cents": 28.0,
+            "required_taker_edge_cents": 0.5,
+        },
     )
     assert message["market_implied_probability"] == pytest.approx(0.265)
+    assert message["required_edge_cents"] == 0.5
     assert message["action_intent"] == "PASS — target allocation reached"
 
 
@@ -461,6 +466,28 @@ def test_start_selects_execution_mode_without_confirmation(monkeypatch) -> None:
     assert runtime._is_armed() is True
 
 
+def test_mode_selection_loads_account_without_arming(monkeypatch) -> None:
+    from engine.trading import runtime
+
+    account = {"cash_cents": 10_000, "equity_cents": 10_000, "positions": []}
+    monkeypatch.setattr(runtime, "_execution_mode", "paper")
+    monkeypatch.setattr(runtime, "_armed", False)
+    monkeypatch.setattr(runtime, "_runtime_state", {"armed": False})
+    monkeypatch.setattr(runtime, "_fetch_account_snapshot", lambda mode: account)
+    monkeypatch.setattr(
+        runtime, "_sync_daily_risk", lambda *_, **__: ({"locked": False}, False)
+    )
+    monkeypatch.setattr(runtime, "cancel_bot_orders", lambda: 0)
+    monkeypatch.setattr(runtime, "set_live_order_entry_enabled", lambda _enabled: None)
+
+    result = runtime.control_trading("select", "live")
+
+    assert result == {"ok": True, "status": "selected", "execution_mode": "live"}
+    assert runtime._get_execution_mode() == "live"
+    assert runtime._is_armed() is False
+    assert runtime._runtime_state["account"] == account
+
+
 def test_paper_ioc_accounting_and_settlement() -> None:
     book = OrderBook("TEST")
     book.load_rest_snapshot(
@@ -611,6 +638,8 @@ def test_discretionary_order_uses_shared_risk_boundary(monkeypatch) -> None:
     )
     monkeypatch.setattr(runtime, "_execution_mode", "paper")
     monkeypatch.setattr(runtime, "_armed", True)
+    monkeypatch.setattr(runtime, "_last_submission_ts", 0.0)
+    monkeypatch.setattr(runtime, "_runtime_state", {})
     monkeypatch.setattr(runtime, "_paper_account", PaperAccount(10_000))
     monkeypatch.setattr(runtime, "get_live_book", lambda: book)
     monkeypatch.setattr(
@@ -627,7 +656,74 @@ def test_discretionary_order_uses_shared_risk_boundary(monkeypatch) -> None:
     result = runtime.submit_manual_order(side="yes", action="buy", count=2)
     assert result["status"] == "manual_paper_filled"
     assert runtime._paper_account.snapshot()["positions"][0]["contracts"] == 2
+    assert runtime._runtime_state["account"]["positions"][0]["contracts"] == 2
+    status, order = runtime._submit_signal(
+        type("Signal", (), {"action": "buy"})(),
+        runtime._last_submission_ts + 1,
+        5,
+        "paper",
+    )
+    assert (status, order) == ("cooldown", None)
 
     monkeypatch.setattr(runtime, "_armed", False)
     with pytest.raises(RuntimeError, match="Start trading"):
         runtime.submit_manual_order(side="yes", action="buy", count=1)
+
+
+def test_live_discretionary_fill_reconciles_runtime_account(monkeypatch) -> None:
+    from engine.trading import runtime
+
+    book = OrderBook("TEST")
+    book.load_rest_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    )
+    empty = {"cash_cents": 10_000, "equity_cents": 10_000, "positions": []}
+    filled = {
+        "cash_cents": 9_940,
+        "equity_cents": 9_999,
+        "positions": [
+            {
+                "market_ticker": "TEST",
+                "side": "yes",
+                "contracts": 1,
+                "strategy_contracts": 1,
+                "avg_entry_cents": 60,
+                "market_exposure_cents": 60,
+            }
+        ],
+    }
+    accounts = iter([empty, filled])
+    monkeypatch.setattr(runtime, "_execution_mode", "live")
+    monkeypatch.setattr(runtime, "_armed", True)
+    monkeypatch.setattr(runtime, "_last_submission_ts", 0.0)
+    monkeypatch.setattr(runtime, "_runtime_state", {"fee_policy": {}})
+    monkeypatch.setattr(runtime, "get_live_book", lambda: book)
+    monkeypatch.setattr(
+        runtime,
+        "get_live_market_info",
+        lambda: {"ticker": "TEST", "price_ranges": []},
+    )
+    monkeypatch.setattr(runtime, "_fetch_account_snapshot", lambda _mode: next(accounts))
+    monkeypatch.setattr(
+        runtime, "_sync_daily_risk", lambda *_: ({"locked": False}, False)
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_place_order",
+        lambda **_: {
+            "ok": True,
+            "order": {"fill_count": "1.00", "average_fill_price": "0.6000"},
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_emit_event",
+        lambda _event_type, reason, **detail: {"reason": reason, **detail},
+    )
+
+    result = runtime.submit_manual_order(side="yes", action="buy", count=1)
+
+    assert result["status"] == "manual_live_filled"
+    assert result["reconciliation_pending"] is False
+    assert runtime._runtime_state["account"] == filled
+    assert runtime._last_submission_ts > 0

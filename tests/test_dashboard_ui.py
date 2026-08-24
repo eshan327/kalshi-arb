@@ -2,11 +2,20 @@ from ui.app import (
     _book_rows,
     _book_summary,
     _decision_state,
+    _execution_summary,
+    _price,
     _position_rows,
+    _probability_domain,
+    _yes_midpoint_probability,
     market_ticks,
     moving_average,
     recent_rows,
 )
+
+
+def test_asset_prices_preserve_material_decimals() -> None:
+    assert _price("0.521500") == "$0.5215"
+    assert _price(60_000) == "$60,000"
 
 
 def test_dashboard_price_history_uses_a_time_window() -> None:
@@ -63,6 +72,7 @@ def test_position_rows_show_cost_and_mark_to_market_pnl() -> None:
 
     assert rows == [
         {
+            "ticker": "TEST",
             "side": "YES",
             "contracts": "10",
             "cost_basis": "68.4¢",
@@ -70,8 +80,36 @@ def test_position_rows_show_cost_and_mark_to_market_pnl() -> None:
             "exposure": "$6.84",
             "unrealized_pnl": "$0.26",
             "pnl_tone": "positive",
+            "row_class": "position-line active-position",
         }
     ]
+
+
+def test_market_probability_and_execution_use_exchange_semantics() -> None:
+    assert _yes_midpoint_probability(
+        {"yes_bids": [[32, 4]], "yes_asks": [[34, 5]]}
+    ) == 0.33
+    assert _yes_midpoint_probability({"yes_bids": [[32, 4]]}) is None
+    assert _execution_summary(
+        {
+            "reason": "manual_live_filled",
+            "side": "no",
+            "action": "buy",
+            "count": 2,
+            "order": {
+                "fill_count": "1.00",
+                "average_fill_price": "0.6000",
+                "average_fee_paid": "0.0100",
+            },
+        }
+    ) == "LIVE BUY NO · 1/2 filled · @ 40¢ · fee 1¢/ct"
+
+
+def test_probability_domain_keeps_low_probability_signals_legible() -> None:
+    assert _probability_domain(
+        [{"model": 5.5, "market": 3.2}, {"model": 6.1, "market": 3.8}]
+    ) == [0.0, 10.0]
+    assert _probability_domain([]) == [0, 100]
 
 
 def test_terminal_summaries_make_book_and_decision_explicit() -> None:
@@ -101,8 +139,11 @@ def test_terminal_summaries_make_book_and_decision_explicit() -> None:
 
 
 if __name__ == "__main__":
+    test_asset_prices_preserve_material_decimals()
     test_dashboard_price_history_uses_a_time_window()
     test_dashboard_history_starts_at_current_market_open()
     test_chart_window_rolls_and_only_average_resets()
     test_position_rows_show_cost_and_mark_to_market_pnl()
+    test_market_probability_and_execution_use_exchange_semantics()
+    test_probability_domain_keeps_low_probability_signals_legible()
     test_terminal_summaries_make_book_and_decision_explicit()

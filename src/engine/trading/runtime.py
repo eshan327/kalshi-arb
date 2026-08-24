@@ -352,6 +352,7 @@ def _monologue(
         "market_implied_probability": implied,
         "lean_side": lean,
         "best_edge_cents": edge,
+        "required_edge_cents": diagnostics.get("required_taker_edge_cents"),
     }
 
 
@@ -451,6 +452,8 @@ def _flatten_market(
 
 
 def submit_manual_order(*, side: str, action: str, count: Any) -> dict[str, Any]:
+    global _last_submission_ts
+
     side = side.strip().lower()
     action = action.strip().lower()
     if side not in {"yes", "no"} or action not in {"buy", "sell"}:
@@ -572,7 +575,16 @@ def submit_manual_order(*, side: str, action: str, count: Any) -> dict[str, Any]
         )
         order = result.get("order", {})
         filled = _decimal(order.get("fill_count")) > 0
+        if filled:
+            _last_submission_ts = time.time()
         status = f"manual_{execution_mode}_{'filled' if filled else 'unfilled'}"
+        reconciled_account = None
+        reconciliation_error = None
+        if filled:
+            try:
+                reconciled_account = _fetch_account_snapshot(execution_mode)
+            except Exception as exc:  # order already succeeded; next cycle retries
+                reconciliation_error = str(exc)
         event = _emit_event(
             "manual_order",
             status,
@@ -581,12 +593,26 @@ def submit_manual_order(*, side: str, action: str, count: Any) -> dict[str, Any]
             count=quantity,
             limit_price_cents=limit_price,
             order=order,
+            reconciliation_pending=reconciliation_error is not None,
         )
-        state: dict[str, Any] = {"status": status, "last_order": event}
-        if execution_mode == "paper":
-            state["account"] = _fetch_account_snapshot(execution_mode)
+        state: dict[str, Any] = {
+            "status": status,
+            "last_order": event,
+            "last_error": (
+                f"Order accepted; account refresh pending: {reconciliation_error}"
+                if reconciliation_error
+                else None
+            ),
+        }
+        if reconciled_account is not None:
+            state["account"] = reconciled_account
         _set_state(**state)
-        return {"ok": bool(result.get("ok", True)), "status": status, "result": result}
+        return {
+            "ok": bool(result.get("ok", True)),
+            "status": status,
+            "result": result,
+            "reconciliation_pending": reconciliation_error is not None,
+        }
 
 
 def get_trading_runtime_snapshot() -> dict[str, Any]:
@@ -601,7 +627,7 @@ def get_trading_events(limit: int = 200) -> list[dict[str, Any]]:
 
 def control_trading(operation: str, execution_mode: str = "") -> dict[str, Any]:
     operation = operation.strip().lower()
-    if operation == "start":
+    if operation in {"select", "start"}:
         mode = execution_mode.strip().lower()
         if mode not in {"paper", "live"}:
             raise ValueError("execution_mode must be paper or live")
@@ -617,12 +643,25 @@ def control_trading(operation: str, execution_mode: str = "") -> dict[str, Any]:
                 int(account["equity_cents"]),
                 settings.max_daily_loss_usd,
                 mode,
-                reset_session=True,
+                reset_session=operation == "start",
             )
-            if daily_risk["locked"]:
+            if operation == "start" and daily_risk["locked"]:
                 raise RuntimeError(
                     "Daily loss guard is locked until the next trading day."
                 )
+            if operation == "select":
+                _set_state(
+                    account=account,
+                    daily_risk=daily_risk,
+                    status="paused",
+                    last_error=None,
+                    **(
+                        {"last_order": None, "last_signal": None}
+                        if previous_mode != mode
+                        else {}
+                    ),
+                )
+                return {"ok": True, "status": "selected", "execution_mode": mode}
             _set_armed(True)
             _set_state(
                 account=account,
@@ -634,7 +673,7 @@ def control_trading(operation: str, execution_mode: str = "") -> dict[str, Any]:
             return {"ok": True, "status": "started", "execution_mode": mode}
 
     if operation not in {"pause", "flatten"}:
-        raise ValueError("operation must be start, pause, or flatten")
+        raise ValueError("operation must be select, start, pause, or flatten")
 
     with _execution_lock:
         mode = _get_execution_mode()

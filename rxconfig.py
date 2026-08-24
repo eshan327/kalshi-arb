@@ -13,6 +13,7 @@ config = rx.Config(
     frontend_port=WEB_PORT,
     backend_port=8000,
     backend_host=WEB_HOST,
+    show_built_with_reflex=False,
     telemetry_enabled=False,
     plugins=[rx.plugins.RadixThemesPlugin()],
     disable_plugins=[rx.plugins.SitemapPlugin],

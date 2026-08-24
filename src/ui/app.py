@@ -13,7 +13,7 @@ import reflex as rx
 from core.config import ORDERBOOK_VIEW_DEPTH
 from engine.market_stream.discovery import parse_iso8601_to_epoch
 from engine.settlement_sampling import extract_valid_index_points
-from engine.trading.runtime import control_trading
+from engine.trading.runtime import control_trading, submit_manual_order
 from engine.trading.settings import reset_trading_settings, update_trading_settings
 from engine.trading.strategy import MAX_ORDERBOOK_AGE_SECONDS
 from engine.vol_estimator import realized_vol_from_price_points
@@ -28,11 +28,11 @@ _PLOT_WINDOW_SECONDS = 4 * 60
 
 
 def _number(value: Any) -> float | None:
-    return (
-        float(value)
-        if isinstance(value, (int, float)) and math.isfinite(value)
-        else None
-    )
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _money(cents: Any) -> str:
@@ -42,7 +42,12 @@ def _money(cents: Any) -> str:
 
 def _cents(value: Any) -> str:
     number = _number(value)
-    return f"{number:.2f}".rstrip("0").rstrip(".") + "¢" if number is not None else "—"
+    return f"{number:.4f}".rstrip("0").rstrip(".") + "¢" if number is not None else "—"
+
+
+def _price(value: Any) -> str:
+    number = _number(value)
+    return f"${number:,.6f}".rstrip("0").rstrip(".") if number is not None else "—"
 
 
 def _percent(value: Any, *, ratio: bool = False) -> str:
@@ -133,6 +138,63 @@ def _book_summary(book: dict[str, Any], side: str) -> dict[str, str]:
     }
 
 
+def _yes_midpoint_probability(book: dict[str, Any]) -> float | None:
+    bids = book.get("yes_bids") or []
+    asks = book.get("yes_asks") or []
+    bid = _number(bids[0][0]) if bids else None
+    ask = _number(asks[0][0]) if asks else None
+    return (bid + ask) / 200 if bid is not None and ask is not None else None
+
+
+def _probability_domain(rows: list[dict[str, Any]]) -> list[float]:
+    values = [
+        value
+        for row in rows
+        for key in ("model", "market")
+        if (value := _number(row.get(key))) is not None
+    ]
+    if not values:
+        return [0, 100]
+    low, high = min(values), max(values)
+    span = min(100.0, max(10.0, high - low + 4.0))
+    floor = max(0.0, min(100.0 - span, (low + high - span) / 2))
+    return [round(floor, 1), round(floor + span, 1)]
+
+
+def _execution_summary(event: Any) -> str:
+    if not isinstance(event, dict):
+        return "No executions this session."
+    order = event.get("order") if isinstance(event.get("order"), dict) else {}
+    signal = event.get("signal") if isinstance(event.get("signal"), dict) else {}
+    side = str(event.get("side") or signal.get("side") or "").upper()
+    action = str(event.get("action") or signal.get("action") or "").upper()
+    requested = _number(event.get("count") or signal.get("count"))
+    filled = _number(order.get("fill_count"))
+    reason = str(event.get("reason") or "")
+    mode = "LIVE" if "live" in reason else "SIM" if "paper" in reason else ""
+    if filled is None:
+        return "Execution details unavailable."
+    if filled <= 0:
+        return f"{mode} {action} {side} · IOC canceled unfilled".strip()
+    price = _number(order.get("fill_price_cents"))
+    if price is None:
+        yes_price = _number(order.get("average_fill_price"))
+        if yes_price is not None:
+            price = yes_price * 100
+            if side == "NO":
+                price = 100 - price
+    fill_text = f"{filled:g}"
+    if requested is not None:
+        fill_text += f"/{requested:g}"
+    parts = [f"{mode} {action} {side}".strip(), f"{fill_text} filled"]
+    if price is not None:
+        parts.append(f"@ {_cents(price)}")
+    fee = _number(order.get("average_fee_paid"))
+    if fee is not None:
+        parts.append(f"fee {_cents(fee * 100)}/ct")
+    return " · ".join(parts)
+
+
 def _book_rows(book: dict[str, Any], side: str) -> list[dict[str, str]]:
     asks = book.get(f"{side}_asks") or []
     bids = book.get(f"{side}_bids") or []
@@ -178,8 +240,10 @@ def _position_rows(
             if mark is not None and cost_basis is not None
             else None
         )
+        active = position.get("market_ticker") == market_ticker
         rows.append(
             {
+                "ticker": str(position.get("market_ticker") or "—"),
                 "side": side.upper() or "—",
                 "contracts": f"{contracts:g}",
                 "cost_basis": _cents(cost_basis),
@@ -187,9 +251,10 @@ def _position_rows(
                 "exposure": _money(position.get("market_exposure_cents")),
                 "unrealized_pnl": _money(unrealized),
                 "pnl_tone": _tone(unrealized),
+                "row_class": "position-line active-position" if active else "position-line",
             }
         )
-    return rows
+    return sorted(rows, key=lambda row: "active-position" not in row["row_class"])
 
 
 def recent_rows(
@@ -280,24 +345,30 @@ class DashboardState(rx.State):
     data_state = "DISCONNECTED"
 
     cash = "—"
+    nav = "—"
     daily_capacity = "—"
     risk_state = "NORMAL"
     positions: list[dict[str, str]] = []
 
     spot = "—"
+    index_label = "Index"
     strike = "—"
     expires = "—"
     volatility = "—"
+    settlement_average = "—"
     probability = "—"
     implied = "—"
     edge = "—"
     required_edge = "—"
     lean = "—"
+    fee_policy = "Fee policy unavailable"
+    last_execution = "No executions this session."
+    kalshi_env = ""
     decision = "WARMING UP"
     decision_reason = "Waiting for market data."
     decision_tone = "neutral"
     model_history: list[dict[str, Any]] = []
-    vol_history: list[dict[str, Any]] = []
+    probability_domain: list[float] = [0, 100]
     price_history: list[dict[str, Any]] = []
     yes_book: list[dict[str, str]] = []
     no_book: list[dict[str, str]] = []
@@ -318,6 +389,10 @@ class DashboardState(rx.State):
     vol_source = "realized"
     vol_scale = "1"
     settings_status = ""
+    manual_side = "yes"
+    manual_action = "buy"
+    manual_count = "1"
+    manual_status = ""
 
     _snapshot: dict[str, Any] = {}
     _settings: dict[str, Any] = {}
@@ -364,14 +439,17 @@ class DashboardState(rx.State):
             )
 
             self.asset = str(state.get("asset_display") or state.get("asset") or "—")
+            self.index_label = str(state.get("index_label") or "Index")
             market_ticker = str(
                 runtime.get("current_market_ticker") or book.get("market_ticker") or ""
             )
             self.market = market_ticker or "Waiting for market"
             if market_ticker and market_ticker != self._history_market:
                 self.model_history = []
+                self.probability_domain = [0, 100]
                 self._history_market = market_ticker
             self.armed = bool(runtime.get("armed"))
+            self.kalshi_env = str(runtime.get("kalshi_env") or "").upper()
             if (
                 runtime.get("execution_mode") in {"paper", "live"}
                 and (self.armed or not self._mode_touched)
@@ -381,16 +459,16 @@ class DashboardState(rx.State):
             self.pnl = _money(equity_change)
             self.pnl_tone = _tone(equity_change)
             self.engine_state = "RUNNING" if self.armed else "PAUSED"
-            self.mode_label = "LIVE" if self.selected_mode == "live" else "SIM"
+            self.mode_label = (
+                f"LIVE {self.kalshi_env}" if self.selected_mode == "live" else "SIM"
+            )
 
             now_ts = time.time()
             book_ok = bool(book.get("initialized")) and _fresh(
                 book.get("last_update_ts"), MAX_ORDERBOOK_AGE_SECONDS, now_ts
             )
             index_ok = _fresh(brti.get("timestamp"), 5, now_ts)
-            model_ok = bool(pricing.get("ready")) and _fresh(
-                runtime.get("last_cycle_ts"), 5, now_ts
-            )
+            model_ok = bool(pricing.get("ready"))
             healthy_count = sum((book_ok, index_ok, model_ok))
             self.data_state = (
                 "LIVE"
@@ -401,8 +479,12 @@ class DashboardState(rx.State):
             )
 
             self.cash = _money(account.get("cash_cents"))
+            self.nav = _money(account.get("equity_cents"))
             self.positions = _position_rows(account, book, market_ticker)
-            self.has_position = bool(self.positions)
+            self.has_position = any(
+                position.get("market_ticker") == market_ticker
+                for position in account.get("positions") or []
+            )
             max_loss = _number(risk.get("max_daily_loss_cents"))
             drawdown = _number(risk.get("drawdown_cents")) or 0.0
             remaining = max(0.0, (max_loss or 0.0) + min(0.0, drawdown))
@@ -419,33 +501,49 @@ class DashboardState(rx.State):
 
             spot = _number(brti.get("brti"))
             strike = _number(pricing.get("strike_usd") or state.get("suggested_strike"))
-            self.spot = f"${spot:,.2f}" if spot is not None else "—"
-            self.strike = f"${strike:,.0f}" if strike is not None else "—"
+            self.spot = _price(spot)
+            self.strike = _price(strike)
             self.expires = _duration(pricing.get("seconds_to_expiry"))
             self.volatility = _percent(sigma_fit, ratio=True)
             self.probability = (
                 _percent(pricing.get("p_model_pct")) if pricing.get("ready") else "—"
             )
-            self.implied = _percent(
-                monologue.get("market_implied_probability"), ratio=True
-            )
+            market_probability = _yes_midpoint_probability(book)
+            self.implied = _percent(market_probability, ratio=True)
             self.edge = _cents(monologue.get("best_edge_cents"))
             self.required_edge = _cents(
-                (state.get("trading_settings") or {}).get("min_edge_cents")
+                monologue.get("required_edge_cents")
+                if monologue.get("required_edge_cents") is not None
+                else (state.get("trading_settings") or {}).get("min_edge_cents")
             )
             self.lean = str(monologue.get("lean_side") or "—").upper()
+            fee_policy = runtime.get("fee_policy") or {}
+            fee_multiplier = _number(fee_policy.get("fee_multiplier"))
+            self.fee_policy = (
+                f"{str(fee_policy.get('fee_type') or '').replace('_', ' ').title()} · {fee_multiplier:g}×"
+                if fee_policy.get("ready") and fee_multiplier is not None
+                else "Fee policy unavailable"
+            )
+            self.last_execution = _execution_summary(runtime.get("last_order"))
             self.decision, self.decision_reason, self.decision_tone = _decision_state(
                 monologue, self.armed
             )
+            if runtime.get("last_error"):
+                self.decision = "ERROR"
+                self.decision_reason = str(runtime["last_error"])
+                self.decision_tone = "danger"
             probability = _number(pricing.get("p_model_pct"))
-            market_probability = _number(monologue.get("market_implied_probability"))
             history_ts = datetime.now().timestamp()
             now = datetime.fromtimestamp(history_ts).strftime("%H:%M:%S")
-            if pricing.get("ready") and probability is not None:
+            if probability is not None or market_probability is not None:
                 point = {
                     "ts": history_ts,
                     "time": now,
-                    "model": round(probability, 2),
+                    "model": (
+                        round(probability, 2)
+                        if pricing.get("ready") and probability is not None
+                        else None
+                    ),
                     "market": (
                         round(market_probability * 100, 2)
                         if market_probability is not None
@@ -458,19 +556,7 @@ class DashboardState(rx.State):
                         _PLOT_WINDOW_SECONDS,
                         history_ts,
                     )
-            sigma = _number(sigma_fit)
-            if sigma is not None:
-                point = {
-                    "ts": history_ts,
-                    "time": now,
-                    "volatility": round(sigma * 100, 2),
-                }
-                if not self.vol_history or self.vol_history[-1] != point:
-                    self.vol_history = recent_rows(
-                        [*self.vol_history, point],
-                        _PLOT_WINDOW_SECONDS,
-                        history_ts,
-                    )
+                    self.probability_domain = _probability_domain(self.model_history)
             window = int(state.get("settlement_window_seconds") or 60)
             self.price_history = [
                 {**point, "strike": strike}
@@ -480,6 +566,12 @@ class DashboardState(rx.State):
                     average_start_ts=market_open_time(market_info.get("close_time")),
                 )
             ]
+            averages = [
+                _number(point.get("average"))
+                for point in self.price_history
+                if _number(point.get("average")) is not None
+            ]
+            self.settlement_average = _price(averages[-1]) if averages else "—"
             self.yes_book = _book_rows(book, "yes")
             self.no_book = _book_rows(book, "no")
             self.yes_quote = _book_summary(book, "yes")
@@ -503,9 +595,15 @@ class DashboardState(rx.State):
     @rx.event
     def choose_mode(self, mode: str) -> None:
         if mode in {"paper", "live"}:
-            self.selected_mode = mode
-            self.mode_label = "LIVE" if mode == "live" else "SIM"
-            self._mode_touched = True
+            try:
+                control_trading("select", mode)
+                self.selected_mode = mode
+                self._mode_touched = True
+                self.manual_status = ""
+                self.settings_status = ""
+            except (ValueError, RuntimeError) as exc:
+                self.settings_status = str(exc)
+            self._refresh()
 
     def _control(self, operation: str) -> None:
         try:
@@ -528,6 +626,26 @@ class DashboardState(rx.State):
     @rx.event
     def flatten(self) -> None:
         self._control("flatten")
+
+    @rx.event
+    def submit_manual(self) -> None:
+        try:
+            result = submit_manual_order(
+                side=self.manual_side,
+                action=self.manual_action,
+                count=self.manual_count,
+            )
+            mode = "LIVE" if "_live_" in result["status"] else "SIM"
+            self.manual_status = (
+                f"{mode} IOC filled."
+                if result["status"].endswith("_filled")
+                else f"{mode} IOC canceled unfilled."
+            )
+            if result.get("reconciliation_pending"):
+                self.manual_status += " Account sync pending."
+        except (TypeError, ValueError, RuntimeError) as exc:
+            self.manual_status = str(exc)
+        self._refresh()
 
     @rx.event
     def save_settings(self) -> None:
@@ -620,6 +738,18 @@ class DashboardState(rx.State):
     def set_vol_scale(self, value: str) -> None:
         self.vol_scale = value
 
+    @rx.event
+    def set_manual_side(self, value: str) -> None:
+        self.manual_side = value
+
+    @rx.event
+    def set_manual_action(self, value: str) -> None:
+        self.manual_action = value
+
+    @rx.event
+    def set_manual_count(self, value: str) -> None:
+        self.manual_count = value
+
 
 def _panel_header(title: str, trailing: rx.Component | None = None) -> rx.Component:
     return rx.hstack(
@@ -629,12 +759,21 @@ def _panel_header(title: str, trailing: rx.Component | None = None) -> rx.Compon
     )
 
 
-def _metric(label: str, value: Any, *, large: bool = False) -> rx.Component:
+def _terminal_cell(label: str, value: Any, value_class: Any = "") -> rx.Component:
+    return rx.box(
+        rx.text(label, class_name="terminal-cell-label"),
+        rx.text(value, class_name=value_class),
+        class_name="terminal-cell",
+    )
+
+
+def _metric(
+    label: str, value: Any, *, large: bool = False, tone: str = ""
+) -> rx.Component:
+    value_class = "metric-value hero-value" if large else "metric-value"
     return rx.box(
         rx.text(label, class_name="metric-label"),
-        rx.text(
-            value, class_name="metric-value hero-value" if large else "metric-value"
-        ),
+        rx.text(value, class_name=f"{value_class} {tone}".strip()),
         class_name="metric",
     )
 
@@ -677,17 +816,18 @@ def _book(title: str, rows: Any, quote: Any, tone: str) -> rx.Component:
 
 def _position_row(position: dict[str, Any]) -> rx.Component:
     return rx.hstack(
+        rx.text(position["ticker"], class_name="position-ticker"),
         rx.text(position["side"], class_name="position-side"),
         rx.text(position["contracts"]),
-        rx.text("@"),
+        rx.text("Avg", class_name="metric-label"),
         rx.text(position["cost_basis"]),
-        rx.text("Mark", class_name="metric-label"),
+        rx.text("Bid mark", class_name="metric-label"),
         rx.text(position["mark"]),
-        rx.text("Exposure", class_name="metric-label"),
+        rx.text("Cost", class_name="metric-label"),
         rx.text(position["exposure"]),
-        rx.text("uPnL", class_name="metric-label"),
+        rx.text("Gross MTM", class_name="metric-label"),
         rx.text(position["unrealized_pnl"], class_name=position["pnl_tone"]),
-        class_name="position-line",
+        class_name=position["row_class"],
     )
 
 
@@ -715,51 +855,40 @@ def _chart(
             stroke="#252e37", stroke_dasharray="2 5", vertical=False
         ),
         rx.recharts.x_axis(
-            data_key="time", axis_line=False, tick_line=False, min_tick_gap=44
+            data_key="time", axis_line=False, tick_line=False, min_tick_gap=64
         ),
         rx.recharts.y_axis(
-            domain=domain or ["auto", "auto"],
+            domain=domain if domain is not None else ["auto", "auto"],
             axis_line=False,
             tick_line=False,
-            width=54,
+            tick_count=5,
+            width=62,
             unit=unit,
         ),
         rx.recharts.graphing_tooltip(
             content_style={
                 "background": "#171d25",
                 "border": "1px solid #303946",
-                "borderRadius": "6px",
+                "borderRadius": "0",
                 "fontFamily": "var(--mono)",
+                "fontSize": "12px",
             },
             label_style={"color": "#f1f3f5"},
-        ),
-        rx.recharts.legend(
-            align="right",
-            icon_size=8,
-            vertical_align="top",
-            wrapper_style={"fontSize": "10px", "fontFamily": "var(--mono)"},
         ),
         *lines,
         data=data,
         height="100%",
         width="100%",
-        margin={"top": 8, "right": 10, "bottom": 0, "left": 0},
+        min_height=10,
+        min_width=10,
+        margin={"top": 12, "right": 16, "bottom": 4, "left": 4},
     )
 
 
-def _chart_header(
-    title: str, primary: Any, comparison: Any | None = None
-) -> rx.Component:
+def _chart_header(title: str, *readings: rx.Component) -> rx.Component:
     return rx.hstack(
         rx.heading(title, as_="h3"),
-        rx.hstack(
-            rx.text(primary, class_name="chart-reading"),
-            rx.cond(
-                comparison is not None,
-                rx.text(comparison, class_name="chart-reading comparison"),
-            ),
-            class_name="chart-readings",
-        ),
+        rx.hstack(*readings, class_name="chart-readings"),
         class_name="chart-header",
     )
 
@@ -771,57 +900,63 @@ def index() -> rx.Component:
         ),
         rx.box(
             rx.el.header(
-                rx.hstack(
-                    rx.heading("Autotrader", as_="h1"),
-                    rx.text(DashboardState.asset, class_name="asset-label"),
+                rx.box(
+                    rx.heading("KALSHI 15M // AUTOTRADER", as_="h1"),
                     class_name="topbar-title",
                 ),
                 rx.hstack(
-                    rx.text(
+                    _terminal_cell("Asset", DashboardState.asset, "terminal-cell-value"),
+                    _terminal_cell(
+                        "Active market", DashboardState.market, "terminal-cell-value market-code"
+                    ),
+                    _terminal_cell(
+                        "Mode",
                         DashboardState.mode_label,
-                        class_name=rx.cond(
+                        rx.cond(
                             DashboardState.selected_mode == "live",
-                            "state-badge live",
-                            "state-badge sim",
+                            "terminal-cell-value negative",
+                            "terminal-cell-value positive",
                         ),
                     ),
-                    rx.text(
+                    _terminal_cell(
+                        "Engine",
                         DashboardState.engine_state,
-                        class_name=rx.cond(
+                        rx.cond(
                             DashboardState.armed,
-                            "state-badge running",
-                            "state-badge paused",
+                            "terminal-cell-value positive",
+                            "terminal-cell-value warning",
                         ),
                     ),
-                    rx.text(
-                        "DATA ",
+                    _terminal_cell(
+                        "Data",
                         DashboardState.data_state,
-                        class_name=rx.cond(
+                        rx.cond(
                             DashboardState.data_state == "LIVE",
-                            "state-badge healthy",
+                            "terminal-cell-value positive",
                             rx.cond(
                                 DashboardState.data_state == "STALE",
-                                "state-badge warning",
-                                "state-badge danger",
+                                "terminal-cell-value warning",
+                                "terminal-cell-value negative",
                             ),
                         ),
                     ),
-                    rx.text(DashboardState.expires, " left", class_name="time-left"),
-                    rx.hstack(
-                        rx.text("P&L", class_name="metric-label"),
-                        rx.text(
-                            DashboardState.pnl,
-                            class_name=rx.cond(
-                                DashboardState.pnl_tone == "positive",
-                                "pnl-value positive",
-                                rx.cond(
-                                    DashboardState.pnl_tone == "negative",
-                                    "pnl-value negative",
-                                    "pnl-value",
-                                ),
+                    _terminal_cell(
+                        "Expiry",
+                        DashboardState.expires,
+                        "terminal-cell-value",
+                    ),
+                    _terminal_cell(
+                        "Session P&L",
+                        DashboardState.pnl,
+                        rx.cond(
+                            DashboardState.pnl_tone == "positive",
+                            "terminal-cell-value positive",
+                            rx.cond(
+                                DashboardState.pnl_tone == "negative",
+                                "terminal-cell-value negative",
+                                "terminal-cell-value",
                             ),
                         ),
-                        class_name="pnl-block",
                     ),
                     class_name="state-strip",
                 ),
@@ -933,8 +1068,9 @@ def index() -> rx.Component:
                             rx.text("Flat", class_name="flat-position"),
                         ),
                         rx.box(class_name="strip-spacer"),
+                        _metric("NAV", DashboardState.nav),
                         _metric("Cash", DashboardState.cash),
-                        _metric("Loss capacity", DashboardState.daily_capacity),
+                        _metric("Daily loss remaining", DashboardState.daily_capacity),
                         rx.text(
                             DashboardState.risk_state,
                             class_name=rx.cond(
@@ -955,32 +1091,49 @@ def index() -> rx.Component:
                     rx.box(
                         _panel_header(
                             "Market & Model",
-                            rx.text(DashboardState.market, class_name="market-tag"),
+                            rx.hstack(
+                                rx.text(DashboardState.fee_policy, class_name="status-note"),
+                                rx.text(DashboardState.market, class_name="market-tag"),
+                                class_name="panel-meta",
+                            ),
                         ),
                         rx.box(
                             rx.box(
                                 rx.hstack(
                                     _metric(
-                                        "Model probability",
+                                        "Model probability (YES)",
                                         DashboardState.probability,
                                         large=True,
                                     ),
-                                    rx.text(
-                                        DashboardState.lean, class_name="lean-pill"
+                                    _metric(
+                                        "Market midpoint (YES)",
+                                        DashboardState.implied,
+                                        large=True,
+                                        tone="market-value",
+                                    ),
+                                    rx.cond(
+                                        DashboardState.lean != "—",
+                                        rx.text(
+                                            DashboardState.lean,
+                                            class_name="lean-pill",
+                                        ),
+                                        rx.fragment(),
                                     ),
                                     class_name="probability-row",
                                 ),
                                 rx.hstack(
-                                    _metric("Market implied", DashboardState.implied),
                                     rx.box(
-                                        rx.text("Net edge", class_name="metric-label"),
+                                        rx.text(
+                                            "Net taker edge",
+                                            class_name="metric-label",
+                                        ),
                                         rx.text(
                                             DashboardState.edge,
                                             class_name="metric-value edge-value",
                                         ),
                                         class_name="metric",
                                     ),
-                                    _metric("Required edge", DashboardState.required_edge),
+                                    _metric("Entry hurdle", DashboardState.required_edge),
                                     class_name="model-metrics",
                                 ),
                                 rx.box(
@@ -1004,18 +1157,28 @@ def index() -> rx.Component:
                                         DashboardState.decision_reason,
                                         class_name="decision-reason",
                                     ),
-                                    class_name="decision-block",
+                                    class_name=rx.cond(
+                                        DashboardState.decision_tone == "danger",
+                                        "decision-block danger",
+                                        rx.cond(
+                                            DashboardState.decision_tone == "warning",
+                                            "decision-block warning",
+                                            rx.cond(
+                                                DashboardState.decision_tone == "positive",
+                                                "decision-block positive",
+                                                "decision-block",
+                                            ),
+                                        ),
+                                    ),
                                 ),
                                 class_name="model-block",
                             ),
                             rx.box(
-                                _metric(
-                                    "Composite index", DashboardState.spot, large=True
-                                ),
+                                _metric(DashboardState.index_label, DashboardState.spot, large=True),
                                 rx.hstack(
                                     _metric("Strike", DashboardState.strike),
-                                    _metric("Expires", DashboardState.expires),
-                                    _metric("Volatility", DashboardState.volatility),
+                                    _metric("60s settlement avg", DashboardState.settlement_average),
+                                    _metric("5m realized vol (ann.)", DashboardState.volatility),
                                     class_name="market-metrics",
                                 ),
                                 class_name="spot-block",
@@ -1025,9 +1188,17 @@ def index() -> rx.Component:
                         rx.box(
                             rx.box(
                                 _chart_header(
-                                    "Model vs market",
-                                    DashboardState.probability,
-                                    DashboardState.implied,
+                                    "P(YES) · %",
+                                    rx.text(
+                                        "Model ",
+                                        DashboardState.probability,
+                                        class_name="chart-key model",
+                                    ),
+                                    rx.text(
+                                        "Market ",
+                                        DashboardState.implied,
+                                        class_name="chart-key market",
+                                    ),
                                 ),
                                 _chart(
                                     DashboardState.model_history,
@@ -1042,7 +1213,7 @@ def index() -> rx.Component:
                                         ),
                                         rx.recharts.line(
                                             data_key="market",
-                                            name="Market",
+                                            name="YES mid",
                                             stroke="#d8ad63",
                                             stroke_width=2,
                                             stroke_dasharray="6 4",
@@ -1050,16 +1221,29 @@ def index() -> rx.Component:
                                             type_="monotone",
                                         ),
                                     ],
-                                    domain=[0, 100],
+                                    domain=DashboardState.probability_domain,
                                     unit="%",
                                 ),
                                 class_name="chart",
                             ),
                             rx.box(
                                 _chart_header(
-                                    "Index vs strike",
-                                    DashboardState.spot,
-                                    DashboardState.strike,
+                                    "Settlement Path",
+                                    rx.text(
+                                        "Index ",
+                                        DashboardState.spot,
+                                        class_name="chart-key index",
+                                    ),
+                                    rx.text(
+                                        "60s avg ",
+                                        DashboardState.settlement_average,
+                                        class_name="chart-key average",
+                                    ),
+                                    rx.text(
+                                        "Strike ",
+                                        DashboardState.strike,
+                                        class_name="chart-key strike",
+                                    ),
                                 ),
                                 _chart(
                                     DashboardState.price_history,
@@ -1074,7 +1258,7 @@ def index() -> rx.Component:
                                         ),
                                         rx.recharts.line(
                                             data_key="average",
-                                            name="Settlement average",
+                                            name="60s avg",
                                             stroke="#d8ad63",
                                             stroke_width=2,
                                             dot=False,
@@ -1094,32 +1278,12 @@ def index() -> rx.Component:
                                 ),
                                 class_name="chart",
                             ),
-                            rx.box(
-                                _chart_header(
-                                    "Realized volatility", DashboardState.volatility
-                                ),
-                                _chart(
-                                    DashboardState.vol_history,
-                                    [
-                                        rx.recharts.line(
-                                            data_key="volatility",
-                                            name="Realized",
-                                            stroke="#91a7b3",
-                                            stroke_width=2,
-                                            dot=False,
-                                            type_="monotone",
-                                        )
-                                    ],
-                                    unit="%",
-                                ),
-                                class_name="chart",
-                            ),
                             class_name="charts",
                         ),
                         class_name="surface market-panel",
                     ),
                     rx.box(
-                        _panel_header("Orderbook"),
+                        _panel_header("Order Book"),
                         rx.box(
                             _book(
                                 "YES",
@@ -1141,7 +1305,7 @@ def index() -> rx.Component:
                         rx.el.summary(
                             rx.hstack(
                                 rx.box(
-                                    rx.heading("Orderbook", as_="h2"),
+                                    rx.heading("Order Book", as_="h2"),
                                     rx.text(
                                         "YES ",
                                         DashboardState.yes_quote["bid"],
@@ -1181,17 +1345,123 @@ def index() -> rx.Component:
                     rx.el.summary(
                         rx.hstack(
                             rx.box(
-                                rx.heading("Operator Controls", as_="h2"),
+                                rx.heading("High-Touch Trading", as_="h2"),
                                 rx.text(
-                                    "Entry, risk, and model parameters",
+                                    "IOC execution and systematic parameters",
                                     class_name="status-note",
                                 ),
                             ),
-                            rx.text("Configure", class_name="summary-action"),
+                            rx.text("Panel", class_name="summary-action"),
                             class_name="controls-summary",
                         )
                     ),
                     rx.box(
+                        rx.box(
+                            rx.heading("Order ticket", as_="h3"),
+                            rx.el.label(
+                                rx.text("Action"),
+                                rx.el.select(
+                                    rx.el.option("Buy", value="buy"),
+                                    rx.el.option("Sell / reduce", value="sell"),
+                                    value=DashboardState.manual_action,
+                                    on_change=DashboardState.set_manual_action,
+                                ),
+                                class_name="field",
+                            ),
+                            rx.el.label(
+                                rx.text("Contract"),
+                                rx.el.select(
+                                    rx.el.option("YES", value="yes"),
+                                    rx.el.option("NO", value="no"),
+                                    value=DashboardState.manual_side,
+                                    on_change=DashboardState.set_manual_side,
+                                ),
+                                class_name="field",
+                            ),
+                            _field(
+                                "Quantity",
+                                DashboardState.manual_count,
+                                DashboardState.set_manual_count,
+                                step="1",
+                                min="1",
+                                max=DashboardState.max_order,
+                            ),
+                            rx.box(
+                                rx.text("Marketable quote", class_name="metric-label"),
+                                rx.text(
+                                    rx.cond(
+                                        DashboardState.manual_side == "yes",
+                                        rx.cond(
+                                            DashboardState.manual_action == "buy",
+                                            DashboardState.yes_quote["ask"],
+                                            DashboardState.yes_quote["bid"],
+                                        ),
+                                        rx.cond(
+                                            DashboardState.manual_action == "buy",
+                                            DashboardState.no_quote["ask"],
+                                            DashboardState.no_quote["bid"],
+                                        ),
+                                    ),
+                                    class_name="ticket-quote",
+                                ),
+                                rx.text(
+                                    "Limit includes configured IOC tolerance.",
+                                    class_name="status-note",
+                                ),
+                                class_name="ticket-market",
+                            ),
+                            rx.cond(
+                                DashboardState.selected_mode == "live",
+                                rx.alert_dialog.root(
+                                    rx.alert_dialog.trigger(
+                                        rx.button(
+                                            "Review live IOC",
+                                            disabled=~DashboardState.armed,
+                                            class_name="button danger ticket-submit",
+                                        )
+                                    ),
+                                    rx.alert_dialog.content(
+                                        rx.alert_dialog.title("Submit live IOC?"),
+                                        rx.alert_dialog.description(
+                                            "This sends a real risk-checked order for the active market. Any unfilled quantity is canceled immediately."
+                                        ),
+                                        rx.hstack(
+                                            rx.alert_dialog.cancel(
+                                                rx.button("Cancel", class_name="button")
+                                            ),
+                                            rx.alert_dialog.action(
+                                                rx.button(
+                                                    "Submit live IOC",
+                                                    on_click=DashboardState.submit_manual,
+                                                    class_name="button danger",
+                                                )
+                                            ),
+                                            class_name="dialog-actions",
+                                        ),
+                                        class_name="confirm-dialog",
+                                    ),
+                                ),
+                                rx.button(
+                                    "Submit sim IOC",
+                                    on_click=DashboardState.submit_manual,
+                                    disabled=~DashboardState.armed,
+                                    class_name="button primary ticket-submit",
+                                ),
+                            ),
+                            rx.text(
+                                DashboardState.manual_status,
+                                class_name="status-note ticket-status",
+                            ),
+                            rx.box(
+                                rx.text("Last execution", class_name="metric-label"),
+                                rx.text(
+                                    DashboardState.last_execution,
+                                    class_name="last-execution-value",
+                                ),
+                                class_name="last-execution",
+                            ),
+                            class_name="manual-ticket",
+                        ),
                         rx.box(
                             _control_group(
                                 "Entry",
@@ -1332,6 +1602,7 @@ def index() -> rx.Component:
                         class_name="risk-controls",
                     ),
                     class_name="surface controls-panel",
+                    open=True,
                 ),
                 class_name="dashboard",
             ),
