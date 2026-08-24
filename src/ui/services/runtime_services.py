@@ -4,7 +4,6 @@ import asyncio
 import logging
 
 from core.auth import get_ws_auth_headers
-from core.config import BRTI_RECALC_INTERVAL_SEC
 from engine.streamer import run_market_streamer
 from engine.trading.runtime import run_trading_loop
 from feeds.brti_aggregator import run_brti_aggregator
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 async def run_background_services() -> None:
     await asyncio.gather(
         run_market_streamer(),
-        run_brti_aggregator(recalc_interval=BRTI_RECALC_INTERVAL_SEC),
+        run_brti_aggregator(),
         run_trading_loop(),
     )
 

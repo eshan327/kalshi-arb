@@ -139,12 +139,6 @@ class OrderBook:
             self.needs_resync = self._is_crossed_unlocked()
             self.last_update_ts = time.time()
 
-    def set_expected_seq(self, expected_seq):
-        """Sets the next expected sequence id."""
-        with self._lock:
-            if isinstance(expected_seq, int):
-                self.expected_seq = expected_seq
-
     def apply_delta(self, msg):
         """
         Applies a single WS orderbook_delta message.
@@ -213,11 +207,6 @@ class OrderBook:
             self.initialized = False
             self.needs_resync = False
             self.last_update_ts = None
-
-    def get_orderbook(self):
-        """Returns the complete orderbook as sorted lists in cents."""
-        with self._lock:
-            return self.get_orderbook_top_n(max(len(self.yes), len(self.no)))
 
     def get_orderbook_top_n(self, depth):
         """Returns top-N slices of the current orderbook in cents for low-latency read paths."""

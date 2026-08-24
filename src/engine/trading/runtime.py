@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import time
-from collections import deque
+from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -14,7 +14,6 @@ from zoneinfo import ZoneInfo
 
 from core.asset_context import get_active_market_profile
 from core.config import (
-    EXECUTION_EVENTS_MAXLEN,
     EXECUTION_EVENTS_PATH,
     EXECUTION_LOOP_INTERVAL_SEC,
     EXECUTION_STATE_PATH,
@@ -35,10 +34,7 @@ from engine.streamer import get_live_book, get_live_market_info
 from engine.trading.fees import taker_fee_cents_per_contract
 from engine.trading.models import TradeSignal
 from engine.trading.paper import PaperAccount
-from engine.trading.settings import (
-    get_trading_settings_model,
-    get_trading_settings_snapshot,
-)
+from engine.trading.settings import get_trading_settings_model
 from engine.trading.strategy import (
     MAX_ORDERBOOK_AGE_SECONDS,
     apply_pricing_overrides,
@@ -51,7 +47,6 @@ _NY = ZoneInfo("America/New_York")
 
 _lock = RLock()
 _execution_lock = RLock()
-_events: deque[dict[str, Any]] = deque(maxlen=max(500, EXECUTION_EVENTS_MAXLEN))
 _market_started_ts = time.time()
 _execution_mode: str | None = None
 _armed = False
@@ -70,12 +65,10 @@ _runtime_state: dict[str, Any] = {
     "last_error": None,
     "last_cycle_ts": None,
     "current_market_ticker": None,
-    "last_signal": None,
     "last_order": None,
     "account": {},
     "daily_risk": {},
     "fee_policy": {},
-    "settings": get_trading_settings_snapshot(),
     "signal_monologue": {"action_intent": "Choose Sim or Live to start."},
 }
 
@@ -266,25 +259,7 @@ def _position_inputs(
 
 
 def _signal_payload(signal: TradeSignal | None) -> dict[str, Any] | None:
-    if signal is None:
-        return None
-    return {
-        "ts": signal.ts,
-        "market_ticker": signal.market_ticker,
-        "side": signal.side,
-        "action": signal.action,
-        "count": signal.count,
-        "quote_price_cents": signal.quote_price_cents,
-        "fair_price_cents": signal.fair_price_cents,
-        "credit_cents": signal.credit_cents,
-        "edge_cents": signal.edge_cents,
-        "edge_probability": signal.edge_probability,
-        "confidence": signal.confidence,
-        "model_probability": signal.model_probability,
-        "market_implied_probability": signal.market_implied_probability,
-        "reason": signal.reason,
-        "diagnostics": dict(signal.diagnostics),
-    }
+    return asdict(signal) if signal is not None else None
 
 
 def _monologue(
@@ -311,34 +286,11 @@ def _monologue(
         else None
     )
 
-    reason_text = {
-        "at_target_allocation": "target allocation reached",
-        "edge_below_threshold": "edge below minimum",
-        "entry_cutoff": "too close to settlement",
-        "ev_signal_ready": "positive expected value",
-        "fee_policy_unavailable": "fee schedule unavailable",
-        "insufficient_available_cash": "insufficient available cash",
-        "invalid_model_probability": "model probability unavailable",
-        "missing_best_quotes": "best bid or ask unavailable",
-        "market_probability_unavailable": "market midpoint unavailable",
-        "orderbook_market_mismatch": "order book is rotating",
-        "p_book_direction_conflict": "model and order book disagree",
-        "p_book_divergence_high": "model and order book differ too much",
-        "p_book_unavailable": "order-book signal unavailable",
-        "position_notional_cap_reached": "position cap reached",
-        "pricing_not_ready": "model warming up",
-        "stale_orderbook": "order book is stale",
-        "volatility_fallback": "waiting for realized volatility",
-    }.get(reason, reason.replace("_", " "))
-
     if signal is not None:
         verb = "SELL" if signal.action == "sell" else "BUY"
-        text = (
-            f"{verb} {signal.count} {signal.side.upper()} @ "
-            f"{signal.quote_price_cents}c — {reason_text}"
-        )
+        text = f"{verb} {signal.count} {signal.side.upper()} @ {signal.quote_price_cents}c"
     else:
-        text = f"PASS — {reason_text}"
+        text = "PASS"
     return {
         "ts": time.time(),
         "action_intent": text,
@@ -358,9 +310,6 @@ def _monologue(
 
 def _emit_event(kind: str, reason: str, **extra: Any) -> dict[str, Any]:
     event = {"ts": time.time(), "kind": kind, "reason": reason, **extra}
-    with _lock:
-        _events.append(dict(event))
-        _runtime_state["last_event"] = dict(event)
     try:
         path = Path(EXECUTION_EVENTS_PATH)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -620,11 +569,6 @@ def get_trading_runtime_snapshot() -> dict[str, Any]:
         return dict(_runtime_state)
 
 
-def get_trading_events(limit: int = 200) -> list[dict[str, Any]]:
-    with _lock:
-        return list(_events)[-max(1, int(limit)) :]
-
-
 def control_trading(operation: str, execution_mode: str = "") -> dict[str, Any]:
     operation = operation.strip().lower()
     if operation in {"select", "start"}:
@@ -655,11 +599,7 @@ def control_trading(operation: str, execution_mode: str = "") -> dict[str, Any]:
                     daily_risk=daily_risk,
                     status="paused",
                     last_error=None,
-                    **(
-                        {"last_order": None, "last_signal": None}
-                        if previous_mode != mode
-                        else {}
-                    ),
+                    **({"last_order": None} if previous_mode != mode else {}),
                 )
                 return {"ok": True, "status": "selected", "execution_mode": mode}
             _set_armed(True)
@@ -741,9 +681,6 @@ def _submit_signal(
         )
 
 
-_submit_live_signal = _submit_signal
-
-
 async def _refresh_paper_account(
     active_market_ticker: str, execution_mode: str
 ) -> None:
@@ -795,10 +732,9 @@ async def _run_single_cycle() -> None:
 
     cycle_ts = time.time()
     settings = get_trading_settings_model()
-    settings_snapshot = get_trading_settings_snapshot()
     execution_mode = _get_execution_mode()
     if execution_mode not in {"paper", "live"}:
-        _set_state(status="stopped", settings=settings_snapshot)
+        _set_state(status="stopped")
         return
 
     market_info = get_live_market_info()
@@ -811,7 +747,7 @@ async def _run_single_cycle() -> None:
     )
     if execution_mode != _get_execution_mode():
         return
-    _set_state(account=account, daily_risk=daily_risk, settings=settings_snapshot)
+    _set_state(account=account, daily_risk=daily_risk)
 
     if daily_risk["locked"]:
         await asyncio.to_thread(
@@ -839,7 +775,7 @@ async def _run_single_cycle() -> None:
             )
         _last_submission_ts = 0.0
         _market_started_ts = cycle_ts
-        _set_state(last_signal=None, last_order=None)
+        _set_state(last_order=None)
     _last_market_ticker = market_ticker
 
     strike = extract_suggested_strike(market_info)
@@ -913,10 +849,7 @@ async def _run_single_cycle() -> None:
 
     common_state = {
         "current_market_ticker": market_ticker,
-        "last_signal": signal_payload,
         "signal_monologue": monologue,
-        "pricing": pricing,
-        "diagnostics": diagnostics,
         "fee_policy": fee_policy,
         "last_reason": reason,
         "last_error": None,

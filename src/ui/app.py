@@ -94,9 +94,6 @@ def _decision_state(
         "missing_best_quotes": "Best bid or ask unavailable.",
         "market_probability_unavailable": "Market midpoint unavailable.",
         "orderbook_market_mismatch": "Order book is rotating.",
-        "p_book_direction_conflict": "Model and order book disagree.",
-        "p_book_divergence_high": "Model and order book differ too much.",
-        "p_book_unavailable": "Order-book signal unavailable.",
         "position_notional_cap_reached": "Position cap reached.",
         "pricing_not_ready": "Model is warming up.",
         "stale_orderbook": "Order book is stale.",
@@ -664,12 +661,6 @@ class DashboardState(rx.State):
                     "slippage_ticks": int(self.slippage),
                     "volatility_override": self.vol_override or None,
                     "volatility_scale": float(self.vol_scale),
-                    "use_p_book_hard_gate": bool(
-                        self._settings.get("use_p_book_hard_gate", False)
-                    ),
-                    "p_book_max_divergence": float(
-                        self._settings.get("p_book_max_divergence", 0.35)
-                    ),
                 }
             )
             if errors:

@@ -24,8 +24,6 @@ class TradingSettings(BaseModel):
     slippage_ticks: int = Field(default=1, ge=0, le=5)
     volatility_override: float | None = Field(default=None, ge=0.01, le=5.0)
     volatility_scale: float = Field(default=1.0, ge=0.5, le=2.0)
-    use_p_book_hard_gate: bool = False
-    p_book_max_divergence: float = Field(default=0.35, ge=0.01, le=0.49)
 
     @field_validator("volatility_override", mode="before")
     @classmethod

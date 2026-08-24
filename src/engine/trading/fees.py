@@ -41,10 +41,6 @@ def kelly_fraction_binary(*, p_win: float, cost_cents: float) -> float:
     return max(0.0, p - ((1.0 - p) / odds))
 
 
-def quarter_kelly_fraction_binary(*, p_win: float, cost_cents: float) -> float:
-    return 0.25 * kelly_fraction_binary(p_win=p_win, cost_cents=cost_cents)
-
-
 def expected_value_cents(
     *, p_win: float, price_cents: float, fee_multiplier: float = 1.0
 ) -> float:

@@ -13,12 +13,7 @@ import websockets
 from core.asset_context import get_active_market_profile
 from data.kalshi_rest import get_open_markets
 from data.kalshi_ws import connect_and_subscribe, request_orderbook_snapshot
-from engine.book_microstructure import (
-    on_live_orderbook_update,
-    reset_book_microstructure_for_new_market,
-)
 from engine.live_pricing import reset_live_pricing_for_new_market
-from engine.market_stream.bootstrap import BufferedDelta, replay_buffered_deltas
 from engine.market_stream.discovery import (
     is_market_closed,
     parse_iso8601_to_epoch,
@@ -110,7 +105,7 @@ async def _stream_with_sync(
         ws = None
         try:
             book.reset()
-            buffered_deltas: list[BufferedDelta] = []
+            buffered_deltas: list[tuple[int, dict]] = []
             bootstrapped = False
             orderbook_sid: int | None = None
             snapshot_deadline: float | None = None
@@ -163,13 +158,19 @@ async def _stream_with_sync(
                         break
                     book.load_ws_snapshot(msg_payload, seq)
                     bootstrapped = True
-                    replay_buffered_deltas(book, buffered_deltas)
+                    for buffered_seq, buffered_msg in sorted(
+                        buffered_deltas, key=lambda item: item[0]
+                    ):
+                        if book.apply_delta_with_seq(buffered_seq, buffered_msg):
+                            continue
+                        if buffered_seq < (book.expected_seq or 0):
+                            continue
+                        break
                     buffered_deltas.clear()
                     snapshot_deadline = None
                     if book.needs_resync:
                         break
                     reconnect_delay = WS_RECONNECT_MIN_SEC
-                    on_live_orderbook_update(book)
                     continue
 
                 if msg_type == "orderbook_delta":
@@ -201,8 +202,6 @@ async def _stream_with_sync(
                             ws, market_ticker, orderbook_sid
                         )
                         continue
-
-                    on_live_orderbook_update(book)
 
                 elif msg_type == "subscribed":
                     channel = msg_payload.get("channel")
@@ -285,7 +284,6 @@ async def run_market_streamer() -> None:
         if target_market != current_market:
             logger.info("Target market: %s", target_market)
             reset_live_pricing_for_new_market()
-            reset_book_microstructure_for_new_market()
             current_market = target_market
 
         _set_live_market_info(profile, selected_market)

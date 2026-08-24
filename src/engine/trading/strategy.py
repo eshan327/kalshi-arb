@@ -6,7 +6,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from engine.asian_pricer import prob_collapsed_variance_binary, prob_levy_tw_binary
-from engine.book_microstructure import get_last_p_book_snapshot
 from engine.orderbook import OrderBook
 from engine.trading.fees import kelly_fraction_binary, taker_fee_cents_per_contract
 from engine.trading.models import TradeSignal
@@ -315,12 +314,6 @@ def build_trade_signal(
     diagnostics["open_no_avg_entry_cents"] = round(float(no_avg_entry), 6)
     diagnostics["total_open_contracts"] = int(total_open_contracts)
 
-    p_book_snapshot = get_last_p_book_snapshot() or {}
-    p_book = _safe_float(p_book_snapshot.get("p_book"))
-    diagnostics["p_book"] = p_book
-    diagnostics["p_book_obi"] = _safe_float(p_book_snapshot.get("obi"))
-    diagnostics["p_book_mpp"] = _safe_float(p_book_snapshot.get("mpp"))
-
     yes_levels, yes_asks, _, no_asks = book.get_orderbook_top_n(1)
     if yes_levels and yes_asks:
         bid_price, bid_size = yes_levels[0]
@@ -434,7 +427,7 @@ def build_trade_signal(
             None if net_exit is None else round(net_exit, 6)
         )
 
-    # Inventory exits never depend on entry gates or microstructure confirmation.
+    # Inventory exits never depend on entry gates.
     for side in sides:
         name = str(side["name"])
         if (
@@ -449,22 +442,6 @@ def build_trade_signal(
                 reason=f"edge_reversal_exit_{name}",
                 trigger=f"{name}_bid_above_fair",
             )
-
-    if settings.use_p_book_hard_gate:
-        p_book_ts = _safe_float(p_book_snapshot.get("ts"))
-        if (
-            p_book is None
-            or p_book_snapshot.get("market_ticker") != market_ticker
-            or p_book_ts is None
-            or ts - p_book_ts > MAX_ORDERBOOK_AGE_SECONDS
-        ):
-            return None, "p_book_unavailable", diagnostics
-        divergence = abs(float(p_model_value) - float(p_book))
-        diagnostics["p_book_divergence"] = divergence
-        if (float(p_model_value) >= 0.5) != (float(p_book) >= 0.5):
-            return None, "p_book_direction_conflict", diagnostics
-        if divergence > settings.p_book_max_divergence:
-            return None, "p_book_divergence_high", diagnostics
 
     market_probability = (
         (float(yes_bid) + float(yes_ask)) / 200.0

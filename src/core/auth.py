@@ -4,7 +4,6 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-from dotenv import load_dotenv
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from core.config import KALSHI_ENV
@@ -37,8 +36,6 @@ def _normalize_pem(pem: str) -> str:
 @lru_cache(maxsize=1)
 def _get_credentials() -> tuple[str, str]:
     """Helper to load keys."""
-
-    load_dotenv()
 
     if KALSHI_ENV == "prod":
         key_id = _normalize_key_id(os.getenv("KALSHI_PROD_KEY_ID"))

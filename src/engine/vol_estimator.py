@@ -29,11 +29,10 @@ def realized_vol_log_returns(
     prices: Sequence[float | int],
     *,
     samples_per_second: float,
-    annualize: bool = True,
     min_returns: int = 2,
 ) -> float | None:
     """
-    Sample standard deviation of log returns, optionally annualized.
+    Annualized sample standard deviation of log returns.
 
     σ_annual ≈ stdev(ln(P_t/P_{t-1})) * sqrt(samples_per_second * SECONDS_PER_YEAR)
 
@@ -56,9 +55,6 @@ def realized_vol_log_returns(
         return None
 
     sigma_period = math.sqrt(var)
-    if not annualize:
-        return sigma_period
-
     hz = max(samples_per_second, 1e-9)
     return sigma_period * math.sqrt(hz * SECONDS_PER_YEAR)
 
@@ -107,6 +103,4 @@ def realized_vol_from_price_points(
         span = max(max_ts - min_ts, 1e-3)
         samples_per_second = max((len(prices) - 1) / span, 1e-3)
 
-    return realized_vol_log_returns(
-        prices, samples_per_second=samples_per_second, annualize=True
-    )
+    return realized_vol_log_returns(prices, samples_per_second=samples_per_second)

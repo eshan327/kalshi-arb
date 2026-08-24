@@ -136,14 +136,3 @@ def test_terminal_summaries_make_book_and_decision_explicit() -> None:
         },
         True,
     ) == ("NO TRADE", "Edge is below the required minimum.", "warning")
-
-
-if __name__ == "__main__":
-    test_asset_prices_preserve_material_decimals()
-    test_dashboard_price_history_uses_a_time_window()
-    test_dashboard_history_starts_at_current_market_open()
-    test_chart_window_rolls_and_only_average_resets()
-    test_position_rows_show_cost_and_mark_to_market_pnl()
-    test_market_probability_and_execution_use_exchange_semantics()
-    test_probability_domain_keeps_low_probability_signals_legible()
-    test_terminal_summaries_make_book_and_decision_explicit()

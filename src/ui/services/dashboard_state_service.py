@@ -4,19 +4,11 @@ from typing import Any
 
 from core.asset_context import get_active_market_profile
 from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
-from engine.book_microstructure import get_last_p_book_snapshot
 from engine.live_pricing import compute_live_pricing_snapshot
 from engine.streamer import get_live_market_info, get_live_orderbook_snapshot
 from engine.trading.runtime import get_trading_runtime_snapshot
 from engine.trading.settings import get_trading_settings_snapshot
 from feeds.state.tick_store import get_brti_settlement_proxy, get_brti_state
-
-
-def clamped_limit(raw_limit: int | None, default: int, max_limit: int) -> int:
-    if raw_limit is None:
-        return default
-    return max(1, min(raw_limit, max_limit))
-
 
 def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
     profile = get_active_market_profile()
@@ -53,7 +45,6 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         close_time_iso=close_iso,
         settlement_decimals=settlement_decimals,
     )
-    microstructure = get_last_p_book_snapshot()
     trading_runtime = get_trading_runtime_snapshot()
     trading_settings = get_trading_settings_snapshot()
     account = (
@@ -84,7 +75,6 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         "settlement_window_seconds": profile.settlement_window_seconds,
         "suggested_strike": suggested_strike,
         "pricing": pricing,
-        "microstructure": microstructure,
         "trading_settings": trading_settings,
         "trading_runtime": trading_runtime,
         "account": account,

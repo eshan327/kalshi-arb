@@ -8,7 +8,7 @@ markets, with optional discretionary overrides.
 ```bash
 uv sync
 cp .env.example .env
-uv run src/main.py bitcoin
+uv run --env-file .env src/main.py bitcoin
 ```
 
 Open [http://127.0.0.1:3000](http://127.0.0.1:3000), choose **Sim**, then click **Start**
@@ -19,8 +19,8 @@ Supported assets: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `ADA`, `NEAR`,
 `BCH`, `HYPE`, `TON`, and `ZEC`. Names such as `bitcoin` and `solana` also work.
 
 ```bash
-uv run src/main.py ETH
-uv run src/main.py SOL
+uv run --env-file .env src/main.py ETH
+uv run --env-file .env src/main.py SOL
 ```
 
 If the asset is omitted, `KALSHI_MARKET_ASSET` is used, then BTC.
@@ -122,8 +122,8 @@ edge-reversal exit.
 - **Order book:** live YES/NO bids, asks, and depth.
 - **High-Touch Trading:** model/risk parameters and manual orders.
 
-Model probability, microstructure, cooldown, and the settlement-average line
-reset at each 15-minute boundary. The rolling synthetic index and realized
+Model probability, cooldown, and the settlement-average line reset at each
+15-minute boundary. The rolling synthetic index and realized
 volatility carry across markets; cash, daily P&L, risk locks, and settlement
 tracking continue.
 

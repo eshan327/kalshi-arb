@@ -16,7 +16,6 @@ class MarketProfile:
     gemini_symbol: str | None
     bitstamp_channel: str
     exchange_sources: tuple[str, ...]
-    index_spacing_units: float | None
     index_tick_decimals: int
     settlement_decimals_fallback: int
     index_deviation_threshold: float
@@ -111,7 +110,6 @@ def _build_profile(asset: str, *details) -> MarketProfile:
         gemini_symbol=f"{asset}USD" if "gemini" in exchange_sources else None,
         bitstamp_channel=f"order_book_{asset.lower()}usd",
         exchange_sources=exchange_sources,
-        index_spacing_units=None,
         index_tick_decimals=index_decimals,
         settlement_decimals_fallback=settlement_decimals,
         index_deviation_threshold=deviation_threshold,
@@ -133,10 +131,6 @@ def normalize_asset(asset: str | None) -> str:
         return ""
     normalized = asset.upper().strip()
     return _ASSET_ALIASES.get(normalized, normalized)
-
-
-def is_supported_asset(asset: str | None) -> bool:
-    return normalize_asset(asset) in MARKET_PROFILES
 
 
 def get_market_profile(asset: str) -> MarketProfile:

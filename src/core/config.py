@@ -1,9 +1,5 @@
 import os
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 KALSHI_ENV = os.getenv("KALSHI_ENV", "demo").lower()
 
 # Optional overrides (must include /trade-api/v2 for REST).
@@ -27,9 +23,6 @@ WEB_PORT = 3000
 
 # Dashboard/view defaults
 ORDERBOOK_VIEW_DEPTH = 6
-
-# Data/compute cadence defaults
-BRTI_RECALC_INTERVAL_SEC = 1.0
 
 # Market selection defaults
 MARKET_ASSET_DEFAULT = os.getenv("KALSHI_MARKET_ASSET", "BTC").upper()
@@ -62,7 +55,6 @@ PAPER_STARTING_CASH_CENTS = max(
 EXECUTION_LOOP_INTERVAL_SEC = max(
     0.25, _env_float("KALSHI_EXECUTION_LOOP_INTERVAL_SEC", 1.0)
 )
-EXECUTION_EVENTS_MAXLEN = max(200, _env_int("KALSHI_EXECUTION_EVENTS_MAXLEN", 8_000))
 EXECUTION_EVENTS_PATH = os.getenv(
     "KALSHI_EXECUTION_EVENTS_PATH", ".runtime/execution_events.jsonl"
 )

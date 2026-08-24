@@ -41,7 +41,7 @@ def test_orderbook_quotes_and_market_midpoint_use_yes_probability() -> None:
     )
     assert message["market_implied_probability"] == pytest.approx(0.265)
     assert message["required_edge_cents"] == 0.5
-    assert message["action_intent"] == "PASS — target allocation reached"
+    assert message["action_intent"] == "PASS"
 
 
 def test_unified_websocket_no_price_is_converted_to_no_leg() -> None:
@@ -132,7 +132,6 @@ def test_sequence_gap_recovers_with_in_band_snapshot(monkeypatch) -> None:
         lambda _ticker: asyncio.sleep(0, result=ws),
     )
     monkeypatch.setattr(streamer, "is_market_closed", lambda _ts: next(close_checks))
-    monkeypatch.setattr(streamer, "on_live_orderbook_update", lambda _book: None)
     book = OrderBook("TEST")
 
     asyncio.run(streamer._stream_with_sync("TEST", book, market_close_ts=1))
@@ -441,7 +440,7 @@ def test_disarmed_runtime_cannot_submit(monkeypatch) -> None:
         "place_limit_order",
         lambda **_: (_ for _ in ()).throw(AssertionError("order submitted")),
     )
-    status, result = runtime._submit_live_signal(object(), 1_000, 30)
+    status, result = runtime._submit_signal(object(), 1_000, 30)
     assert (status, result) == ("disarmed", None)
 
 
