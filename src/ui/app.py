@@ -10,14 +10,14 @@ from typing import Any
 
 import reflex as rx
 
+from core.auth import verify_dashboard_token
 from core.config import ORDERBOOK_VIEW_DEPTH
 from engine.market_stream.discovery import parse_iso8601_to_epoch
-from engine.settlement_sampling import extract_valid_index_points
 from engine.trading.runtime import control_trading, submit_manual_order
 from engine.trading.settings import reset_trading_settings, update_trading_settings
 from engine.trading.strategy import MAX_ORDERBOOK_AGE_SECONDS
 from engine.vol_estimator import realized_vol_from_price_points
-from feeds.state.tick_store import get_brti_ticks
+from feeds.state.tick_store import get_index_ticks
 from ui.services.dashboard_state_service import build_dashboard_state_payload
 from ui.services.runtime_services import (
     run_background_services,
@@ -65,11 +65,7 @@ def _duration(seconds: Any) -> str:
 
 def _tone(value: float | None) -> str:
     return (
-        "positive"
-        if value and value > 0
-        else "negative"
-        if value and value < 0
-        else ""
+        "positive" if value and value > 0 else "negative" if value and value < 0 else ""
     )
 
 
@@ -78,9 +74,7 @@ def _fresh(timestamp: Any, max_age: float, now: float) -> bool:
     return value is not None and 0 <= now - value <= max_age
 
 
-def _decision_state(
-    monologue: dict[str, Any], armed: bool
-) -> tuple[str, str, str]:
+def _decision_state(monologue: dict[str, Any], armed: bool) -> tuple[str, str, str]:
     if not armed:
         return "WAIT", "Engine is paused.", "neutral"
     reason = str(monologue.get("decision_reason") or "")
@@ -248,7 +242,9 @@ def _position_rows(
                 "exposure": _money(position.get("market_exposure_cents")),
                 "unrealized_pnl": _money(unrealized),
                 "pnl_tone": _tone(unrealized),
-                "row_class": "position-line active-position" if active else "position-line",
+                "row_class": "position-line active-position"
+                if active
+                else "position-line",
             }
         )
     return sorted(rows, key=lambda row: "active-position" not in row["row_class"])
@@ -269,50 +265,15 @@ def recent_rows(
     ]
 
 
-def moving_average(
-    rows: list[dict[str, Any]],
-    window_seconds: int,
-    average_start_ts: float | None = None,
-) -> list[dict[str, Any]]:
-    points = sorted(
-        (
-            (float(row["ts"]), float(row["brti"]))
-            for row in rows
-            if _number(row.get("ts")) is not None
-            and _number(row.get("brti")) is not None
-        ),
-        key=lambda point: point[0],
-    )
-    result: list[dict[str, Any]] = []
-    left = 0
-    display_left = 0
-    running_sum = 0.0
-    display_sum = 0.0
-    average_started = False
-    for right, (timestamp, spot) in enumerate(points):
-        display_sum += spot
-        while timestamp - points[display_left][0] > 5:
-            display_sum -= points[display_left][1]
-            display_left += 1
-        average = None
-        if average_start_ts is None or timestamp >= average_start_ts:
-            if not average_started:
-                left = right
-                running_sum = 0.0
-                average_started = True
-            running_sum += spot
-            while timestamp - points[left][0] > window_seconds:
-                running_sum -= points[left][1]
-                left += 1
-            average = round(running_sum / (right - left + 1), 2)
-        result.append(
-            {
-                "time": datetime.fromtimestamp(timestamp).strftime("%H:%M:%S"),
-                "spot": round(display_sum / (right - display_left + 1), 2),
-                "average": average,
-            }
-        )
-    return result
+def index_history(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "time": datetime.fromtimestamp(row["ts"]).strftime("%H:%M:%S"),
+            "spot": row["price"],
+            "average": row.get("average"),
+        }
+        for row in rows
+    ]
 
 
 def market_open_time(close_time_iso: str | None) -> float | None:
@@ -330,6 +291,33 @@ def market_ticks(
 
 
 class DashboardState(rx.State):
+    operator_token = ""
+    auth_error = ""
+    _operator_authenticated = False
+
+    @rx.var
+    def operator_authenticated(self) -> bool:
+        return self._operator_authenticated
+
+    def _require_operator(self) -> None:
+        if not self._operator_authenticated:
+            raise PermissionError("Operator authentication required.")
+
+    @rx.event
+    def authenticate(self) -> None:
+        authenticated = verify_dashboard_token(self.operator_token)
+        self.operator_token = ""
+        if not authenticated:
+            self.auth_error = "Invalid operator token."
+            return
+        self._operator_authenticated = True
+        self.auth_error = ""
+        self._refresh()
+
+    @rx.event
+    def set_operator_token(self, value: str) -> None:
+        self.operator_token = value
+
     asset = "—"
     market = "Waiting for market"
     selected_mode = "paper"
@@ -416,6 +404,7 @@ class DashboardState(rx.State):
         self.vol_scale = str(settings.get("volatility_scale", 1))
 
     def _refresh(self) -> None:
+        self._require_operator()
         try:
             state = build_dashboard_state_payload(depth=ORDERBOOK_VIEW_DEPTH)
             self._snapshot = state
@@ -425,12 +414,11 @@ class DashboardState(rx.State):
             pricing = state.get("pricing") or {}
             monologue = state.get("signal_monologue") or {}
             book = state.get("orderbook") or {}
-            brti = state.get("brti") or {}
-            ticks = get_brti_ticks(limit=4000)
-            market_info = state.get("market_info") or {}
+            index = state.get("index") or {}
+            ticks = get_index_ticks(limit=4000)
             history_ticks = recent_rows(ticks, _PLOT_WINDOW_SECONDS)
             sigma_fit = realized_vol_from_price_points(
-                extract_valid_index_points(ticks),
+                [(tick["ts"], tick["price"]) for tick in ticks],
                 window_seconds=300,
                 min_samples=8,
             )
@@ -447,9 +435,8 @@ class DashboardState(rx.State):
                 self._history_market = market_ticker
             self.armed = bool(runtime.get("armed"))
             self.kalshi_env = str(runtime.get("kalshi_env") or "").upper()
-            if (
-                runtime.get("execution_mode") in {"paper", "live"}
-                and (self.armed or not self._mode_touched)
+            if runtime.get("execution_mode") in {"paper", "live"} and (
+                self.armed or not self._mode_touched
             ):
                 self.selected_mode = runtime["execution_mode"]
             equity_change = _number(risk.get("session_pnl_cents")) or 0.0
@@ -464,7 +451,9 @@ class DashboardState(rx.State):
             book_ok = bool(book.get("initialized")) and _fresh(
                 book.get("last_update_ts"), MAX_ORDERBOOK_AGE_SECONDS, now_ts
             )
-            index_ok = _fresh(brti.get("timestamp"), 5, now_ts)
+            index_ok = bool(index.get("connected")) and _fresh(
+                index.get("timestamp"), 5, now_ts
+            )
             model_ok = bool(pricing.get("ready"))
             healthy_count = sum((book_ok, index_ok, model_ok))
             self.data_state = (
@@ -489,14 +478,10 @@ class DashboardState(rx.State):
             utilization = abs(min(0.0, drawdown)) / max_loss if max_loss else 0.0
             locked = bool(risk.get("locked"))
             self.risk_state = (
-                "LOCKED"
-                if locked
-                else "NEAR LIMIT"
-                if utilization >= 0.8
-                else "NORMAL"
+                "LOCKED" if locked else "NEAR LIMIT" if utilization >= 0.8 else "NORMAL"
             )
 
-            spot = _number(brti.get("brti"))
+            spot = _number(index.get("price"))
             strike = _number(pricing.get("strike_usd") or state.get("suggested_strike"))
             self.spot = _price(spot)
             self.strike = _price(strike)
@@ -554,21 +539,11 @@ class DashboardState(rx.State):
                         history_ts,
                     )
                     self.probability_domain = _probability_domain(self.model_history)
-            window = int(state.get("settlement_window_seconds") or 60)
             self.price_history = [
-                {**point, "strike": strike}
-                for point in moving_average(
-                    history_ticks,
-                    window,
-                    average_start_ts=market_open_time(market_info.get("close_time")),
-                )
+                {**point, "strike": strike} for point in index_history(history_ticks)
             ]
-            averages = [
-                _number(point.get("average"))
-                for point in self.price_history
-                if _number(point.get("average")) is not None
-            ]
-            self.settlement_average = _price(averages[-1]) if averages else "—"
+            official = index.get("trailing_average") or {}
+            self.settlement_average = _price(official.get("value")) if index_ok else "—"
             self.yes_book = _book_rows(book, "yes")
             self.no_book = _book_rows(book, "no")
             self.yes_quote = _book_summary(book, "yes")
@@ -583,6 +558,8 @@ class DashboardState(rx.State):
 
     @rx.event
     def load(self) -> None:
+        if not self._operator_authenticated:
+            return
         self._refresh()
 
     @rx.event
@@ -591,6 +568,7 @@ class DashboardState(rx.State):
 
     @rx.event
     def choose_mode(self, mode: str) -> None:
+        self._require_operator()
         if mode in {"paper", "live"}:
             try:
                 control_trading("select", mode)
@@ -603,6 +581,7 @@ class DashboardState(rx.State):
             self._refresh()
 
     def _control(self, operation: str) -> None:
+        self._require_operator()
         try:
             control_trading(
                 operation, self.selected_mode if operation == "start" else ""
@@ -626,6 +605,7 @@ class DashboardState(rx.State):
 
     @rx.event
     def submit_manual(self) -> None:
+        self._require_operator()
         try:
             result = submit_manual_order(
                 side=self.manual_side,
@@ -646,6 +626,7 @@ class DashboardState(rx.State):
 
     @rx.event
     def save_settings(self) -> None:
+        self._require_operator()
         try:
             settings, errors = update_trading_settings(
                 {
@@ -672,6 +653,7 @@ class DashboardState(rx.State):
 
     @rx.event
     def reset_settings(self) -> None:
+        self._require_operator()
         self._apply_settings(reset_trading_settings())
         self.settings_status = "Defaults restored."
 
@@ -884,7 +866,7 @@ def _chart_header(title: str, *readings: rx.Component) -> rx.Component:
     )
 
 
-def index() -> rx.Component:
+def _dashboard() -> rx.Component:
     return rx.box(
         rx.moment(
             interval=1000, on_change=DashboardState.refresh.temporal, display="none"
@@ -896,9 +878,13 @@ def index() -> rx.Component:
                     class_name="topbar-title",
                 ),
                 rx.hstack(
-                    _terminal_cell("Asset", DashboardState.asset, "terminal-cell-value"),
                     _terminal_cell(
-                        "Active market", DashboardState.market, "terminal-cell-value market-code"
+                        "Asset", DashboardState.asset, "terminal-cell-value"
+                    ),
+                    _terminal_cell(
+                        "Active market",
+                        DashboardState.market,
+                        "terminal-cell-value market-code",
                     ),
                     _terminal_cell(
                         "Mode",
@@ -1083,7 +1069,9 @@ def index() -> rx.Component:
                         _panel_header(
                             "Market & Model",
                             rx.hstack(
-                                rx.text(DashboardState.fee_policy, class_name="status-note"),
+                                rx.text(
+                                    DashboardState.fee_policy, class_name="status-note"
+                                ),
                                 rx.text(DashboardState.market, class_name="market-tag"),
                                 class_name="panel-meta",
                             ),
@@ -1124,7 +1112,9 @@ def index() -> rx.Component:
                                         ),
                                         class_name="metric",
                                     ),
-                                    _metric("Entry hurdle", DashboardState.required_edge),
+                                    _metric(
+                                        "Entry hurdle", DashboardState.required_edge
+                                    ),
                                     class_name="model-metrics",
                                 ),
                                 rx.box(
@@ -1134,10 +1124,12 @@ def index() -> rx.Component:
                                             DashboardState.decision_tone == "positive",
                                             "decision-label positive",
                                             rx.cond(
-                                                DashboardState.decision_tone == "danger",
+                                                DashboardState.decision_tone
+                                                == "danger",
                                                 "decision-label danger",
                                                 rx.cond(
-                                                    DashboardState.decision_tone == "warning",
+                                                    DashboardState.decision_tone
+                                                    == "warning",
                                                     "decision-label warning",
                                                     "decision-label",
                                                 ),
@@ -1155,7 +1147,8 @@ def index() -> rx.Component:
                                             DashboardState.decision_tone == "warning",
                                             "decision-block warning",
                                             rx.cond(
-                                                DashboardState.decision_tone == "positive",
+                                                DashboardState.decision_tone
+                                                == "positive",
                                                 "decision-block positive",
                                                 "decision-block",
                                             ),
@@ -1165,11 +1158,21 @@ def index() -> rx.Component:
                                 class_name="model-block",
                             ),
                             rx.box(
-                                _metric(DashboardState.index_label, DashboardState.spot, large=True),
+                                _metric(
+                                    DashboardState.index_label,
+                                    DashboardState.spot,
+                                    large=True,
+                                ),
                                 rx.hstack(
                                     _metric("Strike", DashboardState.strike),
-                                    _metric("60s settlement avg", DashboardState.settlement_average),
-                                    _metric("5m realized vol (ann.)", DashboardState.volatility),
+                                    _metric(
+                                        "CF trailing 60s avg",
+                                        DashboardState.settlement_average,
+                                    ),
+                                    _metric(
+                                        "5m realized vol (ann.)",
+                                        DashboardState.volatility,
+                                    ),
                                     class_name="market-metrics",
                                 ),
                                 class_name="spot-block",
@@ -1601,6 +1604,36 @@ def index() -> rx.Component:
         ),
         class_name="page",
     )
+
+
+def _login() -> rx.Component:
+    return rx.center(
+        rx.vstack(
+            rx.heading("Operator authentication", as_="h1"),
+            rx.text("Enter the dashboard token configured for this process."),
+            rx.input(
+                value=DashboardState.operator_token,
+                on_change=DashboardState.set_operator_token,
+                type="password",
+                placeholder="Dashboard token",
+                width="100%",
+            ),
+            rx.button(
+                "Unlock",
+                on_click=DashboardState.authenticate,
+                class_name="button primary",
+            ),
+            rx.text(DashboardState.auth_error, class_name="status-note negative"),
+            class_name="surface",
+            padding="32px",
+            width="min(420px, calc(100vw - 32px))",
+        ),
+        class_name="page",
+    )
+
+
+def index() -> rx.Component:
+    return rx.cond(DashboardState.operator_authenticated, _dashboard(), _login())
 
 
 @asynccontextmanager

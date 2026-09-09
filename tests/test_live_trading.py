@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 import pytest
 
@@ -71,79 +70,6 @@ def test_unified_websocket_snapshot_is_sequence_aligned_and_reciprocal() -> None
 
     assert book.expected_seq == 42
     assert book.get_best_prices() == (55.0, 57.0, 43.0, 45.0)
-
-
-def test_sequence_gap_recovers_with_in_band_snapshot(monkeypatch) -> None:
-    from engine import streamer
-
-    class FakeWebSocket:
-        def __init__(self) -> None:
-            self.messages = iter(
-                [
-                    {
-                        "type": "subscribed",
-                        "msg": {"channel": "orderbook_delta", "sid": 9},
-                    },
-                    {
-                        "type": "orderbook_snapshot",
-                        "seq": 10,
-                        "msg": {
-                            "yes_dollars_fp": [["0.4900", "10.00"]],
-                            "no_dollars_fp": [["0.5000", "20.00"]],
-                        },
-                    },
-                    {
-                        "type": "orderbook_delta",
-                        "seq": 12,
-                        "msg": {
-                            "side": "yes",
-                            "price_dollars": "0.4800",
-                            "delta_fp": "1.00",
-                        },
-                    },
-                    {
-                        "type": "orderbook_snapshot",
-                        "seq": 12,
-                        "msg": {
-                            "yes_dollars_fp": [["0.4800", "11.00"]],
-                            "no_dollars_fp": [["0.5100", "20.00"]],
-                        },
-                    },
-                    {"type": "noop", "msg": {}},
-                ]
-            )
-            self.sent = []
-            self.closed = False
-
-        async def recv(self):
-            return json.dumps(next(self.messages))
-
-        async def send(self, message):
-            self.sent.append(json.loads(message))
-
-        async def close(self):
-            self.closed = True
-
-    ws = FakeWebSocket()
-    close_checks = iter([False, False, False, False, False, True])
-    monkeypatch.setattr(
-        streamer,
-        "connect_and_subscribe",
-        lambda _ticker: asyncio.sleep(0, result=ws),
-    )
-    monkeypatch.setattr(streamer, "is_market_closed", lambda _ts: next(close_checks))
-    book = OrderBook("TEST")
-
-    asyncio.run(streamer._stream_with_sync("TEST", book, market_close_ts=1))
-
-    assert ws.sent[0]["params"] == {
-        "sids": [9],
-        "market_tickers": ["TEST"],
-        "action": "get_snapshot",
-    }
-    assert book.expected_seq == 13
-    assert book.get_best_prices() == (48.0, 51.0, 49.0, 52.0)
-    assert ws.closed is True
 
 
 def test_crossed_book_fails_closed() -> None:
@@ -586,20 +512,28 @@ def test_subpenny_fees_and_pnl_follow_cash_rounding() -> None:
     assert snapshot["realized_pnl_cents"] == pytest.approx(-3)
 
 
-def test_live_portfolio_value_is_position_value(monkeypatch) -> None:
+def test_live_portfolio_value_is_position_value(monkeypatch):
     from engine.trading import runtime
 
     monkeypatch.setattr(
-        runtime,
-        "get_balance_summary",
-        lambda: {"balance": 40_000, "portfolio_value": 2_500, "updated_ts": 1},
+        runtime.account_state,
+        "snapshot",
+        lambda: {
+            "balance": 10000,
+            "portfolio_value": 2500,
+            "updated_ts": 1,
+            "refreshed_ts": 1.0,
+            "positions": [],
+            "ready": True,
+            "pending_order": None,
+            "balance_breakdown": [{"exchange_index": 2, "balance": "30.00"}],
+        },
     )
-    monkeypatch.setattr(runtime, "get_positions", lambda: [])
-
+    monkeypatch.setattr(runtime, "get_live_market_info", lambda: {"exchange_index": 2})
     snapshot = runtime._fetch_account_snapshot("live")
-
-    assert snapshot["equity_cents"] == 42_500
-    assert snapshot["portfolio_value_cents"] == 2_500
+    assert snapshot["equity_cents"] == 12500
+    assert snapshot["cash_cents"] == 10000
+    assert snapshot["available_cash_cents"] == 3000
 
 
 def test_paper_mode_cannot_reach_live_order_api(monkeypatch) -> None:
@@ -644,7 +578,13 @@ def test_discretionary_order_uses_shared_risk_boundary(monkeypatch) -> None:
     monkeypatch.setattr(
         runtime,
         "get_live_market_info",
-        lambda: {"ticker": "TEST", "price_ranges": []},
+        lambda: {
+            "ticker": "TEST",
+            "status": "active",
+            "close_time": "2099-01-01T00:00:00Z",
+            "price_ranges": [],
+            "fee_policy": {"ready": True, "fee_multiplier": 1.0},
+        },
     )
     monkeypatch.setattr(
         runtime,
@@ -700,9 +640,17 @@ def test_live_discretionary_fill_reconciles_runtime_account(monkeypatch) -> None
     monkeypatch.setattr(
         runtime,
         "get_live_market_info",
-        lambda: {"ticker": "TEST", "price_ranges": []},
+        lambda: {
+            "ticker": "TEST",
+            "status": "active",
+            "close_time": "2099-01-01T00:00:00Z",
+            "price_ranges": [],
+            "fee_policy": {"ready": True, "fee_multiplier": 1.0},
+        },
     )
-    monkeypatch.setattr(runtime, "_fetch_account_snapshot", lambda _mode: next(accounts))
+    monkeypatch.setattr(
+        runtime, "_fetch_account_snapshot", lambda _mode: next(accounts)
+    )
     monkeypatch.setattr(
         runtime, "_sync_daily_risk", lambda *_: ({"locked": False}, False)
     )

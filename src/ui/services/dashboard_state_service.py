@@ -8,24 +8,21 @@ from engine.live_pricing import compute_live_pricing_snapshot
 from engine.streamer import get_live_market_info, get_live_orderbook_snapshot
 from engine.trading.runtime import get_trading_runtime_snapshot
 from engine.trading.settings import get_trading_settings_snapshot
-from feeds.state.tick_store import get_brti_settlement_proxy, get_brti_state
+from feeds.state.tick_store import get_index_state
+
 
 def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
     profile = get_active_market_profile()
 
     snapshot = get_live_orderbook_snapshot(depth=depth)
-    brti = get_brti_state()
+    index = get_index_state()
     active_asset = profile.asset
-    feed_asset = str(brti.get("asset") or active_asset)
+    feed_asset = str(index.get("asset") or active_asset)
     asset_syncing = feed_asset != active_asset
 
     market_info = get_live_market_info()
     settlement_decimals = extract_settlement_decimals(
         market_info, profile.settlement_decimals_fallback
-    )
-    settlement_proxy = get_brti_settlement_proxy(
-        window_seconds=profile.settlement_window_seconds,
-        decimals=settlement_decimals,
     )
     suggested_strike = extract_suggested_strike(market_info)
     close_iso = (
@@ -61,8 +58,7 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
 
     payload = {
         "orderbook": snapshot,
-        "brti": brti,
-        "synthetic_settlement_proxy": settlement_proxy,
+        "index": index,
         "market_info": market_info,
         "asset": profile.asset,
         "asset_display": profile.display_name,

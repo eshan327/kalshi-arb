@@ -20,6 +20,30 @@ _session = requests.Session()
 _live_order_entry_enabled = False
 
 
+class KalshiAPIError(RuntimeError):
+    def __init__(self, status: int, detail):
+        self.status = status
+        super().__init__(f"Kalshi API {status}: {detail}")
+
+
+def _pages(path: str, key: str, params: dict) -> list[dict]:
+    rows, cursor = [], None
+    seen = set()
+    while True:
+        payload = _request(
+            "GET",
+            path,
+            params={**params, "limit": 1000, **({"cursor": cursor} if cursor else {})},
+        )
+        rows.extend(payload.get(key, []))
+        cursor = payload.get("cursor")
+        if not cursor:
+            return rows
+        if cursor in seen:
+            raise RuntimeError("Repeated pagination cursor")
+        seen.add(cursor)
+
+
 def set_live_order_entry_enabled(enabled: bool) -> None:
     global _live_order_entry_enabled
     _live_order_entry_enabled = bool(enabled)
@@ -53,7 +77,7 @@ def _request(
             detail = response.json().get("error") or response.json()
         except ValueError:
             detail = response.text[:500]
-        raise RuntimeError(f"Kalshi API {response.status_code}: {detail}")
+        raise KalshiAPIError(response.status_code, detail)
     return response.json() if response.content else {}
 
 
@@ -82,13 +106,15 @@ def place_limit_order(
         quantity = Decimal(str(count)).quantize(Decimal("0.01"))
     except InvalidOperation as exc:
         raise ValueError("count must be numeric") from exc
-    if quantity <= 0:
+    if not quantity.is_finite() or quantity <= 0:
         raise ValueError("count must be positive")
     try:
         outcome_price = Decimal(str(price_cents)).quantize(Decimal("0.01"))
     except InvalidOperation as exc:
         raise ValueError("price_cents must be numeric") from exc
-    if not Decimal("0") < outcome_price < Decimal("100"):
+    if not outcome_price.is_finite() or not Decimal("0") < outcome_price < Decimal(
+        "100"
+    ):
         raise ValueError("price_cents must be between 0 and 100")
 
     # V2 quotes the YES book only: bid=buy YES/sell NO, ask=sell YES/buy NO.
@@ -118,53 +144,46 @@ def place_limit_order(
     }
 
 
-def get_balance_summary() -> dict[str, int]:
-    payload = _request("GET", "/portfolio/balance")
-    return {
-        "balance": int(payload.get("balance") or 0),
-        "portfolio_value": int(payload.get("portfolio_value") or 0),
-        "updated_ts": int(payload.get("updated_ts") or 0),
-    }
-
-
 def get_positions(*, market_ticker: str | None = None) -> list[dict[str, Any]]:
-    payload = _request(
-        "GET",
+    return _pages(
         "/portfolio/positions",
-        params={
-            "limit": 1000,
+        "market_positions",
+        {
             "count_filter": "position",
             **({"ticker": market_ticker} if market_ticker else {}),
         },
     )
-    positions = payload.get("market_positions")
-    return [dict(item) for item in positions] if isinstance(positions, list) else []
 
 
 def get_open_orders(*, market_ticker: str | None = None) -> list[dict[str, Any]]:
-    payload = _request(
-        "GET",
+    return _pages(
         "/portfolio/orders",
-        params={
-            "status": "resting",
-            "limit": 1000,
-            **({"ticker": market_ticker} if market_ticker else {}),
-        },
+        "orders",
+        {"status": "resting", **({"ticker": market_ticker} if market_ticker else {})},
     )
-    orders = payload.get("orders")
-    return [dict(item) for item in orders] if isinstance(orders, list) else []
 
 
-def cancel_order(order_id: str) -> dict[str, Any]:
-    return _request("DELETE", f"/portfolio/events/orders/{order_id}")
+def cancel_order(order_id: str, market_ticker: str) -> dict[str, Any]:
+    return _request(
+        "DELETE",
+        f"/portfolio/events/orders/{order_id}",
+        params={"market_ticker": market_ticker},
+    )
 
 
 def cancel_bot_orders(*, market_ticker: str | None = None) -> int:
     canceled = 0
-    for order in get_open_orders(market_ticker=market_ticker):
+    from data.account_state import bot_orders
+
+    orders = bot_orders()
+    if orders is None:
+        orders = get_open_orders(market_ticker=market_ticker)
+    for order in orders:
+        if market_ticker and order.get("ticker") != market_ticker:
+            continue
         client_id = str(order.get("client_order_id") or "")
         order_id = str(order.get("order_id") or "")
         if client_id.startswith(CLIENT_ORDER_PREFIX) and order_id:
-            cancel_order(order_id)
+            cancel_order(order_id, str(order["ticker"]))
             canceled += 1
     return canceled

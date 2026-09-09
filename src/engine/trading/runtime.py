@@ -21,16 +21,22 @@ from core.config import (
     PAPER_STARTING_CASH_CENTS,
 )
 from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
-from data.kalshi_rest import get_event, get_market, get_series
+from data import account_state
+from data.kalshi_rest import get_market
 from data.kalshi_trading import (
+    KalshiAPIError,
+    _client_order_id,
     cancel_bot_orders,
-    get_balance_summary,
-    get_positions,
     place_limit_order,
     set_live_order_entry_enabled,
 )
 from engine.live_pricing import compute_live_pricing_snapshot
-from engine.streamer import get_live_book, get_live_market_info
+from engine.streamer import (
+    get_live_book,
+    get_live_market_info,
+    get_market_result,
+    get_stream_epoch,
+)
 from engine.trading.fees import taker_fee_cents_per_contract
 from engine.trading.models import TradeSignal
 from engine.trading.paper import PaperAccount
@@ -41,6 +47,7 @@ from engine.trading.strategy import (
     build_trade_signal,
     slipped_price_cents,
 )
+from engine.updates import bind, changed
 
 logger = logging.getLogger(__name__)
 _NY = ZoneInfo("America/New_York")
@@ -142,10 +149,10 @@ def _fetch_account_snapshot(execution_mode: str | None = None) -> dict[str, Any]
         return _paper_account.snapshot()
     if mode != "live":
         raise RuntimeError("Choose Sim or Live first.")
-    balance = get_balance_summary()
+    balance = account_state.snapshot()
     positions = [
         position
-        for raw in get_positions()
+        for raw in balance["positions"]
         if (position := _position_payload(raw)) is not None
     ]
     cash_cents = int(balance["balance"])
@@ -156,8 +163,20 @@ def _fetch_account_snapshot(execution_mode: str | None = None) -> dict[str, Any]
         "equity_cents": cash_cents + portfolio_value_cents,
         "positions": positions,
         "updated_ts": int(balance["updated_ts"]),
-        "refreshed_ts": time.time(),
+        "refreshed_ts": balance["refreshed_ts"],
+        "ready": balance["ready"],
+        "pending_order": balance["pending_order"],
+        "available_cash_cents": _shard_cash(balance),
     }
+
+
+def _shard_cash(balance: dict) -> int:
+    shard = get_live_market_info().get("exchange_index")
+    for entry in balance.get("balance_breakdown", []):
+        if entry.get("exchange_index") == shard:
+            return int(Decimal(entry["balance"]) * 100)
+    # No allocation is assumed on another shard or an unscoped restricted key.
+    return 0
 
 
 def _risk_day() -> str:
@@ -288,7 +307,9 @@ def _monologue(
 
     if signal is not None:
         verb = "SELL" if signal.action == "sell" else "BUY"
-        text = f"{verb} {signal.count} {signal.side.upper()} @ {signal.quote_price_cents}c"
+        text = (
+            f"{verb} {signal.count} {signal.side.upper()} @ {signal.quote_price_cents}c"
+        )
     else:
         text = "PASS"
     return {
@@ -343,26 +364,40 @@ def _place_order(
         )
     if execution_mode != "live":
         raise RuntimeError("Choose Sim or Live first.")
-    return place_limit_order(
-        market_ticker=market_ticker,
-        side=side,
-        action=action,
-        count=count,
-        price_cents=price_cents,
-        allow_when_stopped=allow_when_stopped,
-    )
+    client_id = _client_order_id()
+    account_state.begin_order(client_id, market_ticker)
+    try:
+        result = place_limit_order(
+            market_ticker=market_ticker,
+            side=side,
+            action=action,
+            count=count,
+            price_cents=price_cents,
+            client_order_id=client_id,
+            allow_when_stopped=allow_when_stopped,
+        )
+        account_state.order_response(result["order"])
+        return result
+    except KalshiAPIError as exc:
+        if 400 <= exc.status < 500 and exc.status not in {408, 409}:
+            account_state.order_rejected()
+        raise
+    # Timeouts/5xx remain pending until the existing client ID is reconciled.
 
 
 def _current_fee_multiplier() -> float:
-    with _lock:
-        return float(
-            (_runtime_state.get("fee_policy") or {}).get("fee_multiplier") or 1.0
-        )
+    policy = get_live_market_info().get("fee_policy") or {}
+    if not policy.get("ready"):
+        raise RuntimeError("Current market fee policy is unavailable.")
+    return float(policy["fee_multiplier"])
 
 
 def _flatten_market(
     account: dict[str, Any], market_ticker: str, execution_mode: str
 ) -> dict[str, Any]:
+    _require_active_market()
+    if not account.get("ready", True):
+        raise RuntimeError("Live account is reconciling.")
     position = _market_position(account, market_ticker)
     if position is None:
         return {"ok": True, "status": "already_flat", "market_ticker": market_ticker}
@@ -439,7 +474,9 @@ def submit_manual_order(*, side: str, action: str, count: Any) -> dict[str, Any]
             or book.market_ticker != market_ticker
         ):
             raise RuntimeError("A current initialized market is required.")
-        book_updated_ts = getattr(book, "last_update_ts", None)
+        book_updated_ts = getattr(book, "last_verified_ts", None) or getattr(
+            book, "last_update_ts", None
+        )
         if (
             not isinstance(book_updated_ts, (int, float))
             or time.time() - book_updated_ts > MAX_ORDERBOOK_AGE_SECONDS
@@ -447,6 +484,9 @@ def submit_manual_order(*, side: str, action: str, count: Any) -> dict[str, Any]
             raise RuntimeError("The active orderbook is stale.")
 
         account = _fetch_account_snapshot(execution_mode)
+        if not account.get("ready", True):
+            raise RuntimeError("Live account is reconciling.")
+        _require_active_market()
         daily_risk, _ = _sync_daily_risk(
             int(account["equity_cents"]),
             settings.max_daily_loss_usd,
@@ -508,7 +548,9 @@ def submit_manual_order(*, side: str, action: str, count: Any) -> dict[str, Any]
                 )
             )
             available_cash = max(
-                0.0, float(account["cash_cents"]) - settings.cash_buffer_usd * 100
+                0.0,
+                float(account.get("available_cash_cents", account["cash_cents"]))
+                - settings.cash_buffer_usd * 100,
             )
             if worst_case_cost > available_cash:
                 raise ValueError("order would breach the configured cash buffer")
@@ -669,6 +711,9 @@ def _submit_signal(
             return "disarmed", None
         if signal.action == "buy" and cycle_ts - _last_submission_ts < cooldown_seconds:
             return "cooldown", None
+        _require_active_market()
+        if signal.market_ticker != get_live_market_info().get("ticker"):
+            return "market_changed", None
         _last_submission_ts = cycle_ts
         return "submitted", _place_order(
             execution_mode=mode,
@@ -681,26 +726,55 @@ def _submit_signal(
         )
 
 
+_paper_reconcile_epoch = -1
+_paper_retry_at: dict[str, float] = {}
+
+
 async def _refresh_paper_account(
     active_market_ticker: str, execution_mode: str
 ) -> None:
+    global _paper_reconcile_epoch
     if execution_mode != "paper":
         return
-    book = get_live_book()
-    _paper_account.mark_to_market(active_market_ticker, book)
-    for market_ticker in _paper_account.market_tickers() - {active_market_ticker}:
-        try:
-            market = await asyncio.to_thread(get_market, market_ticker)
-            result = str(market.get("result") or "").lower()
-            finalized = str(market.get("status") or "").lower() in {
-                "finalized",
-                "settled",
-            } or bool(market.get("settlement_ts"))
-            if finalized and result in {"yes", "no"}:
-                settlement = _paper_account.settle(market_ticker, result)
-                _emit_event("settlement", "paper_market_settled", **settlement)
-        except Exception as exc:  # settlement is retried on the next cycle
-            logger.warning("Could not settle paper market %s: %s", market_ticker, exc)
+    _paper_account.mark_to_market(active_market_ticker, get_live_book())
+    epoch = get_stream_epoch()
+    reconnect = epoch != _paper_reconcile_epoch
+    _paper_reconcile_epoch = epoch
+    for ticker in _paper_account.market_tickers() - {active_market_ticker}:
+        market = get_market_result(ticker)
+        if market is None or market.get("status") != "finalized":
+            if not reconnect and time.time() < _paper_retry_at.get(ticker, 0):
+                continue
+            _paper_retry_at[ticker] = time.time() + 60
+            # Recovery for events missed during a disconnect; not per-cycle polling.
+            try:
+                market = await asyncio.to_thread(get_market, ticker)
+            except Exception as exc:
+                logger.warning("Paper settlement recovery: %s", exc)
+                continue
+        result = str(market.get("result") or "").lower()
+        finalized = market.get("status") in {"finalized", "settled"} or bool(
+            market.get("settlement_ts")
+        )
+        if finalized and result in {"yes", "no"}:
+            settlement = _paper_account.settle(ticker, result)
+            _paper_retry_at.pop(ticker, None)
+            _emit_event("settlement", "paper_market_settled", **settlement)
+
+
+def _active_market() -> bool:
+    from engine.market_stream.discovery import parse_iso8601_to_epoch
+
+    market = get_live_market_info()
+    close = parse_iso8601_to_epoch(market.get("close_time"))
+    return (
+        market.get("status") == "active" and close is not None and close > time.time()
+    )
+
+
+def _require_active_market() -> None:
+    if not _active_market():
+        raise RuntimeError("The market is closed, paused, or unavailable.")
 
 
 def _enforce_daily_loss_lock(
@@ -741,7 +815,7 @@ async def _run_single_cycle() -> None:
     market_ticker = str(market_info.get("ticker") or "").strip()
 
     await _refresh_paper_account(market_ticker, execution_mode)
-    account = await asyncio.to_thread(_fetch_account_snapshot, execution_mode)
+    account = _fetch_account_snapshot(execution_mode)
     daily_risk, newly_locked = _sync_daily_risk(
         int(account["equity_cents"]), settings.max_daily_loss_usd, execution_mode
     )
@@ -758,6 +832,13 @@ async def _run_single_cycle() -> None:
             daily_risk,
             newly_locked,
         )
+        return
+
+    if not account.get("ready", True):
+        _set_state(status="reconciling", last_reason="account_reconciling")
+        return
+    if market_ticker and not _active_market():
+        _set_state(status="waiting_market", last_reason="market_inactive")
         return
 
     if not market_ticker:
@@ -796,33 +877,11 @@ async def _run_single_cycle() -> None:
         settings,
     )
 
-    try:
-        series = await asyncio.to_thread(get_series, profile.kalshi_series_ticker)
-        event_ticker = str(market_info["event_ticker"])
-        event = await asyncio.to_thread(get_event, event_ticker)
-        fee_type = str(event.get("fee_type_override") or series["fee_type"])
-        fee_multiplier = float(
-            event.get("fee_multiplier_override")
-            if event.get("fee_multiplier_override") is not None
-            else series["fee_multiplier"]
-        )
-        if fee_multiplier <= 0:
-            raise ValueError("Kalshi returned a non-positive fee multiplier.")
-        fee_policy = {
-            "series_ticker": profile.kalshi_series_ticker,
-            "event_ticker": event_ticker,
-            "fee_type": fee_type,
-            "fee_multiplier": fee_multiplier,
-            "ready": True,
-        }
-    except Exception as exc:
-        fee_type = None
-        fee_multiplier = None
-        fee_policy = {
-            "series_ticker": profile.kalshi_series_ticker,
-            "ready": False,
-            "error": str(exc),
-        }
+    fee_policy = market_info.get("fee_policy") or {"ready": False}
+    fee_type = fee_policy.get("fee_type") if fee_policy.get("ready") else None
+    fee_multiplier = (
+        fee_policy.get("fee_multiplier") if fee_policy.get("ready") else None
+    )
 
     yes_qty, no_qty, yes_avg, no_avg = _position_inputs(account, market_ticker)
     signal, reason, diagnostics = build_trade_signal(
@@ -837,7 +896,9 @@ async def _run_single_cycle() -> None:
         open_no_avg_entry_cents=no_avg,
         runtime_uptime_seconds=cycle_ts - _market_started_ts,
         available_cash_cents=max(
-            0, int(account["cash_cents"]) - round(settings.cash_buffer_usd * 100)
+            0,
+            int(account.get("available_cash_cents", account["cash_cents"]))
+            - round(settings.cash_buffer_usd * 100),
         ),
         fee_multiplier=fee_multiplier,
         fee_type=fee_type,
@@ -865,7 +926,7 @@ async def _run_single_cycle() -> None:
             settings.cooldown_seconds,
             execution_mode,
         )
-        if submission in {"disarmed", "mode_changed"}:
+        if submission in {"disarmed", "mode_changed", "market_changed"}:
             if execution_mode == _get_execution_mode():
                 _set_state(status="signal_waiting_for_start", **common_state)
             return
@@ -908,17 +969,23 @@ async def _run_single_cycle() -> None:
 
 
 async def run_trading_loop() -> None:
+    bind()
     while True:
+        changed.clear()
         cycle_started = time.time()
         try:
             await _run_single_cycle()
-        except Exception as exc:  # pragma: no cover - top-level process safeguard
-            logger.exception("Trading cycle failed: %s", exc)
+        except Exception as exc:
+            logger.warning("Trading cycle: %s", exc)
             _set_state(
                 status="cycle_error",
                 last_reason="unexpected_exception",
                 last_error=str(exc),
             )
         _set_state(last_cycle_ts=cycle_started)
-        elapsed = time.time() - cycle_started
-        await asyncio.sleep(max(0.1, EXECUTION_LOOP_INTERVAL_SEC - elapsed))
+        # Coalesce bursts; the timer advances expiry/risk when feeds are quiet.
+        await asyncio.sleep(0.05)
+        try:
+            await asyncio.wait_for(changed.wait(), timeout=EXECUTION_LOOP_INTERVAL_SEC)
+        except TimeoutError:
+            pass

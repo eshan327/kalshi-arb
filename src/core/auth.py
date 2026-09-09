@@ -1,4 +1,5 @@
 import base64
+import hmac
 import os
 import time
 from functools import lru_cache
@@ -10,6 +11,24 @@ from core.config import KALSHI_ENV
 
 # kalshi-arb/ (parent of src/) — relative key paths in .env resolve here, not from cwd
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_MIN_DASHBOARD_TOKEN_LENGTH = 32
+
+
+def get_dashboard_token() -> str:
+    token = os.getenv("KALSHI_DASHBOARD_TOKEN", "")
+    if len(token) < _MIN_DASHBOARD_TOKEN_LENGTH:
+        raise ValueError(
+            f"KALSHI_DASHBOARD_TOKEN must be at least {_MIN_DASHBOARD_TOKEN_LENGTH} characters."
+        )
+    return token
+
+
+def verify_dashboard_token(candidate: str) -> bool:
+    try:
+        expected = get_dashboard_token()
+    except ValueError:
+        return False
+    return hmac.compare_digest(candidate.encode(), expected.encode())
 
 
 def _resolve_key_path(key_path: str) -> Path:

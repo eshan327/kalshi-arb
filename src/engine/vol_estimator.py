@@ -1,8 +1,7 @@
 """
-Realized volatility from BRTI (or any spot) time series for the Asian / collapsed-variance pricer.
+Realized volatility from official benchmark time series for the Asian / collapsed-variance pricer.
 
-Uses log-return standard deviation scaled to an annualized σ. BRTI prints ~1 Hz from the
-aggregator; effective sample rate is passed explicitly when it differs.
+Uses log-return standard deviation scaled to an annualized σ. The history stores official 1 Hz prints; effective sample rate is measured from timestamps.
 """
 
 from __future__ import annotations

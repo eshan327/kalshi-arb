@@ -5,111 +5,9 @@ import time
 from typing import Any
 
 from core.market_profiles import MarketProfile
-from engine.asian_pricer import (
-    AsianBinaryPricerResult,
-    prob_collapsed_variance_binary,
-    prob_levy_tw_binary,
-)
+from engine.asian_pricer import prob_collapsed_variance_binary, prob_levy_tw_binary
 from engine.market_stream.discovery import parse_iso8601_to_epoch
-from engine.settlement_sampling import (
-    extract_valid_index_points,
-    reconstruct_discrete_forward_fill_samples,
-)
 from engine.vol_estimator import realized_vol_from_price_points
-
-_VOL_WINDOW_SEC = 300.0
-_MAX_SAMPLE_STALENESS_SEC = 5.0
-_MIN_INDEX_EXCHANGES = 2
-_MIN_ANCHOR_SAMPLES = 55
-_MARKET_INTERVAL_SECONDS = 15 * 60
-
-
-def _json_safe_detail(detail: dict[str, float | int | str | None]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key, value in detail.items():
-        if isinstance(value, float) and not math.isfinite(value):
-            out[key] = None
-        else:
-            out[key] = value
-    return out
-
-
-def _build_base_snapshot(
-    *,
-    profile: MarketProfile,
-    feed_asset: str,
-    strike: float | None,
-    market_ticker: str | None,
-    spot: float | None,
-    settlement_seconds: int,
-    settlement_decimals: int,
-    source_exchanges: int,
-) -> dict[str, Any]:
-    return {
-        "asset": profile.asset,
-        "asset_display": profile.display_name,
-        "feed_asset": feed_asset,
-        "index_label": profile.index_label,
-        "settlement_window_seconds": settlement_seconds,
-        "seconds_to_expiry": None,
-        "strike_usd": strike,
-        "market_ticker": market_ticker,
-        "spot_brti": float(spot) if isinstance(spot, (int, float)) else None,
-        "spot_index_raw": float(spot) if isinstance(spot, (int, float)) else None,
-        "spot_index": None,
-        "source_exchanges": source_exchanges,
-        "settlement_decimals": settlement_decimals,
-        "model_strike_usd": None,
-        "rounding_half_unit": None,
-        "proxy_reference_avg": None,
-        "proxy_basis_adjustment": None,
-        "proxy_anchor_samples": 0,
-        "proxy_anchor_ready": False,
-        "sigma_annual": None,
-        "sigma_samples": 0,
-        "index_age_seconds": None,
-        "vol_is_fallback": False,
-        "p_model": None,
-        "p_model_pct": None,
-        "regime": None,
-        "sigma_eff": None,
-        "twap_seconds_elapsed": 0,
-        "twap_samples_observed": 0,
-        "twap_partial_avg": None,
-        "twap_partial_avg_raw": None,
-        "twap_required_avg": None,
-        "pricer_detail": None,
-        "ready": False,
-        "reason": None,
-    }
-
-
-def _estimate_sigma(
-    points: list[tuple[float, float]],
-    *,
-    fallback_sigma_annual: float,
-    now_ts: float,
-) -> tuple[float, bool]:
-    sigma = realized_vol_from_price_points(
-        points,
-        window_seconds=_VOL_WINDOW_SEC,
-        now_ts=now_ts,
-        min_samples=8,
-    )
-    is_fallback = False
-
-    if sigma is None:
-        sigma = realized_vol_from_price_points(
-            points,
-            window_seconds=None,
-            now_ts=now_ts,
-            min_samples=5,
-        )
-    if sigma is None or sigma <= 0:
-        sigma = float(fallback_sigma_annual)
-        is_fallback = True
-
-    return float(sigma), is_fallback
 
 
 def compute_pricing_snapshot(
@@ -117,182 +15,123 @@ def compute_pricing_snapshot(
     profile: MarketProfile,
     feed_asset: str,
     spot: float | None,
-    ticks: list[dict[str, Any]],
+    ticks: list[dict],
     strike: float | None,
     market_ticker: str | None,
     close_time_iso: str | None,
     settlement_decimals: int | None = None,
-    source_exchanges: int = 0,
+    index_state: dict | None = None,
 ) -> dict[str, Any]:
-    settlement_seconds = int(profile.settlement_window_seconds)
-    settlement_decimals = max(
-        0,
-        min(
-            12,
-            int(
-                profile.settlement_decimals_fallback
-                if settlement_decimals is None
-                else settlement_decimals
-            ),
-        ),
+    state = index_state or {}
+    now = time.time()
+    close = parse_iso8601_to_epoch(close_time_iso)
+    decimals = (
+        profile.settlement_decimals_fallback
+        if settlement_decimals is None
+        else settlement_decimals
     )
-    source_exchanges = max(0, int(source_exchanges))
-    close_ts = parse_iso8601_to_epoch(close_time_iso)
-
-    base = _build_base_snapshot(
-        profile=profile,
+    window = profile.settlement_window_seconds
+    base = dict(
+        asset=profile.asset,
         feed_asset=feed_asset,
-        strike=strike,
+        index_label=profile.index_label,
+        settlement_window_seconds=window,
+        strike_usd=strike,
         market_ticker=market_ticker,
-        spot=spot,
-        settlement_seconds=settlement_seconds,
-        settlement_decimals=settlement_decimals,
-        source_exchanges=source_exchanges,
+        spot_index=spot,
+        settlement_decimals=decimals,
+        ready=False,
+        reason=None,
+        seconds_to_expiry=None if close is None else max(0.0, close - now),
+        p_model=None,
+        p_model_pct=None,
+        vol_is_fallback=True,
+        twap_samples_observed=0,
+        twap_partial_avg=None,
+        twap_partial_avg_raw=None,
+        twap_required_avg=None,
+        twap_seconds_elapsed=0,
     )
 
-    if close_ts is None:
-        base["reason"] = "no_close_time"
-        return base
-    if strike is None:
-        base["reason"] = "no_strike"
-        return base
-    if feed_asset != profile.asset:
-        base["reason"] = "asset_syncing"
-        return base
-    if not isinstance(spot, (int, float)) or float(spot) <= 0:
-        base["reason"] = "no_brti"
-        return base
-    if source_exchanges < _MIN_INDEX_EXCHANGES:
-        base["reason"] = "insufficient_index_sources"
-        return base
+    def fail(reason):
+        return {**base, "reason": reason}
 
-    now_ts = time.time()
-    sec_exp = max(0.0, float(close_ts) - now_ts)
-    base["seconds_to_expiry"] = round(sec_exp, 2)
+    if close is None or strike is None or not math.isfinite(strike):
+        return fail("missing_market_terms")
+    if feed_asset != profile.asset or not state.get("connected"):
+        return fail("index_disconnected")
+    if spot is None or not math.isfinite(spot) or spot <= 0:
+        return fail("no_index")
+    age = now - float(state.get("timestamp", 0))
+    base["index_age_seconds"] = age
+    if not 0 <= age <= 5:
+        return fail("stale_index")
+    if close <= now:
+        return fail("market_closed")
 
-    points = extract_valid_index_points(ticks)
-    if not points:
-        base["reason"] = "no_index_ticks"
-        return base
-    index_age_seconds = max(0.0, now_ts - points[-1][0])
-    base["index_age_seconds"] = round(index_age_seconds, 3)
-    if index_age_seconds > _MAX_SAMPLE_STALENESS_SEC:
-        base["reason"] = "stale_index"
-        return base
-
-    anchor_samples, anchor_elapsed = reconstruct_discrete_forward_fill_samples(
-        points,
-        float(close_ts) - _MARKET_INTERVAL_SECONDS - settlement_seconds,
-        float(close_ts) - _MARKET_INTERVAL_SECONDS,
-        max_staleness_sec=_MAX_SAMPLE_STALENESS_SEC,
+    points = [(t["ts"], t["price"]) for t in ticks]
+    sigma = realized_vol_from_price_points(
+        points, window_seconds=300, now_ts=now, min_samples=8
     )
-    base["proxy_anchor_samples"] = len(anchor_samples)
-    proxy_anchor_ready = (
-        anchor_elapsed == settlement_seconds
-        and len(anchor_samples) >= _MIN_ANCHOR_SAMPLES
-    )
-    proxy_reference_avg = (
-        sum(anchor_samples) / len(anchor_samples) if proxy_anchor_ready else None
-    )
-    proxy_basis_adjustment = (
-        float(strike) - proxy_reference_avg
-        if proxy_reference_avg is not None
-        else 0.0
-    )
-    adjusted_spot = float(spot) + proxy_basis_adjustment
-    adjusted_points = [
-        (ts, value + proxy_basis_adjustment)
-        for ts, value in points
-        if value + proxy_basis_adjustment > 0
-    ]
-    if adjusted_spot <= 0 or not adjusted_points:
-        base["reason"] = "invalid_proxy_anchor"
-        return base
-
-    rounding_half_unit = 0.5 * (10.0 ** (-settlement_decimals))
-    model_strike = float(strike) - rounding_half_unit
+    fallback = sigma is None or sigma <= 0
+    sigma = profile.fallback_sigma_annual if fallback else sigma
+    model_strike = strike - 0.5 * 10**-decimals
+    seconds = close - now
     base.update(
-        {
-            "spot_index": adjusted_spot,
-            "model_strike_usd": model_strike,
-            "rounding_half_unit": rounding_half_unit,
-            "proxy_reference_avg": (
-                round(proxy_reference_avg, settlement_decimals + 2)
-                if proxy_reference_avg is not None
-                else None
-            ),
-            "proxy_basis_adjustment": round(
-                proxy_basis_adjustment, settlement_decimals + 2
-            ),
-            "proxy_anchor_ready": proxy_anchor_ready,
-        }
+        sigma_annual=sigma,
+        sigma_samples=len(points),
+        vol_is_fallback=fallback,
+        model_strike_usd=model_strike,
+        rounding_half_unit=0.5 * 10**-decimals,
     )
 
-    sigma, vol_is_fallback = _estimate_sigma(
-        points,
-        fallback_sigma_annual=profile.fallback_sigma_annual,
-        now_ts=now_ts,
-    )
-
-    base["sigma_annual"] = round(sigma, 6)
-    base["vol_is_fallback"] = vol_is_fallback
-    base["sigma_samples"] = len(points)
-
-    twap_elapsed_seconds = 0
-    twap_partial_avg: float | None = None
-    twap_required_avg: float | None = None
-
-    result: AsianBinaryPricerResult
-    if sec_exp > settlement_seconds:
-        result = prob_levy_tw_binary(
-            adjusted_spot,
-            model_strike,
-            sigma,
-            sec_exp,
-            n_fixes=settlement_seconds,
-        )
+    if seconds > window:
+        result = prob_levy_tw_binary(spot, model_strike, sigma, seconds, n_fixes=window)
     else:
-        window_start_ts = float(close_ts) - settlement_seconds
-        observed_end_ts = min(now_ts, float(close_ts))
-        samples, twap_elapsed_seconds = reconstruct_discrete_forward_fill_samples(
-            adjusted_points,
-            window_start_ts,
-            observed_end_ts,
-            max_staleness_sec=_MAX_SAMPLE_STALENESS_SEC,
+        # Use Kalshi's accumulation, including its boundary semantics and sample count.
+        # Never manufacture missing fixes by forward filling or mixing in 5 Hz ticks.
+        avg = state.get("final_average")
+        elapsed = max(0, math.floor(now - (close - window)))
+        base["twap_seconds_elapsed"] = elapsed
+        if elapsed == 0 and avg is None:
+            count, mean = 0, None
+        else:
+            if not avg or abs(avg["start"] - (close - window)) > 0.001:
+                return fail("settlement_average_unavailable")
+            if not 0 <= now - float(state.get("average_ts", 0)) <= 2:
+                return fail("stale_settlement_average")
+            count, mean = avg["count"], avg["value"]
+            if (
+                not 0 <= count <= min(window, elapsed)
+                or avg["end"] < avg["start"]
+                or avg["end"] > close
+                or avg["end"] > now + 0.001
+            ):
+                return fail("invalid_settlement_average")
+            # One-second tolerance for delivery; larger holes cannot become known fixes.
+            if count < max(0, elapsed - 1):
+                return fail("incomplete_settlement_average")
+        base.update(
+            twap_samples_observed=count,
+            twap_partial_avg_raw=mean,
+            twap_partial_avg=None if mean is None else round(mean, decimals),
         )
-
-        sample_count = len(samples)
-        known_mean = (sum(samples) / len(samples)) if samples else None
-
+        if count and count < window:
+            base["twap_required_avg"] = (model_strike * window - mean * count) / (
+                window - count
+            )
         result = prob_collapsed_variance_binary(
-            model_strike,
-            sigma,
-            n=settlement_seconds,
-            k=sample_count,
-            mean_known_samples=known_mean,
-            mu_fwd=adjusted_spot,
+            model_strike, sigma, n=window, k=count, mean_known_samples=mean, mu_fwd=spot
         )
-
-        if known_mean is not None:
-            twap_partial_avg = round(known_mean, settlement_decimals)
-            base["twap_partial_avg_raw"] = known_mean
-
-        if sample_count < settlement_seconds and samples:
-            remaining = settlement_seconds - sample_count
-            needed_sum = model_strike * settlement_seconds - sum(samples)
-            twap_required_avg = round(needed_sum / remaining, settlement_decimals)
-
-    base["p_model"] = round(result.p_model, 8)
-    base["p_model_pct"] = round(100.0 * result.p_model, 4)
-    base["regime"] = result.regime
-    base["sigma_eff"] = (
-        None if result.sigma_eff is None else round(float(result.sigma_eff), 8)
+    base.update(
+        p_model=result.p_model,
+        p_model_pct=100 * result.p_model,
+        regime=result.regime,
+        sigma_eff=result.sigma_eff,
+        pricer_detail={
+            k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+            for k, v in result.detail.items()
+        },
+        ready=True,
     )
-    base["pricer_detail"] = _json_safe_detail(result.detail)
-    base["twap_seconds_elapsed"] = twap_elapsed_seconds
-    base["twap_samples_observed"] = len(samples) if sec_exp <= settlement_seconds else 0
-    base["twap_partial_avg"] = twap_partial_avg
-    base["twap_required_avg"] = twap_required_avg
-    base["ready"] = True
-    base["reason"] = None
     return base

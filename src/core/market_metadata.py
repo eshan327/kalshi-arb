@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import re
+import math
 
 
 def extract_suggested_strike(market_info: dict) -> float | None:
-    """Best-effort strike extraction from Kalshi market metadata."""
+    """Read structured exchange terms; missing terms must not become guessed strikes."""
     if not market_info:
         return None
 
@@ -17,19 +17,12 @@ def extract_suggested_strike(market_info: dict) -> float | None:
     ]
     for key in direct_keys:
         value = market_info.get(key)
-        if isinstance(value, (int, float)):
-            return float(value)
-
-    text_keys = ["subtitle", "title", "yes_sub_title", "no_sub_title", "rulebook_text"]
-    for key in text_keys:
-        text = market_info.get(key)
-        if not isinstance(text, str):
-            continue
-
-        for candidate in re.findall(r"\d+(?:\.\d+)?", text.replace(",", "")):
-            value = float(candidate)
-            if 1000 <= value <= 2_000_000:
-                return value
+        try:
+            number = float(value)
+            if math.isfinite(number) and number > 0:
+                return number
+        except (TypeError, ValueError, OverflowError):
+            pass
 
     return None
 
@@ -39,4 +32,7 @@ def extract_settlement_decimals(market_info: dict, fallback: int) -> int:
     value = (
         custom_strike.get("round_digits") if isinstance(custom_strike, dict) else None
     )
-    return max(0, min(12, int(value))) if isinstance(value, (int, float)) else fallback
+    try:
+        return max(0, min(12, int(value)))
+    except (TypeError, ValueError, OverflowError):
+        return fallback

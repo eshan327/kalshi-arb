@@ -2,47 +2,34 @@ import json
 from itertools import count
 
 import websockets
-from core.config import WS_BASE_URL
-from core.auth import get_ws_auth_headers
 
-SUBSCRIBE_CHANNELS = ["orderbook_delta"]
+from core.auth import get_ws_auth_headers
+from core.config import WS_BASE_URL
+
 _command_ids = count(1)
 
 
-async def connect_and_subscribe(market_ticker: str):
-    """
-    Opens an authenticated WS connection and subscribes to orderbook updates.
-    Returns the websocket connection for the caller to read from.
-    """
-    headers = get_ws_auth_headers()
+async def command(ws, cmd: str, **params) -> int:
+    command_id = next(_command_ids)
+    await ws.send(json.dumps({"id": command_id, "cmd": cmd, "params": params}))
+    return command_id
 
-    ws = await websockets.connect(WS_BASE_URL, additional_headers=headers)
 
-    subscribe_cmd = {
-        "id": next(_command_ids),
-        "cmd": "subscribe",
-        "params": {
-            "channels": SUBSCRIBE_CHANNELS,
-            "market_tickers": [market_ticker],
-            "use_yes_price": True,
-        },
-    }
-    await ws.send(json.dumps(subscribe_cmd))
-    return ws
+async def connect():
+    return await websockets.connect(
+        WS_BASE_URL,
+        additional_headers=get_ws_auth_headers(),
+        ping_interval=10,
+        ping_timeout=10,
+        open_timeout=10,
+    )
 
 
 async def request_orderbook_snapshot(ws, market_ticker: str, sid: int) -> None:
-    """Request a sequence-aligned snapshot without replacing the subscription."""
-    await ws.send(
-        json.dumps(
-            {
-                "id": next(_command_ids),
-                "cmd": "update_subscription",
-                "params": {
-                    "sids": [sid],
-                    "market_tickers": [market_ticker],
-                    "action": "get_snapshot",
-                },
-            }
-        )
+    await command(
+        ws,
+        "update_subscription",
+        sids=[sid],
+        market_tickers=[market_ticker],
+        action="get_snapshot",
     )

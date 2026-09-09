@@ -1,5 +1,6 @@
 import heapq
 import logging
+import math
 import time
 from threading import RLock
 
@@ -24,12 +25,15 @@ class OrderBook:
         self.initialized = False
         self.needs_resync = False
         self.last_update_ts = None
+        self.last_verified_ts = None
         self.qty_epsilon = 1e-6
         self._lock = RLock()
 
     def _normalize_qty(self, qty_value):
         """Normalizes quantities and strips near-zero float residue."""
         qty = round(float(qty_value), 2)
+        if not math.isfinite(qty):
+            raise ValueError("Nonfinite quantity")
         if abs(qty) < self.qty_epsilon:
             return 0.0
         return qty
@@ -38,10 +42,18 @@ class OrderBook:
     def _normalize_price(price_value, *, dollars=None):
         """Normalizes REST/WS prices to fixed-point cents."""
         value = float(price_value)
+        if not math.isfinite(value):
+            raise ValueError("Nonfinite price")
         if value <= 0:
             return None
 
-        cents = value * 100.0 if dollars is True or (dollars is None and value <= 1) else value
+        cents = (
+            value * 100.0
+            if dollars is True or (dollars is None and value <= 1)
+            else value
+        )
+        if cents >= 100:
+            raise ValueError("Price out of range")
         return round(cents, 4)
 
     @staticmethod
@@ -71,11 +83,7 @@ class OrderBook:
             destination[price_cents] = qty
 
     def _is_crossed_unlocked(self):
-        return bool(
-            self.yes
-            and self.no
-            and max(self.yes) + max(self.no) >= 100.0
-        )
+        return bool(self.yes and self.no and max(self.yes) + max(self.no) >= 100.0)
 
     def _top_n_levels(self, side_book, depth):
         """Returns top-N descending bid levels from an internal side map."""
@@ -207,6 +215,7 @@ class OrderBook:
             self.initialized = False
             self.needs_resync = False
             self.last_update_ts = None
+            self.last_verified_ts = None
 
     def get_orderbook_top_n(self, depth):
         """Returns top-N slices of the current orderbook in cents for low-latency read paths."""
@@ -217,8 +226,8 @@ class OrderBook:
             yes_bids = self._top_n_levels(self.yes, depth)
             no_bids = self._top_n_levels(self.no, depth)
 
-            yes_asks = sorted([(round(100.0 - p, 2), q) for p, q in no_bids])
-            no_asks = sorted([(round(100.0 - p, 2), q) for p, q in yes_bids])
+            yes_asks = sorted([(round(100.0 - p, 4), q) for p, q in no_bids])
+            no_asks = sorted([(round(100.0 - p, 4), q) for p, q in yes_bids])
             return yes_bids, yes_asks, no_bids, no_asks
 
     def get_best_prices(self):

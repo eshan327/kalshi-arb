@@ -18,8 +18,21 @@ def _get_json(url: str) -> dict[str, Any]:
 def get_open_markets(series_ticker: str) -> list[dict[str, Any]]:
     """Fetches open markets for a series."""
 
-    url = f"{API_BASE_URL}/markets?series_ticker={series_ticker}&status=open"
-    return _get_json(url).get("markets", [])
+    from urllib.parse import urlencode
+
+    rows, cursor = [], None
+    while True:
+        params = {"series_ticker": series_ticker, "status": "open", "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        payload = _get_json(f"{API_BASE_URL}/markets?{urlencode(params)}")
+        rows.extend(payload.get("markets", []))
+        next_cursor = payload.get("cursor")
+        if not next_cursor:
+            return rows
+        if next_cursor == cursor:
+            raise RuntimeError("Repeated market cursor")
+        cursor = next_cursor
 
 
 @lru_cache(maxsize=128)
@@ -42,3 +55,17 @@ def get_event(event_ticker: str) -> dict[str, Any]:
 
 def get_market(market_ticker: str) -> dict[str, Any]:
     return _get_json(f"{API_BASE_URL}/markets/{market_ticker}").get("market", {})
+
+
+def invalidate_metadata() -> None:
+    _get_cached.cache_clear()
+
+
+def get_recent_index_values(index_id: str) -> list[dict]:
+    from data.kalshi_trading import _request
+
+    return _request(
+        "GET",
+        "/cfbenchmarks/values",
+        params={"id": index_id, "maxResolution": "PER_SECOND"},
+    )["data"]["payload"]

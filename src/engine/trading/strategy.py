@@ -280,7 +280,12 @@ def build_trade_signal(
     if yes_ask is None or no_ask is None:
         return None, "missing_best_quotes", diagnostics
 
-    book_updated_ts = _safe_float(getattr(book, "last_update_ts", None))
+    book_updated_ts = _safe_float(
+        (
+            getattr(book, "last_verified_ts", None)
+            or getattr(book, "last_update_ts", None)
+        )
+    )
     book_age_seconds = (
         None if book_updated_ts is None else max(0.0, ts - book_updated_ts)
     )
