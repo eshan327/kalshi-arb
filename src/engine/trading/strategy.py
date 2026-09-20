@@ -197,7 +197,13 @@ def apply_pricing_overrides(
         if isinstance(settings.volatility_override, float)
         else base_sigma
     )
-    sigma = max(0.01, float(sigma) * float(settings.volatility_scale))
+    volatility_scale = float(settings.volatility_scale)
+    if (
+        settings.pre_settlement_volatility_scale is not None
+        and sec_exp > float(settings.pre_settlement_until_seconds)
+    ):
+        volatility_scale = float(settings.pre_settlement_volatility_scale)
+    sigma = max(0.01, float(sigma) * volatility_scale)
 
     if sec_exp > float(settlement_window):
         result = prob_levy_tw_binary(
@@ -225,6 +231,7 @@ def apply_pricing_overrides(
     out["p_model"] = float(result.p_model)
     out["p_model_pct"] = round(float(result.p_model) * 100.0, 4)
     out["sigma_override_applied"] = round(float(sigma), 6)
+    out["volatility_scale_applied"] = round(float(volatility_scale), 6)
     if settings.volatility_override is not None:
         out["vol_is_fallback_base"] = out.get("vol_is_fallback")
         out["vol_is_fallback"] = False
@@ -478,6 +485,11 @@ def build_trade_signal(
         )
     ):
         return None, "entry_cutoff", diagnostics
+
+    entry_start = settings.entry_start_seconds_to_expiry
+    diagnostics["entry_start_seconds_to_expiry"] = entry_start
+    if entry_start is not None and seconds_to_expiry > float(entry_start):
+        return None, "entry_window_not_started", diagnostics
 
     diagnostics["fee_type"] = fee_type
     diagnostics["fee_multiplier"] = fee_multiplier
