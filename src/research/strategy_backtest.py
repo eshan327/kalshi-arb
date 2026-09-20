@@ -216,6 +216,32 @@ def _record_fill(
         )
         * filled
     )
+
+    # Historical candles do not expose L2 depth changes after our hypothetical IOC.
+    # Consume the assumed displayed top level locally so repeated same-timestamp
+    # sells cannot reuse the same synthetic liquidity over and over.
+    unified_yes_price = (
+        float(fill_price)
+        if (signal.side == "yes" and signal.action == "sell")
+        else 100.0 - float(fill_price)
+        if (signal.side == "no" and signal.action == "buy")
+        else 100.0 - float(fill_price)
+        if (signal.side == "no" and signal.action == "sell")
+        else float(fill_price)
+    )
+    delta_side = (
+        "yes"
+        if (signal.side == "yes" and signal.action == "sell")
+        or (signal.side == "no" and signal.action == "buy")
+        else "no"
+    )
+    book.apply_delta(
+        {
+            "side": delta_side,
+            "price_dollars": unified_yes_price / 100.0,
+            "delta_fp": -filled,
+        }
+    )
     account.mark_to_market(signal.market_ticker, book)
     snapshot = account.snapshot()
     return StrategyFill(
