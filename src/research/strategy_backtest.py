@@ -520,6 +520,30 @@ def replay_market(
                     break
                 fills.append(next_fill)
 
+        # A fill itself can push equity through the daily-loss threshold via fees
+        # or execution. Live runtime re-evaluates on the resulting account update,
+        # so enforce the same lock immediately rather than waiting a full candle.
+        account.mark_to_market(ticker, book)
+        post_fill = account.snapshot()
+        _, newly_locked_after_fill = risk.sync(
+            ts=eval_ts,
+            equity_cents=int(post_fill["equity_cents"]),
+            max_daily_loss_usd=settings.max_daily_loss_usd,
+        )
+        if newly_locked_after_fill:
+            risk_fills = _flatten_market(
+                account,
+                market_ticker=ticker,
+                book=book,
+                settings=settings,
+                fee_multiplier=fee_multiplier,
+                price_ranges=price_ranges,
+                ts=eval_ts,
+            )
+            fills.extend(risk_fills)
+            if risk_fills:
+                last_submission_ts = eval_ts
+
     before_settlement = account.snapshot()
     open_before = sum(
         int(position.get("contracts") or 0)
