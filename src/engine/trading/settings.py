@@ -24,8 +24,25 @@ class TradingSettings(BaseModel):
     slippage_ticks: int = Field(default=1, ge=0, le=5)
     volatility_override: float | None = Field(default=None, ge=0.01, le=5.0)
     volatility_scale: float = Field(default=1.0, ge=0.5, le=2.0)
+    volatility_window_seconds: float = Field(default=300.0, ge=30.0, le=3600.0)
+    pre_settlement_volatility_window_seconds: float | None = Field(
+        default=None, ge=30.0, le=3600.0
+    )
+    pre_settlement_volatility_scale: float | None = Field(
+        default=None, ge=0.5, le=2.0
+    )
+    pre_settlement_until_seconds: float = Field(default=60.0, ge=1.0, le=900.0)
+    entry_start_seconds_to_expiry: float | None = Field(
+        default=None, ge=20.0, le=900.0
+    )
 
-    @field_validator("volatility_override", mode="before")
+    @field_validator(
+        "volatility_override",
+        "pre_settlement_volatility_window_seconds",
+        "pre_settlement_volatility_scale",
+        "entry_start_seconds_to_expiry",
+        mode="before",
+    )
     @classmethod
     def normalize_optional_float(cls, value: Any) -> Any:
         if value is None or (
