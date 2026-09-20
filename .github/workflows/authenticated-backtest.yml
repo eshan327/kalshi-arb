@@ -9,7 +9,7 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       KALSHI_ENV: prod
       KALSHI_PROD_KEY_ID: ${{ secrets.KALSHI_PROD_KEY_ID }}
@@ -30,7 +30,7 @@ jobs:
         run: |
           if [[ -z "$KALSHI_PROD_KEY_ID" || -z "$KALSHI_PROD_PRIVATE_KEY_PEM" ]]; then
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Authenticated backtest skipped: configure Actions secrets KALSHI_PROD_KEY_ID and KALSHI_PROD_PRIVATE_KEY_PEM."
+            echo "::notice::Authenticated backtest skipped: configure repository Actions secrets."
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
           fi
@@ -47,7 +47,7 @@ jobs:
         if: steps.credentials.outputs.available == 'true'
         run: python -m pip install -e .
 
-      - name: Resolve sample size
+      - name: Resolve execution sample size
         id: sample
         if: steps.credentials.outputs.available == 'true'
         shell: bash
@@ -60,37 +60,99 @@ jobs:
           fi
           echo "max_markets=$max_markets" >> "$GITHUB_OUTPUT"
 
-      - name: 100-market model calibration
+      - name: 200-market production-model calibration
+        id: calibration
         if: steps.credentials.outputs.available == 'true'
+        continue-on-error: true
         run: |
-          python src/research/backtest.py BTC             --max-markets 100             --min-edge-cents 2             --vol-window-seconds 300             --skip-tape             --skip-quotes             --output-dir output/calibration_100
+          python src/research/backtest.py BTC \
+            --max-markets 200 \
+            --min-edge-cents 2 \
+            --vol-window-seconds 300 \
+            --volatility-scale 1.0 \
+            --skip-market-relative \
+            --skip-quotes \
+            --output-dir output/calibration_200
 
       - name: Upload calibration
-        if: steps.credentials.outputs.available == 'true'
+        if: always() && steps.credentials.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: kalshi-calibration-100
-          path: output/calibration_100
-          if-no-files-found: error
+          name: kalshi-calibration-200
+          path: output/calibration_200
+          if-no-files-found: warn
           retention-days: 14
 
-      - name: Market-relative diagnostics
+      - name: Chronological volatility-model sweep
+        id: sweep
         if: steps.credentials.outputs.available == 'true'
+        continue-on-error: true
         run: |
-          python src/research/backtest.py BTC             --max-markets ${{ steps.sample.outputs.max_markets }}             --min-edge-cents 2             --vol-window-seconds 300             --output-dir output/backtests
+          python src/research/model_sweep.py BTC \
+            --max-markets 200 \
+            --windows 60,120,300,600 \
+            --scales 0.75,1.0,1.25 \
+            --output-dir output/model_sweep
+
+      - name: Upload model sweep
+        if: always() && steps.credentials.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-model-sweep
+          path: output/model_sweep
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Market-relative and quote diagnostics
+        id: diagnostics
+        if: steps.credentials.outputs.available == 'true'
+        continue-on-error: true
+        run: |
+          python src/research/backtest.py BTC \
+            --max-markets ${{ steps.sample.outputs.max_markets }} \
+            --min-edge-cents 2 \
+            --vol-window-seconds 300 \
+            --volatility-scale 1.0 \
+            --output-dir output/backtests
+
+      - name: Upload market diagnostics
+        if: always() && steps.credentials.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-market-diagnostics
+          path: output/backtests
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Production taker-strategy replay
+        id: strategy
         if: steps.credentials.outputs.available == 'true'
+        continue-on-error: true
         run: |
-          python src/research/strategy_backtest.py BTC             --max-markets 100             --starting-cash-cents 100000             --fee-multiplier 1.0             --assumed-top-size 10             --output-dir output/strategy_backtests
+          python src/research/strategy_backtest.py BTC \
+            --max-markets ${{ steps.sample.outputs.max_markets }} \
+            --starting-cash-cents 100000 \
+            --fee-multiplier 1.0 \
+            --assumed-top-size 10 \
+            --output-dir output/strategy_backtests
 
-      - name: Upload results
-        if: steps.credentials.outputs.available == 'true'
+      - name: Upload strategy replay
+        if: always() && steps.credentials.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: kalshi-backtest-results
-          path: |
-            output/backtests
-            output/strategy_backtests
-          if-no-files-found: error
+          name: kalshi-strategy-replay
+          path: output/strategy_backtests
+          if-no-files-found: warn
           retention-days: 14
+
+      - name: Require every research stage
+        if: always() && steps.credentials.outputs.available == 'true'
+        shell: bash
+        run: |
+          failed=0
+          for result in             "${{ steps.calibration.outcome }}"             "${{ steps.sweep.outcome }}"             "${{ steps.diagnostics.outcome }}"             "${{ steps.strategy.outcome }}"; do
+            if [[ "$result" != "success" ]]; then
+              failed=1
+            fi
+          done
+          exit "$failed"
