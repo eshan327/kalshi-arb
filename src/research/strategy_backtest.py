@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from core.config import PAPER_STARTING_CASH_CENTS
+from core.config import KALSHI_ENV, PAPER_STARTING_CASH_CENTS
 from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
 from core.market_profiles import get_market_profile
 from data.kalshi_rest import get_market_candlesticks, get_settled_markets
@@ -773,6 +773,10 @@ def run_strategy_backtest(
 
 
 def main() -> None:
+    if KALSHI_ENV != "prod":
+        raise RuntimeError(
+            "Historical research uses production Kalshi/CF data; set KALSHI_ENV=prod."
+        )
     parser = argparse.ArgumentParser(
         description="Replay the production Kalshi taker strategy on historical data."
     )
