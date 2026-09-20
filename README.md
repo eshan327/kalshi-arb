@@ -172,17 +172,54 @@ volatility estimation, fee-aware sizing, paper simulation, and local risk limits
 remain application responsibilities. RFQ, multivariate, Pyth, and order-group
 channels are not subscribed because this strategy does not use those products.
 
-### API references checked September 8, 2026
+### API references checked September 20, 2026
 
 - [Kalshi changelog](https://docs.kalshi.com/changelog)
 - [CF 1 Hz and averaging semantics](https://docs.kalshi.com/websockets/cfbenchmarks-value)
 - [CF 5 Hz](https://docs.kalshi.com/websockets/cfbenchmarks-value-5hz)
 - [CF REST passthrough](https://docs.kalshi.com/cfbenchmarks/rest-passthrough)
+- [Historical data](https://docs.kalshi.com/getting_started/historical_data)
+- [Historical market candlesticks](https://docs.kalshi.com/api-reference/historical/get-historical-market-candlesticks)
 - [Exchange sharding](https://docs.kalshi.com/getting_started/exchange_sharding)
 - [REST replication watermark](https://docs.kalshi.com/api-reference/exchange/get-user-data-timestamp)
 - [SDK guidance](https://docs.kalshi.com/sdks/overview): Kalshi warns SDKs can lag;
   this project uses the direct API with existing dependencies.
 
+
+## Historical backtesting
+
+The research backtester replays the same production pricing pipeline against
+Kalshi's archived 15-minute markets and historical CF Benchmarks values. It
+evaluates probability calibration and also runs a deliberately conservative
+one-contract alpha screen using historical one-minute quote closes.
+
+Use production credentials because CF Benchmarks passthrough data is entitlement
+controlled and the archived market data is production history:
+
+```bash
+KALSHI_ENV=prod uv run --env-file .env src/research/backtest.py BTC \
+  --max-markets 100 \
+  --min-edge-cents 2
+```
+
+Outputs are written to `output/backtests/`:
+
+- `observations.csv`: model probability, realized outcome, volatility, quote,
+  edge, Brier score, and log loss for every replay point.
+- `trades.csv`: first qualifying fee-aware signal per market, held to settlement.
+- `summary.json`: aggregate calibration, scoring, trade count, win rate, P&L,
+  ROI on entry cost, and calibration buckets.
+
+The backtester reconstructs Kalshi's final-minute fixing window as
+`(close - 60s, close]`, matching the documented CF accumulation semantics.
+The pre-settlement Asian fixing grid uses the same open-left/close-right
+convention.
+
+Historical quote candles are only available at one-minute granularity, so the
+reported trade P&L is an alpha screen rather than a true execution replay. It
+does not claim historical top-of-book depth, queue position, subsecond latency,
+or IOC fill realism. For those questions, record the live sequenced orderbook
+stream and replay that separate microstructure dataset.
 
 ## Default controls
 
