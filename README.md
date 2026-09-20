@@ -201,12 +201,14 @@ KALSHI_ENV=prod uv run --env-file .env src/research/backtest.py BTC \
 ```
 
 This backtester merges recent settled markets from the live tier with older
-markets from Kalshi's historical tier. For assets with the high-frequency CF
-feed, it requests `PER_200MS` history for the current spot while retaining only
-exact second-boundary CF values for realized volatility and settlement fixes,
-matching the live separation between `cfbenchmarks_value_5hz` and
-`cfbenchmarks_value`. If subsecond history is unavailable, it falls back to
-`PER_SECOND` without inventing fixes.
+markets from Kalshi's historical tier. CF's `/history/values` endpoint returns
+the published historical tick stream and does not expose the `maxResolution`
+selector used by the recent-value endpoints. For high-frequency RTIs, replay
+therefore uses every historical tick as the production fast spot while filtering
+the exact second-boundary publications for realized volatility and settlement
+fixes. That reproduces the live separation between
+`cfbenchmarks_value_5hz` and `cfbenchmarks_value` without fabricating 1 Hz
+fixes from subsecond observations.
 
 Probability calibration is evaluated at fixed horizons including 60, 45, 30,
 20, 10, 5, and 1 seconds before close. That is independent of Kalshi quote
@@ -219,15 +221,21 @@ Outputs are written to `output/backtests/`:
 - `calibration.csv`: fixed-horizon model probabilities, outcomes, Brier/log
   loss, known-fix count, and fast-vs-1Hz spot comparison.
 - `quote_observations.csv`: model value versus one-minute Kalshi quote closes.
-- `tape_observations.csv`: model probability versus actual public trade prices
-  at each trade timestamp, including sub-minute/final-minute transactions when
-  present. This is a market-relative diagnostic, not a fill simulation.
+- `market_relative.csv`: at each fixed horizon, compares the model with the
+  latest actual non-block Kalshi trade no more than five seconds old. Each market
+  contributes at most once per horizon, avoiding activity-weighted scoring.
+- `tape_observations.csv`: optional full trade-tape scoring when `--full-tape`
+  is requested. It is intentionally off by default because highly active markets
+  otherwise dominate the sample.
 - `trades.csv`: a deliberately simple first-signal-per-market alpha screen.
-- `summary.json`: aggregate and horizon-level calibration, model-versus-trade
+- `summary.json`: aggregate/horizon calibration, equal-weight model-versus-market
   proper scores, and the coarse quote screen.
 
-Use `--vol-window-seconds` to research alternatives to the production 300-second
-realized-volatility window without maintaining a second pricing implementation.
+Use `--vol-window-seconds` and `--volatility-scale` to research alternatives
+without maintaining a second pricing implementation. The dedicated
+`src/research/model_sweep.py` evaluates a small window/scale grid with a
+chronological development/holdout split so a parameter choice is selected on
+older markets and judged on newer markets.
 
 ### Production taker-strategy replay
 
