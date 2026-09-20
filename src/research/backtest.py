@@ -349,9 +349,19 @@ def _dollars_to_cents(value: Any) -> float | None:
     return x * 100.0 if math.isfinite(x) else None
 
 
+def _candle_close(candle: dict, side: str) -> float | None:
+    quote = candle.get(side) or {}
+    return _dollars_to_cents(
+        quote.get("close_dollars")
+        if quote.get("close_dollars") is not None
+        else quote.get("close")
+    )
+
+
 def _candle_quote(candle: dict) -> tuple[float | None, float | None, float | None]:
-    yes_bid = _dollars_to_cents((candle.get("yes_bid") or {}).get("close"))
-    yes_ask = _dollars_to_cents((candle.get("yes_ask") or {}).get("close"))
+    # Current live-tier candles use close_dollars; archived candles use close.
+    yes_bid = _candle_close(candle, "yes_bid")
+    yes_ask = _candle_close(candle, "yes_ask")
     no_ask = None if yes_bid is None else 100.0 - yes_bid
     return yes_bid, yes_ask, no_ask
 
