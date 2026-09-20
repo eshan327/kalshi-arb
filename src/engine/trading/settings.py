@@ -33,8 +33,9 @@ class TradingSettings(BaseModel):
     )
     pre_settlement_until_seconds: float = Field(default=60.0, ge=1.0, le=900.0)
     entry_start_seconds_to_expiry: float | None = Field(
-        default=None, ge=20.0, le=900.0
+        default=None, ge=1.0, le=900.0
     )
+    entry_cutoff_seconds_to_expiry: float = Field(default=20.0, ge=0.0, le=60.0)
 
     @field_validator(
         "volatility_override",
