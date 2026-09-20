@@ -211,37 +211,38 @@ def fetch_cf_feeds(
     end_ts: float,
 ) -> tuple[list[dict[str, float]], list[dict[str, float]], str]:
     """
-    Recreate the live feed split: fastest entitled CF values for spot, exact
-    second-boundary values for realized vol and settlement fixes.
+    Recreate the live feed split with independent historical queries.
+
+    The live bot treats the 5 Hz channel as spot-only and the 1 Hz channel as the
+    sole source of realized-volatility history and settlement fixes. Do the same
+    here instead of assuming an integer-second 5 Hz tick is identical to the 1 Hz
+    publication.
     """
-    resolution = "PER_200MS" if profile.high_frequency else "PER_SECOND"
+    fix_ticks = fetch_cf_range(
+        profile.index_id,
+        start_ts,
+        end_ts,
+        max_resolution="PER_SECOND",
+    )
+    if not fix_ticks:
+        raise ValueError("CF one-second history is unavailable")
+
+    if not profile.high_frequency:
+        return list(fix_ticks), fix_ticks, "PER_SECOND"
+
     try:
         spot_ticks = fetch_cf_range(
             profile.index_id,
             start_ts,
             end_ts,
-            max_resolution=resolution,
+            max_resolution="PER_200MS",
         )
     except Exception:
-        if resolution == "PER_SECOND":
-            raise
-        resolution = "PER_SECOND"
-        spot_ticks = fetch_cf_range(
-            profile.index_id,
-            start_ts,
-            end_ts,
-            max_resolution=resolution,
-        )
+        return list(fix_ticks), fix_ticks, "PER_SECOND"
 
-    fix_ticks = (
-        one_second_boundary_ticks(spot_ticks)
-        if resolution == "PER_200MS"
-        else list(spot_ticks)
+    return (spot_ticks or list(fix_ticks)), fix_ticks, (
+        "PER_200MS" if spot_ticks else "PER_SECOND"
     )
-    if not fix_ticks and spot_ticks:
-        # Fail closed rather than deriving settlement fixes by flooring 5 Hz data.
-        raise ValueError("CF history contained no exact one-second boundary values")
-    return spot_ticks, fix_ticks, resolution
 
 
 def _latest_tick(
