@@ -148,9 +148,12 @@ def get_cfbenchmarks_history(
     *,
     timestamp: str,
     timespan: str = "HOUR",
-    max_resolution: str | None = "PER_SECOND",
 ) -> list[dict]:
-    """Fetch one fixed CF Benchmarks historical window through Kalshi's passthrough."""
+    """Fetch one fixed CF Benchmarks historical window through Kalshi's passthrough.
+
+    The CF /history/values endpoint returns the published historical ticks and does
+    not expose the maxResolution selector used by the recent-values endpoints.
+    """
     from data.kalshi_trading import _request
 
     params: dict[str, Any] = {
@@ -158,8 +161,6 @@ def get_cfbenchmarks_history(
         "timespan": timespan,
         "timestamp": timestamp,
     }
-    if max_resolution:
-        params["maxResolution"] = max_resolution
     payload = _request("GET", "/cfbenchmarks/history/values", params=params)
     data = payload.get("data", {})
     rows = data.get("payload", [])
