@@ -121,7 +121,10 @@ class DailyRiskTracker:
 
 
 def _quote_component(candle: dict, side: str, field: str = "close") -> float | None:
-    raw = (candle.get(side) or {}).get(field)
+    quote = candle.get(side) or {}
+    raw = quote.get(f"{field}_dollars")
+    if raw is None:
+        raw = quote.get(field)
     try:
         value = float(raw)
     except (TypeError, ValueError):
