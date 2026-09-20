@@ -379,6 +379,7 @@ class DashboardState(rx.State):
     pre_settlement_vol_scale = ""
     pre_settlement_until = "60"
     entry_start = ""
+    entry_cutoff = "20"
     settings_status = ""
     manual_side = "yes"
     manual_action = "buy"
@@ -418,6 +419,7 @@ class DashboardState(rx.State):
         )
         entry_start = settings.get("entry_start_seconds_to_expiry")
         self.entry_start = "" if entry_start is None else str(entry_start)
+        self.entry_cutoff = str(settings.get("entry_cutoff_seconds_to_expiry", 20))
 
     def _refresh(self) -> None:
         self._require_operator()
@@ -681,6 +683,7 @@ class DashboardState(rx.State):
                     "entry_start_seconds_to_expiry": (
                         float(self.entry_start) if self.entry_start else None
                     ),
+                    "entry_cutoff_seconds_to_expiry": float(self.entry_cutoff),
                 }
             )
             if errors:
@@ -769,6 +772,10 @@ class DashboardState(rx.State):
     @rx.event
     def set_entry_start(self, value: str) -> None:
         self.entry_start = value
+
+    @rx.event
+    def set_entry_cutoff(self, value: str) -> None:
+        self.entry_cutoff = value
 
     @rx.event
     def set_manual_side(self, value: str) -> None:
@@ -1550,6 +1557,14 @@ def _dashboard() -> rx.Component:
                                     min="20",
                                     max="900",
                                     placeholder="Disabled",
+                                ),
+                                _field(
+                                    "Entry cutoff before close (s)",
+                                    DashboardState.entry_cutoff,
+                                    DashboardState.set_entry_cutoff,
+                                    step="1",
+                                    min="0",
+                                    max="60",
                                 ),
                                 _field(
                                     "Re-entry cooldown (s)",
