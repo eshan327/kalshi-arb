@@ -287,6 +287,7 @@ def _pricing_at(
     spot_ticks: list[dict[str, float]],
     fix_ticks: list[dict[str, float]],
     force_one_second_spot: bool = False,
+    vol_window_seconds: float = 300.0,
 ) -> dict[str, Any]:
     spot_source = fix_ticks if force_one_second_spot else spot_ticks
     latest_spot = _latest_tick(spot_source, eval_ts)
@@ -313,6 +314,7 @@ def _pricing_at(
         settlement_decimals=decimals,
         index_state=state,
         now_ts=eval_ts,
+        vol_window_seconds=vol_window_seconds,
     )
 
 
@@ -344,6 +346,7 @@ def calibrate_market(
     fix_ticks: list[dict[str, float]],
     horizons: tuple[int, ...],
     subsecond_offset: float,
+    vol_window_seconds: float = 300.0,
 ) -> list[ModelObservation]:
     """Evaluate the production model at fixed horizons, including the final minute."""
     profile = get_market_profile(asset)
@@ -373,6 +376,7 @@ def calibrate_market(
             eval_ts=eval_ts,
             spot_ticks=spot_ticks,
             fix_ticks=fix_ticks,
+            vol_window_seconds=vol_window_seconds,
         )
         slow = _pricing_at(
             profile=profile,
@@ -384,6 +388,7 @@ def calibrate_market(
             spot_ticks=spot_ticks,
             fix_ticks=fix_ticks,
             force_one_second_spot=True,
+            vol_window_seconds=vol_window_seconds,
         )
         if (
             not fast.get("ready")
@@ -433,6 +438,7 @@ def quote_screen_market(
     spot_ticks: list[dict[str, float]],
     fix_ticks: list[dict[str, float]],
     min_edge_cents: float,
+    vol_window_seconds: float = 300.0,
 ) -> tuple[list[QuoteObservation], BacktestTrade | None]:
     """
     Coarse quote/PnL screen at one-minute candle closes.
@@ -481,6 +487,7 @@ def quote_screen_market(
             eval_ts=eval_ts,
             spot_ticks=spot_ticks,
             fix_ticks=fix_ticks,
+            vol_window_seconds=vol_window_seconds,
         )
         if not snapshot.get("ready") or snapshot.get("vol_is_fallback"):
             continue
@@ -562,6 +569,7 @@ def summarize(
     trades: list[BacktestTrade],
     *,
     cf_resolution: str,
+    vol_window_seconds: float,
 ) -> dict[str, Any]:
     by_horizon = []
     for horizon in sorted({row.nominal_horizon_seconds for row in model_rows}, reverse=True):
@@ -611,6 +619,7 @@ def summarize(
     cost = sum(row.entry_cents + row.fee_cents for row in trades)
     return {
         "cf_spot_resolution": cf_resolution,
+        "vol_window_seconds": float(vol_window_seconds),
         "model_observations": len(model_rows),
         "markets_calibrated": len({row.market_ticker for row in model_rows}),
         "mean_brier": _mean([row.brier for row in model_rows]),
@@ -645,6 +654,7 @@ def run_backtest(
     max_markets: int,
     min_edge_cents: float,
     horizons: tuple[int, ...] = DEFAULT_HORIZONS_SECONDS,
+    vol_window_seconds: float = 300.0,
 ) -> tuple[
     list[ModelObservation],
     list[QuoteObservation],
@@ -666,7 +676,9 @@ def run_backtest(
     if max_markets > 0:
         markets = markets[:max_markets]
     if not markets:
-        empty = summarize([], [], [], cf_resolution="unavailable")
+        empty = summarize(
+            [], [], [], cf_resolution="unavailable", vol_window_seconds=vol_window_seconds
+        )
         return [], [], [], empty
 
     closes = [
@@ -694,6 +706,7 @@ def run_backtest(
                 fix_ticks=fix_ticks,
                 horizons=horizons,
                 subsecond_offset=subsecond_offset,
+                vol_window_seconds=vol_window_seconds,
             )
         )
         market_quotes, trade = quote_screen_market(
@@ -702,6 +715,7 @@ def run_backtest(
             spot_ticks=spot_ticks,
             fix_ticks=fix_ticks,
             min_edge_cents=min_edge_cents,
+            vol_window_seconds=vol_window_seconds,
         )
         quote_rows.extend(market_quotes)
         if trade is not None:
@@ -712,6 +726,7 @@ def run_backtest(
         quote_rows,
         trades,
         cf_resolution=resolution,
+        vol_window_seconds=vol_window_seconds,
     )
 
 
@@ -739,6 +754,7 @@ def main() -> None:
         default=",".join(str(value) for value in DEFAULT_HORIZONS_SECONDS),
         help="Comma-separated seconds-to-expiry calibration horizons.",
     )
+    parser.add_argument("--vol-window-seconds", type=float, default=300.0)
     parser.add_argument("--output-dir", default="output/backtests")
     args = parser.parse_args()
 
@@ -757,6 +773,7 @@ def main() -> None:
         max_markets=max(0, args.max_markets),
         min_edge_cents=max(0.0, args.min_edge_cents),
         horizons=horizons,
+        vol_window_seconds=max(1.0, args.vol_window_seconds),
     )
     out = Path(args.output_dir)
     _write_csv(out / "calibration.csv", model_rows)
