@@ -42,14 +42,14 @@ def test_pricing_snapshot_accepts_explicit_replay_clock():
 
 def test_cf_history_normalization_collapses_subsecond_values():
     rows = [
-        {"time": 1_000_100, "value": "100.0"},
-        {"time": 1_000_900, "value": "101.0"},
-        {"time": 1_001_000, "value": "102.0"},
+        {"time": 1_700_000_000_100, "value": "100.0"},
+        {"time": 1_700_000_000_900, "value": "101.0"},
+        {"time": 1_700_000_001_000, "value": "102.0"},
     ]
     ticks = normalize_cf_history(rows)
     assert ticks == [
-        {"ts": 1000.0, "price": 101.0},
-        {"ts": 1001.0, "price": 102.0},
+        {"ts": 1_700_000_000.0, "price": 101.0},
+        {"ts": 1_700_000_001.0, "price": 102.0},
     ]
 
 
