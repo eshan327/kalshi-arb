@@ -11,7 +11,6 @@ from engine.trading.fees import kelly_fraction_binary, taker_fee_cents_per_contr
 from engine.trading.models import TradeSignal
 from engine.trading.settings import TradingSettings
 
-ENTRY_CUTOFF_SECONDS_TO_EXPIRY = 20.0
 MAX_ORDERBOOK_AGE_SECONDS = 2.0
 
 
