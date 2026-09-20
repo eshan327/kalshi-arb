@@ -218,8 +218,46 @@ convention.
 Historical quote candles are only available at one-minute granularity, so the
 reported trade P&L is an alpha screen rather than a true execution replay. It
 does not claim historical top-of-book depth, queue position, subsecond latency,
-or IOC fill realism. For those questions, record the live sequenced orderbook
-stream and replay that separate microstructure dataset.
+or IOC fill realism.
+
+For the closest replay of the actual live taker strategy, use:
+
+```bash
+KALSHI_ENV=prod uv run --env-file .env src/research/strategy_backtest.py BTC \
+  --max-markets 100 \
+  --starting-cash-cents 100000 \
+  --fee-multiplier 1.0 \
+  --assumed-top-size 10 \
+  --min-edge-cents 2
+```
+
+That replay calls the production `apply_pricing_overrides()` and
+`build_trade_signal()` functions directly and executes their IOC signals through
+the same `PaperAccount` fill logic used by Sim. It therefore preserves the real
+minimum-edge gate, deterministic lower-edge path, 20-second cutoff, taker-fee
+rounding, slippage-aware limit construction, Kelly sizing, bankroll/position/cash
+caps, max-order clips, buy cooldown, edge-reversal exits, daily-loss lock/flatten,
+and settlement accounting. Market rotation also resets the cooldown exactly as
+the live runtime does.
+
+Outputs are written to `output/strategy_backtests/`:
+
+- `decisions.csv`: every replayed production-strategy decision and account state.
+- `fills.csv`: every simulated IOC fill, including buys and edge-reversal sells.
+- `markets.csv`: per-market realized P&L and turnover.
+- `summary.json`: portfolio P&L plus an explicit split between exact production
+  logic and unavoidable historical-data assumptions.
+
+The remaining approximation is market-data fidelity, not strategy logic. Kalshi
+archives one-minute YES bid/ask OHLC but not the historical sequenced L2 book.
+The strategy replay therefore constructs the correct YES/NO top-of-book prices
+from each candle close and uses `--assumed-top-size` only for the otherwise
+unobservable displayed quantity. It allows at most one buy per archived minute
+rather than assuming that the observed ask persisted long enough for repeated
+five-second cooldown entries. Historical event fee overrides and exchange-shard
+cash allocations are also unavailable, so the fee multiplier is explicit and
+simulated cash is assumed usable on the active shard. For true L2/latency
+execution research, record and replay the live sequenced orderbook stream.
 
 ## Default controls
 
