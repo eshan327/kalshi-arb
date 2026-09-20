@@ -10,6 +10,7 @@ from engine.pricing.pipeline import compute_pricing_snapshot
 from research.backtest import (
     _settlement_state,
     calibrate_market,
+    fetch_cf_feeds,
     normalize_cf_history,
     one_second_boundary_ticks,
     trade_tape_market,
@@ -182,3 +183,41 @@ def test_trade_tape_compares_model_with_actual_trade_probability(monkeypatch):
     assert row.model_minus_market_cents == pytest.approx(10)
     assert row.model_brier < row.market_brier
     assert row.taker_outcome_side == "yes"
+
+
+
+def test_high_frequency_replay_fetches_one_second_and_subsecond_feeds_separately(monkeypatch):
+    import research.backtest as backtest
+
+    calls = []
+
+    def fake_range(index_id, start_ts, end_ts, *, max_resolution):
+        calls.append(max_resolution)
+        if max_resolution == "PER_SECOND":
+            return [{"ts": 1000.0, "price": 100.0}]
+        return [
+            {"ts": 1000.0, "price": 100.0},
+            {"ts": 1000.2, "price": 100.1},
+        ]
+
+    monkeypatch.setattr(backtest, "fetch_cf_range", fake_range)
+    spot, fixes, resolution = fetch_cf_feeds(
+        get_market_profile("BTC"),
+        1000.0,
+        1001.0,
+    )
+    assert calls == ["PER_SECOND", "PER_200MS"]
+    assert fixes == [{"ts": 1000.0, "price": 100.0}]
+    assert spot[-1]["ts"] == 1000.2
+    assert resolution == "PER_200MS"
+
+
+def test_candle_quote_supports_live_dollar_field_names():
+    import research.backtest as backtest
+
+    assert backtest._candle_quote(
+        {
+            "yes_bid": {"close_dollars": "0.5900"},
+            "yes_ask": {"close_dollars": "0.6000"},
+        }
+    ) == (59.0, 60.0, 41.0)
