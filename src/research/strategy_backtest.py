@@ -316,6 +316,8 @@ def replay_market(
     float,
 ]:
     profile = get_market_profile(asset)
+    # runtime.py resets the buy cooldown whenever the active 15-minute market rotates.
+    last_submission_ts = float("-inf")
     ticker = str(market.get("ticker") or "")
     strike = extract_suggested_strike(market)
     close_ts = parse_iso8601_to_epoch(market.get("close_time"))
@@ -674,10 +676,8 @@ def run_strategy_backtest(
     all_decisions: list[StrategyDecision] = []
     all_fills: list[StrategyFill] = []
     market_results: list[MarketReplayResult] = []
-    last_submission_ts = float("-inf")
-
     for market in markets:
-        decisions, fills, result, last_submission_ts = replay_market(
+        decisions, fills, result, _ = replay_market(
             market,
             asset=profile.asset,
             cf_ticks=cf_ticks,
@@ -686,7 +686,7 @@ def run_strategy_backtest(
             settings=settings,
             fee_multiplier=fee_multiplier,
             assumed_top_size=assumed_top_size,
-            last_submission_ts=last_submission_ts,
+            last_submission_ts=float("-inf"),
         )
         all_decisions.extend(decisions)
         all_fills.extend(fills)
