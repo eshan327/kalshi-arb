@@ -480,7 +480,7 @@ def build_trade_signal(
         seconds_to_expiry is None
         or seconds_to_expiry <= 0
         or (
-            seconds_to_expiry < ENTRY_CUTOFF_SECONDS_TO_EXPIRY
+            seconds_to_expiry < float(settings.entry_cutoff_seconds_to_expiry)
             and not deterministic_outcome
         )
     ):
@@ -491,6 +491,9 @@ def build_trade_signal(
     if entry_start is not None and seconds_to_expiry > float(entry_start):
         return None, "entry_window_not_started", diagnostics
 
+    diagnostics["entry_cutoff_seconds_to_expiry"] = float(
+        settings.entry_cutoff_seconds_to_expiry
+    )
     diagnostics["fee_type"] = fee_type
     diagnostics["fee_multiplier"] = fee_multiplier
     if not fee_policy_ready:
