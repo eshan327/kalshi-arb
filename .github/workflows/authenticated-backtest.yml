@@ -60,7 +60,21 @@ jobs:
           fi
           echo "max_markets=$max_markets" >> "$GITHUB_OUTPUT"
 
-      - name: Model calibration and market-relative diagnostics
+      - name: 100-market model calibration
+        if: steps.credentials.outputs.available == 'true'
+        run: |
+          python src/research/backtest.py BTC             --max-markets 100             --min-edge-cents 2             --vol-window-seconds 300             --skip-tape             --skip-quotes             --output-dir output/calibration_100
+
+      - name: Upload calibration
+        if: steps.credentials.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-calibration-100
+          path: output/calibration_100
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Market-relative diagnostics
         if: steps.credentials.outputs.available == 'true'
         run: |
           python src/research/backtest.py BTC             --max-markets ${{ steps.sample.outputs.max_markets }}             --min-edge-cents 2             --vol-window-seconds 300             --output-dir output/backtests
