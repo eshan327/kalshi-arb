@@ -14,6 +14,7 @@ from core.market_profiles import MarketProfile, get_market_profile
 from data.kalshi_rest import (
     get_cfbenchmarks_history,
     get_market_candlesticks,
+    get_market_trades,
     get_settled_markets,
 )
 from engine.market_stream.discovery import parse_iso8601_to_epoch
@@ -60,6 +61,27 @@ class QuoteObservation:
     yes_edge_cents: float | None
     no_edge_cents: float | None
     sigma_annual: float
+    regime: str
+
+
+@dataclass(frozen=True)
+class TapeObservation:
+    market_ticker: str
+    trade_id: str
+    eval_ts: float
+    seconds_to_expiry: float
+    count: float
+    yes_trade_cents: float
+    p_market: float
+    p_model: float
+    actual_yes: int
+    model_minus_market_cents: float
+    model_brier: float
+    market_brier: float
+    model_log_loss: float
+    market_log_loss: float
+    taker_outcome_side: str | None
+    taker_book_side: str | None
     regime: str
 
 
@@ -559,6 +581,105 @@ def quote_screen_market(
     return observations, trade
 
 
+def trade_tape_market(
+    market: dict,
+    *,
+    asset: str,
+    spot_ticks: list[dict[str, float]],
+    fix_ticks: list[dict[str, float]],
+    vol_window_seconds: float = 300.0,
+) -> list[TapeObservation]:
+    """
+    Compare the production model with actual public trade prices at trade timestamps.
+
+    This is a market-relative diagnostic, not an execution backtest: an observed
+    transaction proves that somebody traded at that price, not that our IOC would
+    have filled concurrently.
+    """
+    profile = get_market_profile(asset)
+    ticker = str(market.get("ticker") or "")
+    strike = extract_suggested_strike(market)
+    close_ts = parse_iso8601_to_epoch(market.get("close_time"))
+    open_ts = parse_iso8601_to_epoch(market.get("open_time"))
+    result = str(market.get("result") or "").lower()
+    if not ticker or strike is None or close_ts is None or result not in {"yes", "no"}:
+        return []
+
+    start_ts = max(open_ts or close_ts - 900, close_ts - 900)
+    trades = get_market_trades(
+        ticker=ticker,
+        min_ts=int(start_ts),
+        max_ts=int(close_ts),
+        include_block_trades=False,
+        historical=market.get("_data_tier") == "historical",
+    )
+    decimals = extract_settlement_decimals(
+        market, profile.settlement_decimals_fallback
+    )
+    actual_yes = 1 if result == "yes" else 0
+    rows: list[TapeObservation] = []
+
+    for trade in trades:
+        eval_ts = _parse_timestamp(trade.get("created_time"))
+        if eval_ts is None or not start_ts <= eval_ts < close_ts:
+            continue
+        yes_cents = _dollars_to_cents(trade.get("yes_price_dollars"))
+        if yes_cents is None or not 0 < yes_cents < 100:
+            continue
+        snapshot = _pricing_at(
+            profile=profile,
+            asset=asset,
+            market=market,
+            strike=strike,
+            decimals=decimals,
+            eval_ts=eval_ts,
+            spot_ticks=spot_ticks,
+            fix_ticks=fix_ticks,
+            vol_window_seconds=vol_window_seconds,
+        )
+        if not snapshot.get("ready") or snapshot.get("vol_is_fallback"):
+            continue
+
+        try:
+            count = float(trade.get("count_fp") or 0.0)
+        except (TypeError, ValueError):
+            count = 0.0
+        p_market = yes_cents / 100.0
+        p_model = float(snapshot["p_model"])
+        model_brier, model_log_loss = _scores(p_model, actual_yes)
+        market_brier, market_log_loss = _scores(p_market, actual_yes)
+        rows.append(
+            TapeObservation(
+                market_ticker=ticker,
+                trade_id=str(trade.get("trade_id") or ""),
+                eval_ts=eval_ts,
+                seconds_to_expiry=close_ts - eval_ts,
+                count=max(0.0, count),
+                yes_trade_cents=yes_cents,
+                p_market=p_market,
+                p_model=p_model,
+                actual_yes=actual_yes,
+                model_minus_market_cents=p_model * 100.0 - yes_cents,
+                model_brier=model_brier,
+                market_brier=market_brier,
+                model_log_loss=model_log_loss,
+                market_log_loss=market_log_loss,
+                taker_outcome_side=(
+                    str(trade.get("taker_outcome_side"))
+                    if trade.get("taker_outcome_side") is not None
+                    else None
+                ),
+                taker_book_side=(
+                    str(trade.get("taker_book_side"))
+                    if trade.get("taker_book_side") is not None
+                    else None
+                ),
+                regime=str(snapshot["regime"]),
+            )
+        )
+    return rows
+
+
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
@@ -566,6 +687,7 @@ def _mean(values: list[float]) -> float | None:
 def summarize(
     model_rows: list[ModelObservation],
     quote_rows: list[QuoteObservation],
+    tape_rows: list[TapeObservation],
     trades: list[BacktestTrade],
     *,
     cf_resolution: str,
@@ -632,6 +754,15 @@ def summarize(
         ),
         "by_horizon": by_horizon,
         "calibration": calibration,
+        "tape_observations": len(tape_rows),
+        "tape_markets": len({row.market_ticker for row in tape_rows}),
+        "tape_model_mean_brier": _mean([row.model_brier for row in tape_rows]),
+        "tape_market_mean_brier": _mean([row.market_brier for row in tape_rows]),
+        "tape_model_mean_log_loss": _mean([row.model_log_loss for row in tape_rows]),
+        "tape_market_mean_log_loss": _mean([row.market_log_loss for row in tape_rows]),
+        "tape_model_minus_market_mean_cents": _mean(
+            [row.model_minus_market_cents for row in tape_rows]
+        ),
         "quote_observations": len(quote_rows),
         "quote_screen_trades": len(trades),
         "quote_screen_wins": sum(1 for row in trades if row.won),
@@ -642,8 +773,10 @@ def summarize(
         ),
         "execution_note": (
             "Quote-screen PnL uses one-minute historical quote closes and is not an "
-            "L2/latency-accurate execution replay. Fixed-horizon model calibration is "
-            "independent of candle availability and includes the final settlement minute."
+            "L2/latency-accurate execution replay. Public-trade tape comparisons are "
+            "market-relative diagnostics, not hypothetical fills. Fixed-horizon model "
+            "calibration is independent of quote availability and includes the final "
+            "settlement minute."
         ),
     }
 
@@ -658,6 +791,7 @@ def run_backtest(
 ) -> tuple[
     list[ModelObservation],
     list[QuoteObservation],
+    list[TapeObservation],
     list[BacktestTrade],
     dict[str, Any],
 ]:
@@ -677,9 +811,10 @@ def run_backtest(
         markets = markets[:max_markets]
     if not markets:
         empty = summarize(
-            [], [], [], cf_resolution="unavailable", vol_window_seconds=vol_window_seconds
+            [], [], [], [], cf_resolution="unavailable",
+            vol_window_seconds=vol_window_seconds
         )
-        return [], [], [], empty
+        return [], [], [], [], empty
 
     closes = [
         parse_iso8601_to_epoch(market.get("close_time"))
@@ -696,6 +831,7 @@ def run_backtest(
 
     model_rows: list[ModelObservation] = []
     quote_rows: list[QuoteObservation] = []
+    tape_rows: list[TapeObservation] = []
     trades: list[BacktestTrade] = []
     for market in markets:
         model_rows.extend(
@@ -706,6 +842,15 @@ def run_backtest(
                 fix_ticks=fix_ticks,
                 horizons=horizons,
                 subsecond_offset=subsecond_offset,
+                vol_window_seconds=vol_window_seconds,
+            )
+        )
+        tape_rows.extend(
+            trade_tape_market(
+                market,
+                asset=profile.asset,
+                spot_ticks=spot_ticks,
+                fix_ticks=fix_ticks,
                 vol_window_seconds=vol_window_seconds,
             )
         )
@@ -721,9 +866,10 @@ def run_backtest(
         if trade is not None:
             trades.append(trade)
 
-    return model_rows, quote_rows, trades, summarize(
+    return model_rows, quote_rows, tape_rows, trades, summarize(
         model_rows,
         quote_rows,
+        tape_rows,
         trades,
         cf_resolution=resolution,
         vol_window_seconds=vol_window_seconds,
@@ -768,7 +914,7 @@ def main() -> None:
             reverse=True,
         )
     )
-    model_rows, quote_rows, trades, summary = run_backtest(
+    model_rows, quote_rows, tape_rows, trades, summary = run_backtest(
         asset=args.asset,
         max_markets=max(0, args.max_markets),
         min_edge_cents=max(0.0, args.min_edge_cents),
@@ -778,6 +924,7 @@ def main() -> None:
     out = Path(args.output_dir)
     _write_csv(out / "calibration.csv", model_rows)
     _write_csv(out / "quote_observations.csv", quote_rows)
+    _write_csv(out / "tape_observations.csv", tape_rows)
     _write_csv(out / "trades.csv", trades)
     out.mkdir(parents=True, exist_ok=True)
     (out / "summary.json").write_text(
