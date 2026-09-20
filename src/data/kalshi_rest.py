@@ -181,6 +181,31 @@ def get_historical_markets(*, series_ticker: str) -> list[dict[str, Any]]:
     return [{**row, "_data_tier": "historical"} for row in rows]
 
 
+def get_market_trades_page(
+    *,
+    ticker: str,
+    min_ts: int | None = None,
+    max_ts: int | None = None,
+    include_block_trades: bool = False,
+    historical: bool = False,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Fetch one newest-first trade page for a narrow research window."""
+    params: dict[str, Any] = {
+        "ticker": ticker,
+        "limit": max(1, min(1000, int(limit))),
+    }
+    if min_ts is not None:
+        params["min_ts"] = int(min_ts)
+    if max_ts is not None:
+        params["max_ts"] = int(max_ts)
+    if not include_block_trades:
+        params["is_block_trade"] = "false"
+    path = "/historical/trades" if historical else "/markets/trades"
+    payload = _get_json(f"{API_BASE_URL}{path}?{urlencode(params)}")
+    return payload.get("trades", [])
+
+
 def get_market_trades(
     *,
     ticker: str,
