@@ -753,3 +753,42 @@ def test_pre_settlement_volatility_scale_only_applies_before_cutoff() -> None:
     assert early["sigma_override_applied"] == pytest.approx(0.625)
     assert late["volatility_scale_applied"] == pytest.approx(1.0)
     assert late["sigma_override_applied"] == pytest.approx(0.5)
+
+
+def test_configurable_entry_cutoff_can_open_forward_research_window() -> None:
+    book = OrderBook("TEST")
+    book.load_rest_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    )
+    pricing = {
+        "ready": True,
+        "p_model": 0.68,
+        "seconds_to_expiry": 10,
+        "vol_is_fallback": False,
+    }
+
+    blocked, blocked_reason, _ = build_trade_signal(
+        pricing=pricing,
+        market_ticker="TEST",
+        book=book,
+        settings=TradingSettings(),
+        bankroll_cents=100_000,
+        available_cash_cents=90_000,
+    )
+    assert blocked is None
+    assert blocked_reason == "entry_cutoff"
+
+    signal, reason, diagnostics = build_trade_signal(
+        pricing=pricing,
+        market_ticker="TEST",
+        book=book,
+        settings=TradingSettings(
+            entry_start_seconds_to_expiry=30,
+            entry_cutoff_seconds_to_expiry=1,
+        ),
+        bankroll_cents=100_000,
+        available_cash_cents=90_000,
+    )
+    assert reason == "ev_signal_ready"
+    assert signal is not None and signal.action == "buy"
+    assert diagnostics["entry_cutoff_seconds_to_expiry"] == 1
