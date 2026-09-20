@@ -69,3 +69,86 @@ def get_recent_index_values(index_id: str) -> list[dict]:
         "/cfbenchmarks/values",
         params={"id": index_id, "maxResolution": "PER_SECOND"},
     )["data"]["payload"]
+
+
+
+def get_cfbenchmarks_history(
+    index_id: str,
+    *,
+    timestamp: str,
+    timespan: str = "HOUR",
+    max_resolution: str | None = "PER_SECOND",
+) -> list[dict]:
+    """Fetch one fixed CF Benchmarks historical window through Kalshi's passthrough."""
+    from data.kalshi_trading import _request
+
+    params: dict[str, Any] = {
+        "id": index_id,
+        "timespan": timespan,
+        "timestamp": timestamp,
+    }
+    if max_resolution:
+        params["maxResolution"] = max_resolution
+    payload = _request("GET", "/cfbenchmarks/history/values", params=params)
+    data = payload.get("data", {})
+    rows = data.get("payload", [])
+    if isinstance(rows, dict):
+        rows = rows.get("values", rows.get("data", []))
+    if not isinstance(rows, list):
+        raise ValueError("Unexpected CF Benchmarks history payload")
+    return rows
+
+
+def get_historical_markets(*, series_ticker: str) -> list[dict[str, Any]]:
+    """Fetch every archived market for one Kalshi series."""
+    from data.kalshi_trading import _pages
+
+    return _pages(
+        "/historical/markets",
+        "markets",
+        {"series_ticker": series_ticker},
+    )
+
+
+def get_historical_trades(
+    *,
+    ticker: str,
+    min_ts: int | None = None,
+    max_ts: int | None = None,
+    include_block_trades: bool = False,
+) -> list[dict[str, Any]]:
+    """Fetch archived public trades for a market."""
+    from data.kalshi_trading import _pages
+
+    params: dict[str, Any] = {"ticker": ticker}
+    if min_ts is not None:
+        params["min_ts"] = int(min_ts)
+    if max_ts is not None:
+        params["max_ts"] = int(max_ts)
+    if not include_block_trades:
+        params["is_block_trade"] = False
+    return _pages("/historical/trades", "trades", params)
+
+
+def get_historical_candlesticks(
+    *,
+    ticker: str,
+    start_ts: int,
+    end_ts: int,
+    period_interval: int = 1,
+) -> list[dict[str, Any]]:
+    """Fetch archived bid/ask/trade candles. period_interval is minutes."""
+    if period_interval not in {1, 60, 1440}:
+        raise ValueError("period_interval must be 1, 60, or 1440")
+    from data.kalshi_trading import _request
+
+    payload = _request(
+        "GET",
+        f"/historical/markets/{ticker}/candlesticks",
+        params={
+            "start_ts": int(start_ts),
+            "end_ts": int(end_ts),
+            "period_interval": int(period_interval),
+        },
+    )
+    return payload.get("candlesticks", [])
