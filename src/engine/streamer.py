@@ -45,6 +45,7 @@ def _capture_research_event(
     msg: dict,
     *,
     seq: int | None = None,
+    sid: int | None = None,
     receipt_ts: float | None = None,
 ) -> None:
     """Persist raw late-market public data for forward microstructure research."""
@@ -64,6 +65,7 @@ def _capture_research_event(
         "receipt_ts": now,
         "kind": str(kind),
         "seq": seq,
+        "sid": sid,
         "market_ticker": ticker,
         "close_ts": close_ts,
         "seconds_to_expiry": seconds_to_expiry,
@@ -386,6 +388,7 @@ async def _session(profile) -> None:
                         kind,
                         msg,
                         seq=seq if isinstance(seq, int) else None,
+                        sid=sid if isinstance(sid, int) else None,
                         receipt_ts=time.time(),
                     )
                 if (
