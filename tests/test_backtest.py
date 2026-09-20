@@ -12,6 +12,7 @@ from research.backtest import (
     calibrate_market,
     normalize_cf_history,
     one_second_boundary_ticks,
+    trade_tape_market,
 )
 
 
@@ -127,3 +128,57 @@ def test_fixed_horizon_calibration_reaches_collapsed_final_minute():
     assert row.spot == pytest.approx(100.04)
     assert row.one_second_spot == pytest.approx(99.98)
     assert row.fast_spot_changed_probability
+
+
+
+def test_trade_tape_compares_model_with_actual_trade_probability(monkeypatch):
+    import research.backtest as backtest
+
+    close = 2_000.0
+    market = {
+        "ticker": "TEST",
+        "open_time": datetime.fromtimestamp(1_100.0, UTC).isoformat(),
+        "close_time": datetime.fromtimestamp(close, UTC).isoformat(),
+        "strike_price": 100.0,
+        "result": "yes",
+        "_data_tier": "live",
+    }
+    monkeypatch.setattr(
+        backtest,
+        "get_market_trades",
+        lambda **kwargs: [
+            {
+                "trade_id": "trade-1",
+                "created_time": datetime.fromtimestamp(1_970.4, UTC).isoformat(),
+                "count_fp": "3.00",
+                "yes_price_dollars": "0.6000",
+                "taker_outcome_side": "yes",
+                "taker_book_side": "bid",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        backtest,
+        "_pricing_at",
+        lambda **kwargs: {
+            "ready": True,
+            "vol_is_fallback": False,
+            "p_model": 0.70,
+            "regime": "collapsed",
+        },
+    )
+
+    rows = trade_tape_market(
+        market,
+        asset="BTC",
+        spot_ticks=[{"ts": 1_970.4, "price": 100.0}],
+        fix_ticks=[{"ts": 1_970.0, "price": 100.0}],
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.count == 3
+    assert row.p_market == pytest.approx(0.60)
+    assert row.p_model == pytest.approx(0.70)
+    assert row.model_minus_market_cents == pytest.approx(10)
+    assert row.model_brier < row.market_brier
+    assert row.taker_outcome_side == "yes"
