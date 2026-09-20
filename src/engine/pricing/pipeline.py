@@ -21,9 +21,17 @@ def compute_pricing_snapshot(
     close_time_iso: str | None,
     settlement_decimals: int | None = None,
     index_state: dict | None = None,
+    now_ts: float | None = None,
+    vol_window_seconds: float = 300.0,
 ) -> dict[str, Any]:
+    """Compute the live/replay pricing snapshot from information available at now_ts.
+
+    now_ts defaults to wall-clock time for live trading. Historical research must
+    pass it explicitly so the production pricing logic can be replayed without
+    monkeypatching time or maintaining a second model implementation.
+    """
     state = index_state or {}
-    now = time.time()
+    now = time.time() if now_ts is None else float(now_ts)
     close = parse_iso8601_to_epoch(close_time_iso)
     decimals = (
         profile.settlement_decimals_fallback
@@ -70,16 +78,19 @@ def compute_pricing_snapshot(
         return fail("market_closed")
 
     points = [(t["ts"], t["price"]) for t in ticks]
+    vol_window = max(1.0, float(vol_window_seconds))
     sigma = realized_vol_from_price_points(
-        points, window_seconds=300, now_ts=now, min_samples=8
+        points, window_seconds=vol_window, now_ts=now, min_samples=8
     )
+    sigma_samples = sum(1 for ts, _ in points if now - vol_window <= ts <= now)
     fallback = sigma is None or sigma <= 0
     sigma = profile.fallback_sigma_annual if fallback else sigma
     model_strike = strike - 0.5 * 10**-decimals
     seconds = close - now
     base.update(
         sigma_annual=sigma,
-        sigma_samples=len(points),
+        sigma_samples=sigma_samples,
+        vol_window_seconds=vol_window,
         vol_is_fallback=fallback,
         model_strike_usd=model_strike,
         rounding_half_unit=0.5 * 10**-decimals,
@@ -88,8 +99,6 @@ def compute_pricing_snapshot(
     if seconds > window:
         result = prob_levy_tw_binary(spot, model_strike, sigma, seconds, n_fixes=window)
     else:
-        # Use Kalshi's accumulation, including its boundary semantics and sample count.
-        # Never manufacture missing fixes by forward filling or mixing in 5 Hz ticks.
         avg = state.get("final_average")
         elapsed = max(0, math.floor(now - (close - window)))
         base["twap_seconds_elapsed"] = elapsed
@@ -108,7 +117,6 @@ def compute_pricing_snapshot(
                 or avg["end"] > now + 0.001
             ):
                 return fail("invalid_settlement_average")
-            # One-second tolerance for delivery; larger holes cannot become known fixes.
             if count < max(0, elapsed - 1):
                 return fail("incomplete_settlement_average")
         base.update(
