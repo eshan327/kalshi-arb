@@ -3,11 +3,22 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from dataclasses import dataclass, asdict
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from core.config import KALSHI_ENV
-from research.backtest import DEFAULT_HORIZONS_SECONDS, ModelObservation, run_backtest
+from core.market_metadata import extract_suggested_strike
+from core.market_profiles import get_market_profile
+from data.kalshi_rest import get_settled_markets
+from engine.market_stream.discovery import parse_iso8601_to_epoch
+from research.backtest import (
+    CF_HISTORY_DATA_LAG_BUFFER_SEC,
+    DEFAULT_HORIZONS_SECONDS,
+    ModelObservation,
+    calibrate_market,
+    fetch_cf_feeds,
+)
 
 
 @dataclass(frozen=True)
@@ -22,12 +33,22 @@ class SweepResult:
     mean_log_loss: float | None
 
 
+@dataclass(frozen=True)
+class SweepObservation:
+    vol_window_seconds: float
+    volatility_scale: float
+    split: str
+    market_ticker: str
+    eval_ts: float
+    horizon_seconds: int
+    p_model: float
+    actual_yes: int
+    brier: float
+    log_loss: float
+
+
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
-
-
-def _market_close(row: ModelObservation) -> float:
-    return float(row.eval_ts + row.seconds_to_expiry)
 
 
 def _summarize_rows(
@@ -74,35 +95,65 @@ def run_sweep(
     max_markets: int,
     windows: tuple[float, ...],
     scales: tuple[float, ...],
-) -> tuple[list[SweepResult], dict]:
+) -> tuple[list[SweepResult], list[SweepObservation], dict]:
+    profile = get_market_profile(asset)
+    cutoff = time.time() - CF_HISTORY_DATA_LAG_BUFFER_SEC
+    markets = [
+        market
+        for market in get_settled_markets(profile.kalshi_series_ticker)
+        if str(market.get("result") or "").lower() in {"yes", "no"}
+        and extract_suggested_strike(market) is not None
+        and (parse_iso8601_to_epoch(market.get("close_time")) or float("inf"))
+        <= cutoff
+    ]
+    markets.sort(key=lambda row: parse_iso8601_to_epoch(row.get("close_time")) or 0)
+    if max_markets > 0:
+        markets = markets[-max_markets:]
+    if len(markets) < 2:
+        raise ValueError("Need at least two settled markets for a chronological split")
+
+    closes = [
+        parse_iso8601_to_epoch(market.get("close_time"))
+        for market in markets
+    ]
+    closes = [ts for ts in closes if ts is not None]
+    max_window = max(windows) if windows else 300.0
+    max_horizon = max(DEFAULT_HORIZONS_SECONDS)
+    spot_ticks, fix_ticks, resolution = fetch_cf_feeds(
+        profile,
+        min(closes) - max(20 * 60, max_horizon + max_window),
+        max(closes) + 1,
+    )
+    subsecond_offset = 0.4 if resolution == "PER_200MS" else 0.0
+
+    ordered_tickers = [str(market["ticker"]) for market in markets]
+    midpoint = len(ordered_tickers) // 2
+    development = set(ordered_tickers[:midpoint])
+    holdout = set(ordered_tickers[midpoint:])
+
     results: list[SweepResult] = []
+    observations: list[SweepObservation] = []
     combination_summaries: list[dict] = []
 
     for window in windows:
         for scale in scales:
-            model_rows, _, _, _, _, summary = run_backtest(
-                asset=asset,
-                max_markets=max_markets,
-                min_edge_cents=2.0,
-                horizons=DEFAULT_HORIZONS_SECONDS,
-                vol_window_seconds=window,
-                volatility_scale=scale,
-                include_tape=False,
-                include_quotes=False,
-                include_market_relative=False,
-            )
-            closes_by_market = {
-                row.market_ticker: _market_close(row) for row in model_rows
-            }
-            ordered_markets = [
-                ticker
-                for ticker, _ in sorted(
-                    closes_by_market.items(), key=lambda item: item[1]
+            model_rows: list[ModelObservation] = []
+            failures: dict[str, int] = {}
+            for market in markets:
+                model_rows.extend(
+                    calibrate_market(
+                        market,
+                        asset=profile.asset,
+                        spot_ticks=spot_ticks,
+                        fix_ticks=fix_ticks,
+                        horizons=DEFAULT_HORIZONS_SECONDS,
+                        subsecond_offset=subsecond_offset,
+                        vol_window_seconds=window,
+                        volatility_scale=scale,
+                        failure_counts=failures,
+                    )
                 )
-            ]
-            midpoint = len(ordered_markets) // 2
-            development = set(ordered_markets[:midpoint])
-            holdout = set(ordered_markets[midpoint:])
+
             split_rows = {
                 "all": model_rows,
                 "development": [
@@ -121,14 +172,29 @@ def run_sweep(
                         split=split,
                     )
                 )
+                if split in {"development", "holdout"}:
+                    observations.extend(
+                        SweepObservation(
+                            vol_window_seconds=window,
+                            volatility_scale=scale,
+                            split=split,
+                            market_ticker=row.market_ticker,
+                            eval_ts=row.eval_ts,
+                            horizon_seconds=row.nominal_horizon_seconds,
+                            p_model=row.p_model,
+                            actual_yes=row.actual_yes,
+                            brier=row.brier,
+                            log_loss=row.log_loss,
+                        )
+                        for row in rows
+                    )
+
             combination_summaries.append(
                 {
                     "vol_window_seconds": window,
                     "volatility_scale": scale,
-                    "markets": len(ordered_markets),
-                    "calibration_rejections": summary.get(
-                        "calibration_rejections", {}
-                    ),
+                    "markets": len(ordered_tickers),
+                    "calibration_rejections": dict(sorted(failures.items())),
                     "development_brier": _mean(
                         [row.brier for row in split_rows["development"]]
                     ),
@@ -145,9 +211,7 @@ def run_sweep(
             )
 
     selectable = [
-        row
-        for row in combination_summaries
-        if row["development_brier"] is not None
+        row for row in combination_summaries if row["development_brier"] is not None
     ]
     selected = (
         min(
@@ -171,7 +235,10 @@ def run_sweep(
     )
     summary = {
         "asset": asset,
-        "max_markets": max_markets,
+        "markets": len(ordered_tickers),
+        "development_markets": len(development),
+        "holdout_markets": len(holdout),
+        "cf_spot_resolution": resolution,
         "selection_rule": (
             "Choose the window/scale with lowest development-half Brier score; "
             "evaluate that frozen choice on the newer holdout half."
@@ -180,7 +247,18 @@ def run_sweep(
         "production_baseline": production,
         "combinations": combination_summaries,
     }
-    return results, summary
+    return results, observations, summary
+
+
+def _write_csv(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def main() -> None:
@@ -204,7 +282,7 @@ def main() -> None:
     scales = tuple(
         float(value) for value in args.scales.split(",") if value.strip()
     )
-    results, summary = run_sweep(
+    results, observations, summary = run_sweep(
         asset=args.asset,
         max_markets=max(2, args.max_markets),
         windows=windows,
@@ -213,12 +291,11 @@ def main() -> None:
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    rows = [asdict(row) for row in results]
-    with (out / "sweep.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]) if rows else [])
-        if rows:
-            writer.writeheader()
-            writer.writerows(rows)
+    _write_csv(out / "sweep.csv", [asdict(row) for row in results])
+    _write_csv(
+        out / "sweep_observations.csv",
+        [asdict(row) for row in observations],
+    )
     (out / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True),
         encoding="utf-8",
