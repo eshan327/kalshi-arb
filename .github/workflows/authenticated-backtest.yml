@@ -1,0 +1,61 @@
+name: authenticated backtest
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/backtest-trigger"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KALSHI_ENV: prod
+      KALSHI_PROD_KEY_ID: ${{ secrets.KALSHI_PROD_KEY_ID }}
+      KALSHI_PROD_PRIVATE_KEY_PEM: ${{ secrets.KALSHI_PROD_PRIVATE_KEY_PEM }}
+      KALSHI_PROD_KEY_PATH: .secrets/kalshi_prod.pem
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Require Kalshi secrets
+        shell: bash
+        run: |
+          if [[ -z "$KALSHI_PROD_KEY_ID" || -z "$KALSHI_PROD_PRIVATE_KEY_PEM" ]]; then
+            echo "::error::Configure repository Actions secrets KALSHI_PROD_KEY_ID and KALSHI_PROD_PRIVATE_KEY_PEM before triggering this workflow."
+            exit 1
+          fi
+
+      - name: Materialize private key
+        shell: bash
+        run: |
+          umask 077
+          mkdir -p .secrets
+          printf '%s' "$KALSHI_PROD_PRIVATE_KEY_PEM" > "$KALSHI_PROD_KEY_PATH"
+
+      - name: Install
+        run: python -m pip install -e .
+
+      - name: Model calibration and market-relative diagnostics
+        run: |
+          python src/research/backtest.py BTC             --max-markets 100             --min-edge-cents 2             --vol-window-seconds 300             --output-dir output/backtests
+
+      - name: Production taker-strategy replay
+        run: |
+          python src/research/strategy_backtest.py BTC             --max-markets 100             --starting-cash-cents 100000             --fee-multiplier 1.0             --assumed-top-size 10             --output-dir output/strategy_backtests
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-backtest-results
+          path: |
+            output/backtests
+            output/strategy_backtests
+          if-no-files-found: error
+          retention-days: 14
