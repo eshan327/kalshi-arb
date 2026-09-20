@@ -184,10 +184,8 @@ def fetch_cf_range(
     index_id: str,
     start_ts: float,
     end_ts: float,
-    *,
-    max_resolution: str = "PER_SECOND",
 ) -> list[dict[str, float]]:
-    """Fetch a contiguous CF range, preserving the requested publication resolution."""
+    """Fetch a contiguous CF historical range at its published resolution."""
     raw: list[dict] = []
     cursor = _hour_start(start_ts)
     final_hour = _hour_start(end_ts)
@@ -202,7 +200,6 @@ def fetch_cf_range(
                 index_id,
                 timestamp=_iso_hour(cursor),
                 timespan="HOUR",
-                max_resolution=max_resolution,
             )
         )
         first = False
@@ -221,38 +218,25 @@ def fetch_cf_feeds(
     end_ts: float,
 ) -> tuple[list[dict[str, float]], list[dict[str, float]], str]:
     """
-    Recreate the live feed split with independent historical queries.
+    Recreate the live 5 Hz/1 Hz split from CF's historical tick stream.
 
-    The live bot treats the 5 Hz channel as spot-only and the 1 Hz channel as the
-    sole source of realized-volatility history and settlement fixes. Do the same
-    here instead of assuming an integer-second 5 Hz tick is identical to the 1 Hz
-    publication.
+    Historical /history/values does not accept maxResolution. For subsecond RTIs it
+    returns the published 200 ms ticks, including exact second-boundary values.
+    The live bot uses all ticks only for current spot while the 1 Hz channel owns
+    volatility history and settlement fixes, so replay filters those exact
+    second-boundary publications explicitly.
     """
-    fix_ticks = fetch_cf_range(
-        profile.index_id,
-        start_ts,
-        end_ts,
-        max_resolution="PER_SECOND",
-    )
-    if not fix_ticks:
-        raise ValueError("CF one-second history is unavailable")
+    published = fetch_cf_range(profile.index_id, start_ts, end_ts)
+    if not published:
+        raise ValueError("CF historical values are unavailable")
 
     if not profile.high_frequency:
-        return list(fix_ticks), fix_ticks, "PER_SECOND"
+        return list(published), list(published), "PER_SECOND"
 
-    try:
-        spot_ticks = fetch_cf_range(
-            profile.index_id,
-            start_ts,
-            end_ts,
-            max_resolution="PER_200MS",
-        )
-    except Exception:
-        return list(fix_ticks), fix_ticks, "PER_SECOND"
-
-    return (spot_ticks or list(fix_ticks)), fix_ticks, (
-        "PER_200MS" if spot_ticks else "PER_SECOND"
-    )
+    fix_ticks = one_second_boundary_ticks(published)
+    if not fix_ticks:
+        raise ValueError("CF history contained no exact one-second boundary values")
+    return published, fix_ticks, "PER_200MS"
 
 
 def _ticks_between(
