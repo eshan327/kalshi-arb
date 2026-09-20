@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ from engine.trading.strategy import (
 from research.backtest import _latest_tick, _settlement_state, fetch_cf_feeds
 
 _NY = ZoneInfo("America/New_York")
+CF_HISTORY_DATA_LAG_BUFFER_SEC = 20 * 60
 
 
 @dataclass(frozen=True)
@@ -706,10 +708,13 @@ def run_strategy_backtest(
         settings = TradingSettings.model_validate(
             {**settings.model_dump(), "min_edge_cents": float(min_edge_cents)}
         )
+    research_cutoff = time.time() - CF_HISTORY_DATA_LAG_BUFFER_SEC
     markets = [
         market
         for market in get_settled_markets(profile.kalshi_series_ticker)
         if str(market.get("result") or "").lower() in {"yes", "no"}
+        and (parse_iso8601_to_epoch(market.get("close_time")) or float("inf"))
+        <= research_cutoff
     ]
     markets.sort(key=lambda row: parse_iso8601_to_epoch(row.get("close_time")) or 0)
     if max_markets > 0:
