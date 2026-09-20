@@ -25,6 +25,7 @@ from engine.trading.fees import taker_fee_cents_per_contract
 
 DEFAULT_HORIZONS_SECONDS = (600, 300, 120, 90, 60, 45, 30, 20, 10, 5, 1)
 CF_HISTORY_MIN_INTERVAL_SEC = 0.26
+CF_HISTORY_DATA_LAG_BUFFER_SEC = 20 * 60
 
 
 @dataclass(frozen=True)
@@ -816,12 +817,14 @@ def run_backtest(
     dict[str, Any],
 ]:
     profile = get_market_profile(asset)
+    research_cutoff = time.time() - CF_HISTORY_DATA_LAG_BUFFER_SEC
     markets = [
         market
         for market in get_settled_markets(profile.kalshi_series_ticker)
         if str(market.get("result") or "").lower() in {"yes", "no"}
         and extract_suggested_strike(market) is not None
-        and parse_iso8601_to_epoch(market.get("close_time")) is not None
+        and (parse_iso8601_to_epoch(market.get("close_time")) or float("inf"))
+        <= research_cutoff
     ]
     markets.sort(
         key=lambda row: parse_iso8601_to_epoch(row.get("close_time")) or 0,
