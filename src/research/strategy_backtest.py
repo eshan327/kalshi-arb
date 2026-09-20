@@ -650,6 +650,7 @@ def summarize(
                 "all simulated cash is assumed available to the active exchange shard",
                 "fee multiplier is fixed by the CLI because historical event fee overrides are not archived with market candles",
                 "at most one buy is allowed per 1-minute snapshot; persistent intra-minute liquidity is never assumed",
+                "historical pause/resume lifecycle events are not replayed; a candle is treated as tradable when present",
                 "latency, queue position, and sub-minute quote changes cannot be reconstructed",
             ],
         },
