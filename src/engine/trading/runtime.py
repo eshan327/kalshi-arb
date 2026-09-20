@@ -32,6 +32,7 @@ from data.kalshi_trading import (
 )
 from engine.live_pricing import compute_live_pricing_snapshot
 from engine.streamer import (
+    _capture_research_event,
     get_live_book,
     get_live_market_info,
     get_market_result,
@@ -907,6 +908,18 @@ async def _run_single_cycle() -> None:
     )
     signal_payload = _signal_payload(signal)
     monologue = _monologue(signal, reason, pricing, diagnostics)
+    _capture_research_event(
+        "strategy_decision",
+        {
+            "reason": reason,
+            "pricing": pricing,
+            "diagnostics": diagnostics,
+            "signal": signal_payload,
+            "execution_mode": execution_mode,
+            "armed": _is_armed(),
+        },
+        receipt_ts=cycle_ts,
+    )
 
     common_state = {
         "current_market_ticker": market_ticker,
