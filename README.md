@@ -219,9 +219,12 @@ Outputs are written to `output/backtests/`:
 - `calibration.csv`: fixed-horizon model probabilities, outcomes, Brier/log
   loss, known-fix count, and fast-vs-1Hz spot comparison.
 - `quote_observations.csv`: model value versus one-minute Kalshi quote closes.
+- `tape_observations.csv`: model probability versus actual public trade prices
+  at each trade timestamp, including sub-minute/final-minute transactions when
+  present. This is a market-relative diagnostic, not a fill simulation.
 - `trades.csv`: a deliberately simple first-signal-per-market alpha screen.
-- `summary.json`: aggregate and horizon-level calibration plus the coarse quote
-  screen.
+- `summary.json`: aggregate and horizon-level calibration, model-versus-trade
+  proper scores, and the coarse quote screen.
 
 Use `--vol-window-seconds` to research alternatives to the production 300-second
 realized-volatility window without maintaining a second pricing implementation.
