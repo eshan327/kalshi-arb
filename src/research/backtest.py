@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from core.config import KALSHI_ENV
 from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
 from core.market_profiles import MarketProfile, get_market_profile
 from data.kalshi_rest import (
@@ -889,6 +890,10 @@ def _write_csv(path: Path, rows: list[Any]) -> None:
 
 
 def main() -> None:
+    if KALSHI_ENV != "prod":
+        raise RuntimeError(
+            "Historical research uses production Kalshi/CF data; set KALSHI_ENV=prod."
+        )
     parser = argparse.ArgumentParser(
         description="Backtest Kalshi 15-minute crypto model calibration and coarse alpha."
     )
