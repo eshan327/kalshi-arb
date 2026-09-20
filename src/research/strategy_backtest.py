@@ -682,7 +682,8 @@ def run_strategy_backtest(
     starting_cash_cents: int,
     fee_multiplier: float,
     assumed_top_size: int,
-    min_edge_cents: float,
+    min_edge_cents: float | None = None,
+    settings: TradingSettings | None = None,
 ) -> tuple[
     list[StrategyDecision],
     list[StrategyFill],
@@ -690,6 +691,18 @@ def run_strategy_backtest(
     dict[str, Any],
 ]:
     profile = get_market_profile(asset)
+    if settings is None:
+        settings = TradingSettings(
+            **(
+                {"min_edge_cents": float(min_edge_cents)}
+                if min_edge_cents is not None
+                else {}
+            )
+        )
+    elif min_edge_cents is not None:
+        settings = TradingSettings.model_validate(
+            {**settings.model_dump(), "min_edge_cents": float(min_edge_cents)}
+        )
     markets = [
         market
         for market in get_settled_markets(profile.kalshi_series_ticker)
@@ -700,7 +713,6 @@ def run_strategy_backtest(
         markets = markets[-max_markets:]
     if not markets:
         account = PaperAccount(starting_cash_cents)
-        settings = TradingSettings(min_edge_cents=min_edge_cents)
         return [], [], [], summarize(
             starting_cash_cents=starting_cash_cents,
             account=account,
@@ -724,7 +736,6 @@ def run_strategy_backtest(
         max(closes) + 1,
     )
 
-    settings = TradingSettings(min_edge_cents=min_edge_cents)
     account = PaperAccount(starting_cash_cents)
     risk = DailyRiskTracker()
     all_decisions: list[StrategyDecision] = []
@@ -770,9 +781,25 @@ def main() -> None:
     parser.add_argument("--starting-cash-cents", type=int, default=PAPER_STARTING_CASH_CENTS)
     parser.add_argument("--fee-multiplier", type=float, default=1.0)
     parser.add_argument("--assumed-top-size", type=int, default=10)
-    parser.add_argument("--min-edge-cents", type=float, default=2.0)
+    parser.add_argument("--min-edge-cents", type=float)
+    parser.add_argument(
+        "--settings-json",
+        help=(
+            "Optional JSON file with any TradingSettings fields. "
+            "--min-edge-cents overrides the file when both are supplied."
+        ),
+    )
     parser.add_argument("--output-dir", default="output/strategy_backtests")
     args = parser.parse_args()
+
+    settings = TradingSettings()
+    if args.settings_json:
+        raw = json.loads(Path(args.settings_json).read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("--settings-json must contain a JSON object")
+        settings = TradingSettings.model_validate(
+            {**settings.model_dump(), **raw}
+        )
 
     decisions, fills, markets, summary = run_strategy_backtest(
         asset=args.asset,
@@ -780,7 +807,10 @@ def main() -> None:
         starting_cash_cents=max(100, args.starting_cash_cents),
         fee_multiplier=max(0.0, args.fee_multiplier),
         assumed_top_size=max(1, args.assumed_top_size),
-        min_edge_cents=max(0.5, args.min_edge_cents),
+        min_edge_cents=(
+            None if args.min_edge_cents is None else max(0.5, args.min_edge_cents)
+        ),
+        settings=settings,
     )
 
     out = Path(args.output_dir)
