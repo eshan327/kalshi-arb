@@ -54,6 +54,9 @@ def test_strategy_replay_uses_production_limit_but_fills_at_observed_taker_quote
     assert fill.fill_price_cents == 60.0
     assert fill.filled_count == signal.count
     assert fill.fees_cents > 0
+    # The hypothetical fill consumes the assumed archived top size instead of
+    # letting later same-timestamp orders reuse synthetic liquidity.
+    assert book.get_best_prices()[1] is None
 
 
 def test_assumed_depth_caps_production_strategy_clip():
