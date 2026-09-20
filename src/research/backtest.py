@@ -412,6 +412,7 @@ def calibrate_market(
     horizons: tuple[int, ...],
     subsecond_offset: float,
     vol_window_seconds: float = 300.0,
+    failure_counts: dict[str, int] | None = None,
 ) -> list[ModelObservation]:
     """Evaluate the production model at fixed horizons, including the final minute."""
     profile = get_market_profile(asset)
@@ -455,12 +456,19 @@ def calibrate_market(
             force_one_second_spot=True,
             vol_window_seconds=vol_window_seconds,
         )
-        if (
-            not fast.get("ready")
-            or fast.get("vol_is_fallback")
-            or not slow.get("ready")
-            or slow.get("vol_is_fallback")
-        ):
+        rejection = None
+        if not fast.get("ready"):
+            rejection = f"fast:{fast.get('reason') or 'not_ready'}"
+        elif fast.get("vol_is_fallback"):
+            rejection = "fast:vol_fallback"
+        elif not slow.get("ready"):
+            rejection = f"slow:{slow.get('reason') or 'not_ready'}"
+        elif slow.get("vol_is_fallback"):
+            rejection = "slow:vol_fallback"
+        if rejection is not None:
+            if failure_counts is not None:
+                key = f"{int(horizon)}s:{rejection}"
+                failure_counts[key] = failure_counts.get(key, 0) + 1
             continue
 
         latest_fast = _latest_tick(spot_ticks, eval_ts)
@@ -877,6 +885,7 @@ def run_backtest(
     subsecond_offset = 0.4 if resolution == "PER_200MS" else 0.0
 
     model_rows: list[ModelObservation] = []
+    calibration_failures: dict[str, int] = {}
     quote_rows: list[QuoteObservation] = []
     tape_rows: list[TapeObservation] = []
     trades: list[BacktestTrade] = []
@@ -890,6 +899,7 @@ def run_backtest(
                 horizons=horizons,
                 subsecond_offset=subsecond_offset,
                 vol_window_seconds=vol_window_seconds,
+                failure_counts=calibration_failures,
             )
         )
         if include_tape:
@@ -915,7 +925,7 @@ def run_backtest(
             if trade is not None:
                 trades.append(trade)
 
-    return model_rows, quote_rows, tape_rows, trades, summarize(
+    summary = summarize(
         model_rows,
         quote_rows,
         tape_rows,
@@ -923,6 +933,8 @@ def run_backtest(
         cf_resolution=resolution,
         vol_window_seconds=vol_window_seconds,
     )
+    summary["calibration_rejections"] = dict(sorted(calibration_failures.items()))
+    return model_rows, quote_rows, tape_rows, trades, summary
 
 
 def _write_csv(path: Path, rows: list[Any]) -> None:
