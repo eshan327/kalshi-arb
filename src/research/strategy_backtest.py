@@ -402,9 +402,15 @@ def replay_market(
             window=profile.settlement_window_seconds,
             spot_ts=latest["ts"],
         )
+        base_window = float(settings.volatility_window_seconds)
+        pre_window = settings.pre_settlement_volatility_window_seconds
+        max_window = max(
+            base_window,
+            float(pre_window) if pre_window is not None else base_window,
+        )
         available_ticks = _ticks_between(
             fix_ticks,
-            eval_ts - 300.0,
+            eval_ts - max_window,
             eval_ts,
         )
         pricing = compute_pricing_snapshot(
@@ -418,6 +424,9 @@ def replay_market(
             settlement_decimals=decimals,
             index_state=state,
             now_ts=eval_ts,
+            vol_window_seconds=base_window,
+            pre_settlement_vol_window_seconds=pre_window,
+            pre_settlement_until_seconds=settings.pre_settlement_until_seconds,
         )
         pricing = apply_pricing_overrides(pricing, settings)
         if not pricing.get("ready"):
