@@ -674,3 +674,82 @@ def test_live_discretionary_fill_reconciles_runtime_account(monkeypatch) -> None
     assert result["reconciliation_pending"] is False
     assert runtime._runtime_state["account"] == filled
     assert runtime._last_submission_ts > 0
+
+
+def test_optional_late_entry_window_blocks_early_buys_but_not_exits() -> None:
+    book = OrderBook("TEST")
+    book.load_rest_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    )
+    settings = TradingSettings(entry_start_seconds_to_expiry=30)
+
+    signal, reason, diagnostics = build_trade_signal(
+        pricing={
+            "ready": True,
+            "p_model": 0.68,
+            "seconds_to_expiry": 120,
+            "vol_is_fallback": False,
+        },
+        market_ticker="TEST",
+        book=book,
+        settings=settings,
+        bankroll_cents=100_000,
+        available_cash_cents=90_000,
+    )
+    assert signal is None
+    assert reason == "entry_window_not_started"
+    assert diagnostics["entry_start_seconds_to_expiry"] == 30
+
+    exit_signal, exit_reason, _ = build_trade_signal(
+        pricing={
+            "ready": True,
+            "p_model": 0.10,
+            "seconds_to_expiry": 120,
+            "vol_is_fallback": False,
+        },
+        market_ticker="TEST",
+        book=book,
+        settings=settings,
+        bankroll_cents=100_000,
+        open_yes_contracts=1,
+        open_yes_avg_entry_cents=60,
+    )
+    assert exit_signal is not None and exit_signal.action == "sell"
+    assert exit_reason == "edge_reversal_exit_yes"
+
+
+def test_pre_settlement_volatility_scale_only_applies_before_cutoff() -> None:
+    from engine.trading.strategy import apply_pricing_overrides
+
+    settings = TradingSettings(
+        volatility_scale=1.0,
+        pre_settlement_volatility_scale=1.25,
+        pre_settlement_until_seconds=60,
+    )
+    base = {
+        "ready": True,
+        "p_model": 0.6,
+        "spot_index": 100.0,
+        "model_strike_usd": 100.0,
+        "sigma_annual": 0.5,
+        "settlement_window_seconds": 60,
+        "vol_is_fallback": False,
+    }
+
+    early = apply_pricing_overrides(
+        {**base, "seconds_to_expiry": 120.0},
+        settings,
+    )
+    late = apply_pricing_overrides(
+        {
+            **base,
+            "seconds_to_expiry": 30.0,
+            "twap_samples_observed": 30,
+            "twap_partial_avg_raw": 100.0,
+        },
+        settings,
+    )
+    assert early["volatility_scale_applied"] == pytest.approx(1.25)
+    assert early["sigma_override_applied"] == pytest.approx(0.625)
+    assert late["volatility_scale_applied"] == pytest.approx(1.0)
+    assert late["sigma_override_applied"] == pytest.approx(0.5)
