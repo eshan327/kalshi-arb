@@ -27,7 +27,12 @@ from engine.trading.strategy import (
     build_trade_signal,
     slipped_price_cents,
 )
-from research.backtest import _latest_tick, _settlement_state, fetch_cf_feeds
+from research.backtest import (
+    _latest_tick,
+    _settlement_state,
+    _ticks_between,
+    fetch_cf_feeds,
+)
 
 _NY = ZoneInfo("America/New_York")
 CF_HISTORY_DATA_LAG_BUFFER_SEC = 20 * 60
@@ -397,7 +402,11 @@ def replay_market(
             window=profile.settlement_window_seconds,
             spot_ts=latest["ts"],
         )
-        available_ticks = [tick for tick in fix_ticks if tick["ts"] <= eval_ts]
+        available_ticks = _ticks_between(
+            fix_ticks,
+            eval_ts - 300.0,
+            eval_ts,
+        )
         pricing = compute_pricing_snapshot(
             profile=profile,
             feed_asset=asset,
