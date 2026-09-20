@@ -23,6 +23,8 @@ def compute_pricing_snapshot(
     index_state: dict | None = None,
     now_ts: float | None = None,
     vol_window_seconds: float = 300.0,
+    pre_settlement_vol_window_seconds: float | None = None,
+    pre_settlement_until_seconds: float = 60.0,
 ) -> dict[str, Any]:
     """Compute the live/replay pricing snapshot from information available at now_ts.
 
@@ -77,8 +79,16 @@ def compute_pricing_snapshot(
     if close <= now:
         return fail("market_closed")
 
+    seconds = close - now
     points = [(t["ts"], t["price"]) for t in ticks]
     vol_window = max(1.0, float(vol_window_seconds))
+    vol_window_policy = "base"
+    if (
+        pre_settlement_vol_window_seconds is not None
+        and seconds > max(0.0, float(pre_settlement_until_seconds))
+    ):
+        vol_window = max(1.0, float(pre_settlement_vol_window_seconds))
+        vol_window_policy = "pre_settlement"
     sigma = realized_vol_from_price_points(
         points, window_seconds=vol_window, now_ts=now, min_samples=8
     )
@@ -86,11 +96,11 @@ def compute_pricing_snapshot(
     fallback = sigma is None or sigma <= 0
     sigma = profile.fallback_sigma_annual if fallback else sigma
     model_strike = strike - 0.5 * 10**-decimals
-    seconds = close - now
     base.update(
         sigma_annual=sigma,
         sigma_samples=sigma_samples,
         vol_window_seconds=vol_window,
+        vol_window_policy=vol_window_policy,
         vol_is_fallback=fallback,
         model_strike_usd=model_strike,
         rounding_half_unit=0.5 * 10**-decimals,

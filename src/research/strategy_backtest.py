@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,9 +27,15 @@ from engine.trading.strategy import (
     build_trade_signal,
     slipped_price_cents,
 )
-from research.backtest import _latest_tick, _settlement_state, fetch_cf_feeds
+from research.backtest import (
+    _latest_tick,
+    _settlement_state,
+    _ticks_between,
+    fetch_cf_feeds,
+)
 
 _NY = ZoneInfo("America/New_York")
+CF_HISTORY_DATA_LAG_BUFFER_SEC = 20 * 60
 
 
 @dataclass(frozen=True)
@@ -395,7 +402,17 @@ def replay_market(
             window=profile.settlement_window_seconds,
             spot_ts=latest["ts"],
         )
-        available_ticks = [tick for tick in fix_ticks if tick["ts"] <= eval_ts]
+        base_window = float(settings.volatility_window_seconds)
+        pre_window = settings.pre_settlement_volatility_window_seconds
+        max_window = max(
+            base_window,
+            float(pre_window) if pre_window is not None else base_window,
+        )
+        available_ticks = _ticks_between(
+            fix_ticks,
+            eval_ts - max_window,
+            eval_ts,
+        )
         pricing = compute_pricing_snapshot(
             profile=profile,
             feed_asset=asset,
@@ -407,6 +424,9 @@ def replay_market(
             settlement_decimals=decimals,
             index_state=state,
             now_ts=eval_ts,
+            vol_window_seconds=base_window,
+            pre_settlement_vol_window_seconds=pre_window,
+            pre_settlement_until_seconds=settings.pre_settlement_until_seconds,
         )
         pricing = apply_pricing_overrides(pricing, settings)
         if not pricing.get("ready"):
@@ -706,10 +726,13 @@ def run_strategy_backtest(
         settings = TradingSettings.model_validate(
             {**settings.model_dump(), "min_edge_cents": float(min_edge_cents)}
         )
+    research_cutoff = time.time() - CF_HISTORY_DATA_LAG_BUFFER_SEC
     markets = [
         market
         for market in get_settled_markets(profile.kalshi_series_ticker)
         if str(market.get("result") or "").lower() in {"yes", "no"}
+        and (parse_iso8601_to_epoch(market.get("close_time")) or float("inf"))
+        <= research_cutoff
     ]
     markets.sort(key=lambda row: parse_iso8601_to_epoch(row.get("close_time")) or 0)
     if max_markets > 0:

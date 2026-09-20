@@ -201,12 +201,14 @@ KALSHI_ENV=prod uv run --env-file .env src/research/backtest.py BTC \
 ```
 
 This backtester merges recent settled markets from the live tier with older
-markets from Kalshi's historical tier. For assets with the high-frequency CF
-feed, it requests `PER_200MS` history for the current spot while retaining only
-exact second-boundary CF values for realized volatility and settlement fixes,
-matching the live separation between `cfbenchmarks_value_5hz` and
-`cfbenchmarks_value`. If subsecond history is unavailable, it falls back to
-`PER_SECOND` without inventing fixes.
+markets from Kalshi's historical tier. CF's `/history/values` endpoint returns
+the published historical tick stream and does not expose the `maxResolution`
+selector used by the recent-value endpoints. For high-frequency RTIs, replay
+therefore uses every historical tick as the production fast spot while filtering
+the exact second-boundary publications for realized volatility and settlement
+fixes. That reproduces the live separation between
+`cfbenchmarks_value_5hz` and `cfbenchmarks_value` without fabricating 1 Hz
+fixes from subsecond observations.
 
 Probability calibration is evaluated at fixed horizons including 60, 45, 30,
 20, 10, 5, and 1 seconds before close. That is independent of Kalshi quote
@@ -219,15 +221,41 @@ Outputs are written to `output/backtests/`:
 - `calibration.csv`: fixed-horizon model probabilities, outcomes, Brier/log
   loss, known-fix count, and fast-vs-1Hz spot comparison.
 - `quote_observations.csv`: model value versus one-minute Kalshi quote closes.
-- `tape_observations.csv`: model probability versus actual public trade prices
-  at each trade timestamp, including sub-minute/final-minute transactions when
-  present. This is a market-relative diagnostic, not a fill simulation.
+- `market_relative.csv`: at each fixed horizon, compares the model with the
+  latest actual non-block Kalshi trade no more than five seconds old. Each market
+  contributes at most once per horizon, avoiding activity-weighted scoring.
+- `tape_observations.csv`: optional full trade-tape scoring when `--full-tape`
+  is requested. It is intentionally off by default because highly active markets
+  otherwise dominate the sample.
 - `trades.csv`: a deliberately simple first-signal-per-market alpha screen.
-- `summary.json`: aggregate and horizon-level calibration, model-versus-trade
+- `summary.json`: aggregate/horizon calibration, equal-weight model-versus-market
   proper scores, and the coarse quote screen.
 
-Use `--vol-window-seconds` to research alternatives to the production 300-second
-realized-volatility window without maintaining a second pricing implementation.
+Use `--vol-window-seconds` and `--volatility-scale` to research alternatives
+without maintaining a second pricing implementation. The dedicated
+`src/research/model_sweep.py` evaluates a small window/scale grid with a
+chronological development/holdout split so a parameter choice is selected on
+older markets and judged on newer markets.
+
+The live/replay `TradingSettings` also support opt-in research policies without
+changing default production behavior:
+
+- `volatility_window_seconds`: realized-volatility lookback (default 300 s).
+- `pre_settlement_volatility_window_seconds` and
+  `pre_settlement_volatility_scale`: optional longer/more-conservative variance
+  policy while time to expiry is above `pre_settlement_until_seconds`.
+- `entry_start_seconds_to_expiry`: optional earliest systematic-entry horizon.
+- `entry_cutoff_seconds_to_expiry`: ordinary-entry cutoff before close (default
+  20 s). Inventory exits and mathematically locked outcomes keep their existing
+  special handling.
+
+Together these can isolate a forward-research window without changing defaults.
+For example, start=30 and cutoff=1 tests ordinary entries from 30→1 seconds;
+start=30 with the default cutoff tests only 30→20 seconds.
+
+These controls are exposed in the dashboard and replayed by
+`strategy_backtest.py`. They exist to test the authenticated findings rather
+than hard-code a parameter choice from one historical sample.
 
 ### Production taker-strategy replay
 
@@ -284,9 +312,44 @@ history. The passthrough is entitlement-controlled; the backtest fails rather
 than substituting another crypto price source when official CF history is
 unavailable.
 
+### Forward sub-minute execution research
+
+Public historical candles cannot establish whether the apparent final-seconds
+model advantage was actually IOC-fillable. The live streamer can therefore
+optionally record raw sequenced market data near expiry:
+
+```bash
+KALSHI_RESEARCH_CAPTURE_PATH=.runtime/research_market_data.jsonl
+KALSHI_RESEARCH_CAPTURE_HORIZON_SEC=45
+```
+
+When enabled, the process appends orderbook snapshots/deltas, CF 1 Hz and 5 Hz
+updates, lifecycle/account execution messages, and the production strategy's
+decision snapshots during the configured late-market horizon. Records include
+receipt time, subscription/sequence identifiers when present, active market,
+close time, seconds to expiry, and the original payload. Capture is disabled by
+default and does not alter trading decisions.
+
+Analyze a capture with:
+
+```bash
+uv run src/research/capture_analysis.py .runtime/research_market_data.jsonl
+```
+
+This writes `output/live_capture/decisions.csv` and `summary.json`, including
+horizon coverage, signal/reason counts, and detected sequence gaps. It deliberately
+does not equate a model signal with an executable fill.
+
+For the dated empirical conclusions from the authenticated BTC research suite,
+see [Historical research findings — 2026-09-20](docs/historical_research_2026-09-20.md).
+
 ## Default controls
 
 - Minimum taker edge: 2¢ per contract
+- Optional earliest-entry horizon: disabled
+- Ordinary-entry cutoff: 20 seconds
+- Realized-volatility window: 300 seconds
+- Optional early-period volatility policy: disabled
 - Locked-outcome edge: 0.5¢ per contract
 - Kelly fraction: 0.25
 - Active-market bankroll cap: 5%

@@ -7,7 +7,11 @@ from core.market_metadata import extract_settlement_decimals, extract_suggested_
 from engine.live_pricing import compute_live_pricing_snapshot
 from engine.streamer import get_live_market_info, get_live_orderbook_snapshot
 from engine.trading.runtime import get_trading_runtime_snapshot
-from engine.trading.settings import get_trading_settings_snapshot
+from engine.trading.settings import (
+    get_trading_settings_model,
+    get_trading_settings_snapshot,
+)
+from engine.trading.strategy import apply_pricing_overrides
 from feeds.state.tick_store import get_index_state
 
 
@@ -36,11 +40,15 @@ def build_dashboard_state_payload(*, depth: int) -> dict[str, Any]:
         else None
     )
 
-    pricing = compute_live_pricing_snapshot(
-        strike=suggested_strike,
-        market_ticker=market_ticker,
-        close_time_iso=close_iso,
-        settlement_decimals=settlement_decimals,
+    settings_model = get_trading_settings_model()
+    pricing = apply_pricing_overrides(
+        compute_live_pricing_snapshot(
+            strike=suggested_strike,
+            market_ticker=market_ticker,
+            close_time_iso=close_iso,
+            settlement_decimals=settlement_decimals,
+        ),
+        settings_model,
     )
     trading_runtime = get_trading_runtime_snapshot()
     trading_settings = get_trading_settings_snapshot()

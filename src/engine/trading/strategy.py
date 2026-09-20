@@ -11,7 +11,6 @@ from engine.trading.fees import kelly_fraction_binary, taker_fee_cents_per_contr
 from engine.trading.models import TradeSignal
 from engine.trading.settings import TradingSettings
 
-ENTRY_CUTOFF_SECONDS_TO_EXPIRY = 20.0
 MAX_ORDERBOOK_AGE_SECONDS = 2.0
 
 
@@ -197,7 +196,13 @@ def apply_pricing_overrides(
         if isinstance(settings.volatility_override, float)
         else base_sigma
     )
-    sigma = max(0.01, float(sigma) * float(settings.volatility_scale))
+    volatility_scale = float(settings.volatility_scale)
+    if (
+        settings.pre_settlement_volatility_scale is not None
+        and sec_exp > float(settings.pre_settlement_until_seconds)
+    ):
+        volatility_scale = float(settings.pre_settlement_volatility_scale)
+    sigma = max(0.01, float(sigma) * volatility_scale)
 
     if sec_exp > float(settlement_window):
         result = prob_levy_tw_binary(
@@ -225,6 +230,7 @@ def apply_pricing_overrides(
     out["p_model"] = float(result.p_model)
     out["p_model_pct"] = round(float(result.p_model) * 100.0, 4)
     out["sigma_override_applied"] = round(float(sigma), 6)
+    out["volatility_scale_applied"] = round(float(volatility_scale), 6)
     if settings.volatility_override is not None:
         out["vol_is_fallback_base"] = out.get("vol_is_fallback")
         out["vol_is_fallback"] = False
@@ -473,12 +479,20 @@ def build_trade_signal(
         seconds_to_expiry is None
         or seconds_to_expiry <= 0
         or (
-            seconds_to_expiry < ENTRY_CUTOFF_SECONDS_TO_EXPIRY
+            seconds_to_expiry < float(settings.entry_cutoff_seconds_to_expiry)
             and not deterministic_outcome
         )
     ):
         return None, "entry_cutoff", diagnostics
 
+    entry_start = settings.entry_start_seconds_to_expiry
+    diagnostics["entry_start_seconds_to_expiry"] = entry_start
+    if entry_start is not None and seconds_to_expiry > float(entry_start):
+        return None, "entry_window_not_started", diagnostics
+
+    diagnostics["entry_cutoff_seconds_to_expiry"] = float(
+        settings.entry_cutoff_seconds_to_expiry
+    )
     diagnostics["fee_type"] = fee_type
     diagnostics["fee_multiplier"] = fee_multiplier
     if not fee_policy_ready:

@@ -1,4 +1,5 @@
 import time
+from threading import Lock
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlencode
@@ -8,12 +9,43 @@ import requests
 from core.config import API_BASE_URL
 
 HTTP_TIMEOUT_SEC = 10.0
+PUBLIC_MIN_INTERVAL_SEC = 0.22
+PUBLIC_MAX_RETRIES = 6
+
+_public_lock = Lock()
+_public_last_request_monotonic = 0.0
+_public_session = requests.Session()
 
 
 def _get_json(url: str) -> dict[str, Any]:
-    response = requests.get(url, timeout=HTTP_TIMEOUT_SEC)
-    response.raise_for_status()
-    return response.json()
+    """GET public Kalshi data with conservative pacing and 429 retry handling."""
+    global _public_last_request_monotonic
+    for attempt in range(PUBLIC_MAX_RETRIES + 1):
+        with _public_lock:
+            now = time.monotonic()
+            wait = PUBLIC_MIN_INTERVAL_SEC - (now - _public_last_request_monotonic)
+            if wait > 0:
+                time.sleep(wait)
+            response = _public_session.get(url, timeout=HTTP_TIMEOUT_SEC)
+            _public_last_request_monotonic = time.monotonic()
+
+        if response.status_code != 429:
+            response.raise_for_status()
+            return response.json()
+
+        if attempt >= PUBLIC_MAX_RETRIES:
+            response.raise_for_status()
+
+        retry_after = response.headers.get("Retry-After")
+        try:
+            delay = float(retry_after) if retry_after is not None else 0.0
+        except ValueError:
+            delay = 0.0
+        if delay <= 0:
+            delay = min(8.0, 0.5 * (2**attempt))
+        time.sleep(delay)
+
+    raise RuntimeError("unreachable")
 
 
 def _public_pages(path: str, key: str, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -116,9 +148,12 @@ def get_cfbenchmarks_history(
     *,
     timestamp: str,
     timespan: str = "HOUR",
-    max_resolution: str | None = "PER_SECOND",
 ) -> list[dict]:
-    """Fetch one fixed CF Benchmarks historical window through Kalshi's passthrough."""
+    """Fetch one fixed CF Benchmarks historical window through Kalshi's passthrough.
+
+    The CF /history/values endpoint returns the published historical ticks and does
+    not expose the maxResolution selector used by the recent-values endpoints.
+    """
     from data.kalshi_trading import _request
 
     params: dict[str, Any] = {
@@ -126,8 +161,6 @@ def get_cfbenchmarks_history(
         "timespan": timespan,
         "timestamp": timestamp,
     }
-    if max_resolution:
-        params["maxResolution"] = max_resolution
     payload = _request("GET", "/cfbenchmarks/history/values", params=params)
     data = payload.get("data", {})
     rows = data.get("payload", [])
@@ -146,6 +179,31 @@ def get_historical_markets(*, series_ticker: str) -> list[dict[str, Any]]:
         {"series_ticker": series_ticker},
     )
     return [{**row, "_data_tier": "historical"} for row in rows]
+
+
+def get_market_trades_page(
+    *,
+    ticker: str,
+    min_ts: int | None = None,
+    max_ts: int | None = None,
+    include_block_trades: bool = False,
+    historical: bool = False,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Fetch one newest-first trade page for a narrow research window."""
+    params: dict[str, Any] = {
+        "ticker": ticker,
+        "limit": max(1, min(1000, int(limit))),
+    }
+    if min_ts is not None:
+        params["min_ts"] = int(min_ts)
+    if max_ts is not None:
+        params["max_ts"] = int(max_ts)
+    if not include_block_trades:
+        params["is_block_trade"] = "false"
+    path = "/historical/trades" if historical else "/markets/trades"
+    payload = _get_json(f"{API_BASE_URL}{path}?{urlencode(params)}")
+    return payload.get("trades", [])
 
 
 def get_market_trades(

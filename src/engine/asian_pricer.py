@@ -57,10 +57,12 @@ def _levy_moment_match_m2(
     n = len(t_years)
     sig2 = sigma_annual * sigma_annual
     M1 = S0
-    acc = 0.0
-    for i in range(n):
-        for j in range(n):
-            acc += math.exp(sig2 * min(t_years[i], t_years[j]))
+    # t_years is sorted. In the covariance matrix min(t_i, t_j), the
+    # value t_k appears 2(n-k)-1 times, so the double sum is exactly O(n).
+    acc = sum(
+        (2 * (n - k) - 1) * math.exp(sig2 * t_years[k])
+        for k in range(n)
+    )
     M2 = (S0 * S0) / (n * n) * acc
     return M1, M2
 

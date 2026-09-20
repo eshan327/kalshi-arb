@@ -186,18 +186,18 @@ def test_trade_tape_compares_model_with_actual_trade_probability(monkeypatch):
 
 
 
-def test_high_frequency_replay_fetches_one_second_and_subsecond_feeds_separately(monkeypatch):
+def test_high_frequency_replay_derives_live_feed_split_from_historical_ticks(monkeypatch):
     import research.backtest as backtest
 
     calls = []
 
-    def fake_range(index_id, start_ts, end_ts, *, max_resolution):
-        calls.append(max_resolution)
-        if max_resolution == "PER_SECOND":
-            return [{"ts": 1000.0, "price": 100.0}]
+    def fake_range(index_id, start_ts, end_ts):
+        calls.append((index_id, start_ts, end_ts))
         return [
             {"ts": 1000.0, "price": 100.0},
             {"ts": 1000.2, "price": 100.1},
+            {"ts": 1000.4, "price": 100.2},
+            {"ts": 1001.0, "price": 100.3},
         ]
 
     monkeypatch.setattr(backtest, "fetch_cf_range", fake_range)
@@ -206,9 +206,13 @@ def test_high_frequency_replay_fetches_one_second_and_subsecond_feeds_separately
         1000.0,
         1001.0,
     )
-    assert calls == ["PER_SECOND", "PER_200MS"]
-    assert fixes == [{"ts": 1000.0, "price": 100.0}]
-    assert spot[-1]["ts"] == 1000.2
+    assert len(calls) == 1
+    assert fixes == [
+        {"ts": 1000.0, "price": 100.0},
+        {"ts": 1001.0, "price": 100.3},
+    ]
+    assert spot[-1]["ts"] == 1001.0
+    assert len(spot) == 4
     assert resolution == "PER_200MS"
 
 

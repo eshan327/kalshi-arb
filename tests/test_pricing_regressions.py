@@ -94,3 +94,51 @@ def test_final_minute_uses_server_sample_count_and_mean(monkeypatch):
     )
     kwargs["index_state"]["connected"] = False
     assert pipeline.compute_pricing_snapshot(**kwargs)["reason"] == "index_disconnected"
+
+
+def test_horizon_aware_volatility_window_switches_before_settlement() -> None:
+    now = 1_000.0
+    ticks = [
+        {"ts": now - i, "price": 100.0 + (0.02 if i % 2 else -0.02)}
+        for i in range(700)
+    ]
+    common = dict(
+        profile=get_market_profile("BTC"),
+        feed_asset="BTC",
+        spot=100.0,
+        ticks=ticks,
+        strike=100.0,
+        market_ticker="TEST",
+        settlement_decimals=2,
+        index_state={"connected": True, "timestamp": now},
+        now_ts=now,
+        vol_window_seconds=300,
+        pre_settlement_vol_window_seconds=600,
+        pre_settlement_until_seconds=60,
+    )
+    early = pipeline.compute_pricing_snapshot(
+        **common,
+        close_time_iso=datetime.fromtimestamp(now + 120, UTC).isoformat(),
+    )
+    assert early["ready"]
+    assert early["vol_window_seconds"] == 600
+    assert early["vol_window_policy"] == "pre_settlement"
+
+    late_state = {
+        "connected": True,
+        "timestamp": now,
+        "average_ts": now,
+        "final_average": {
+            "start": now - 30,
+            "end": now,
+            "count": 30,
+            "value": 100.0,
+        },
+    }
+    late = pipeline.compute_pricing_snapshot(
+        **{**common, "index_state": late_state},
+        close_time_iso=datetime.fromtimestamp(now + 30, UTC).isoformat(),
+    )
+    assert late["ready"]
+    assert late["vol_window_seconds"] == 300
+    assert late["vol_window_policy"] == "base"

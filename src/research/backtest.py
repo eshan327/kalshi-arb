@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import time
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,14 +18,18 @@ from data.kalshi_rest import (
     get_cfbenchmarks_history,
     get_market_candlesticks,
     get_market_trades,
+    get_market_trades_page,
     get_settled_markets,
 )
 from engine.market_stream.discovery import parse_iso8601_to_epoch
 from engine.pricing.pipeline import compute_pricing_snapshot
 from engine.trading.fees import taker_fee_cents_per_contract
+from engine.trading.settings import TradingSettings
+from engine.trading.strategy import apply_pricing_overrides
 
 DEFAULT_HORIZONS_SECONDS = (600, 300, 120, 90, 60, 45, 30, 20, 10, 5, 1)
 CF_HISTORY_MIN_INTERVAL_SEC = 0.26
+CF_HISTORY_DATA_LAG_BUFFER_SEC = 20 * 60
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,27 @@ class TapeObservation:
     eval_ts: float
     seconds_to_expiry: float
     count: float
+    yes_trade_cents: float
+    p_market: float
+    p_model: float
+    actual_yes: int
+    model_minus_market_cents: float
+    model_brier: float
+    market_brier: float
+    model_log_loss: float
+    market_log_loss: float
+    taker_outcome_side: str | None
+    taker_book_side: str | None
+    regime: str
+
+
+@dataclass(frozen=True)
+class MarketRelativeObservation:
+    market_ticker: str
+    target_horizon_seconds: int
+    trade_ts: float
+    trade_age_seconds: float
+    seconds_to_expiry: float
     yes_trade_cents: float
     p_market: float
     p_model: float
@@ -182,10 +208,8 @@ def fetch_cf_range(
     index_id: str,
     start_ts: float,
     end_ts: float,
-    *,
-    max_resolution: str = "PER_SECOND",
 ) -> list[dict[str, float]]:
-    """Fetch a contiguous CF range, preserving the requested publication resolution."""
+    """Fetch a contiguous CF historical range at its published resolution."""
     raw: list[dict] = []
     cursor = _hour_start(start_ts)
     final_hour = _hour_start(end_ts)
@@ -200,7 +224,6 @@ def fetch_cf_range(
                 index_id,
                 timestamp=_iso_hour(cursor),
                 timespan="HOUR",
-                max_resolution=max_resolution,
             )
         )
         first = False
@@ -219,49 +242,52 @@ def fetch_cf_feeds(
     end_ts: float,
 ) -> tuple[list[dict[str, float]], list[dict[str, float]], str]:
     """
-    Recreate the live feed split with independent historical queries.
+    Recreate the live 5 Hz/1 Hz split from CF's historical tick stream.
 
-    The live bot treats the 5 Hz channel as spot-only and the 1 Hz channel as the
-    sole source of realized-volatility history and settlement fixes. Do the same
-    here instead of assuming an integer-second 5 Hz tick is identical to the 1 Hz
-    publication.
+    Historical /history/values does not accept maxResolution. For subsecond RTIs it
+    returns the published 200 ms ticks, including exact second-boundary values.
+    The live bot uses all ticks only for current spot while the 1 Hz channel owns
+    volatility history and settlement fixes, so replay filters those exact
+    second-boundary publications explicitly.
     """
-    fix_ticks = fetch_cf_range(
-        profile.index_id,
-        start_ts,
-        end_ts,
-        max_resolution="PER_SECOND",
-    )
-    if not fix_ticks:
-        raise ValueError("CF one-second history is unavailable")
+    published = fetch_cf_range(profile.index_id, start_ts, end_ts)
+    if not published:
+        raise ValueError("CF historical values are unavailable")
 
     if not profile.high_frequency:
-        return list(fix_ticks), fix_ticks, "PER_SECOND"
+        return list(published), list(published), "PER_SECOND"
 
-    try:
-        spot_ticks = fetch_cf_range(
-            profile.index_id,
-            start_ts,
-            end_ts,
-            max_resolution="PER_200MS",
-        )
-    except Exception:
-        return list(fix_ticks), fix_ticks, "PER_SECOND"
+    fix_ticks = one_second_boundary_ticks(published)
+    if not fix_ticks:
+        raise ValueError("CF history contained no exact one-second boundary values")
+    return published, fix_ticks, "PER_200MS"
 
-    return (spot_ticks or list(fix_ticks)), fix_ticks, (
-        "PER_200MS" if spot_ticks else "PER_SECOND"
+
+def _ticks_between(
+    ticks: list[dict[str, float]],
+    start_ts: float,
+    end_ts: float,
+    *,
+    start_inclusive: bool = True,
+) -> list[dict[str, float]]:
+    """Slice sorted ticks in O(log n + k) without rescanning the full history."""
+    key = lambda row: row["ts"]
+    left = (
+        bisect_left(ticks, start_ts, key=key)
+        if start_inclusive
+        else bisect_right(ticks, start_ts, key=key)
     )
+    right = bisect_right(ticks, end_ts, key=key)
+    return ticks[left:right]
 
 
 def _latest_tick(
     ticks: list[dict[str, float]], now_ts: float
 ) -> dict[str, float] | None:
-    latest = None
-    for tick in ticks:
-        if tick["ts"] > now_ts:
-            break
-        latest = tick
-    return latest
+    if not ticks:
+        return None
+    index = bisect_right(ticks, now_ts, key=lambda row: row["ts"])
+    return None if index == 0 else ticks[index - 1]
 
 
 def _settlement_state(
@@ -287,11 +313,12 @@ def _settlement_state(
     if now_ts <= start:
         return state
 
-    fixes = [
-        tick
-        for tick in fix_ticks
-        if start < tick["ts"] <= min(now_ts, close_ts)
-    ]
+    fixes = _ticks_between(
+        fix_ticks,
+        start,
+        min(now_ts, close_ts),
+        start_inclusive=False,
+    )
     if not fixes:
         return state
 
@@ -320,6 +347,7 @@ def _pricing_at(
     fix_ticks: list[dict[str, float]],
     force_one_second_spot: bool = False,
     vol_window_seconds: float = 300.0,
+    volatility_scale: float = 1.0,
 ) -> dict[str, Any]:
     spot_source = fix_ticks if force_one_second_spot else spot_ticks
     latest_spot = _latest_tick(spot_source, eval_ts)
@@ -334,8 +362,12 @@ def _pricing_at(
         window=profile.settlement_window_seconds,
         spot_ts=latest_spot["ts"],
     )
-    available_fixes = [tick for tick in fix_ticks if tick["ts"] <= eval_ts]
-    return compute_pricing_snapshot(
+    available_fixes = _ticks_between(
+        fix_ticks,
+        eval_ts - max(float(vol_window_seconds), 1.0),
+        eval_ts,
+    )
+    snapshot = compute_pricing_snapshot(
         profile=profile,
         feed_asset=asset,
         spot=latest_spot["price"],
@@ -348,6 +380,12 @@ def _pricing_at(
         now_ts=eval_ts,
         vol_window_seconds=vol_window_seconds,
     )
+    if snapshot.get("ready") and abs(float(volatility_scale) - 1.0) > 1e-12:
+        snapshot = apply_pricing_overrides(
+            snapshot,
+            TradingSettings(volatility_scale=max(0.01, float(volatility_scale))),
+        )
+    return snapshot
 
 
 def _dollars_to_cents(value: Any) -> float | None:
@@ -389,6 +427,8 @@ def calibrate_market(
     horizons: tuple[int, ...],
     subsecond_offset: float,
     vol_window_seconds: float = 300.0,
+    volatility_scale: float = 1.0,
+    failure_counts: dict[str, int] | None = None,
 ) -> list[ModelObservation]:
     """Evaluate the production model at fixed horizons, including the final minute."""
     profile = get_market_profile(asset)
@@ -419,6 +459,7 @@ def calibrate_market(
             spot_ticks=spot_ticks,
             fix_ticks=fix_ticks,
             vol_window_seconds=vol_window_seconds,
+            volatility_scale=volatility_scale,
         )
         slow = _pricing_at(
             profile=profile,
@@ -431,13 +472,21 @@ def calibrate_market(
             fix_ticks=fix_ticks,
             force_one_second_spot=True,
             vol_window_seconds=vol_window_seconds,
+            volatility_scale=volatility_scale,
         )
-        if (
-            not fast.get("ready")
-            or fast.get("vol_is_fallback")
-            or not slow.get("ready")
-            or slow.get("vol_is_fallback")
-        ):
+        rejection = None
+        if not fast.get("ready"):
+            rejection = f"fast:{fast.get('reason') or 'not_ready'}"
+        elif fast.get("vol_is_fallback"):
+            rejection = "fast:vol_fallback"
+        elif not slow.get("ready"):
+            rejection = f"slow:{slow.get('reason') or 'not_ready'}"
+        elif slow.get("vol_is_fallback"):
+            rejection = "slow:vol_fallback"
+        if rejection is not None:
+            if failure_counts is not None:
+                key = f"{int(horizon)}s:{rejection}"
+                failure_counts[key] = failure_counts.get(key, 0) + 1
             continue
 
         latest_fast = _latest_tick(spot_ticks, eval_ts)
@@ -601,6 +650,114 @@ def quote_screen_market(
     return observations, trade
 
 
+def market_relative_horizons(
+    market: dict,
+    *,
+    asset: str,
+    spot_ticks: list[dict[str, float]],
+    fix_ticks: list[dict[str, float]],
+    horizons: tuple[int, ...],
+    subsecond_offset: float,
+    vol_window_seconds: float = 300.0,
+    max_trade_age_seconds: float = 5.0,
+) -> list[MarketRelativeObservation]:
+    """Compare model probability with the latest non-block trade at fixed horizons.
+
+    Each market contributes at most one observation per horizon, avoiding the severe
+    activity weighting of raw trade-tape scoring. The selected trade must precede the
+    target timestamp and be no more than max_trade_age_seconds stale.
+    """
+    profile = get_market_profile(asset)
+    ticker = str(market.get("ticker") or "")
+    strike = extract_suggested_strike(market)
+    close_ts = parse_iso8601_to_epoch(market.get("close_time"))
+    open_ts = parse_iso8601_to_epoch(market.get("open_time"))
+    result = str(market.get("result") or "").lower()
+    if not ticker or strike is None or close_ts is None or result not in {"yes", "no"}:
+        return []
+
+    start_ts = max(open_ts or close_ts - 900, close_ts - 900)
+    decimals = extract_settlement_decimals(
+        market, profile.settlement_decimals_fallback
+    )
+    actual_yes = 1 if result == "yes" else 0
+    rows: list[MarketRelativeObservation] = []
+    historical = market.get("_data_tier") == "historical"
+
+    for horizon in horizons:
+        target_ts = close_ts - float(horizon) + float(subsecond_offset)
+        window_start = max(start_ts, target_ts - max_trade_age_seconds)
+        raw_trades = get_market_trades_page(
+            ticker=ticker,
+            min_ts=int(math.floor(window_start)),
+            max_ts=int(math.ceil(target_ts)),
+            include_block_trades=False,
+            historical=historical,
+            limit=100,
+        )
+        candidates: list[tuple[float, dict]] = []
+        for trade in raw_trades:
+            ts = _parse_timestamp(trade.get("created_time"))
+            if ts is not None and window_start <= ts <= target_ts:
+                candidates.append((ts, trade))
+        if not candidates:
+            continue
+        trade_ts, trade = max(candidates, key=lambda row: row[0])
+        age = target_ts - trade_ts
+        yes_cents = _dollars_to_cents(trade.get("yes_price_dollars"))
+        if yes_cents is None or not 0 < yes_cents < 100:
+            continue
+
+        snapshot = _pricing_at(
+            profile=profile,
+            asset=asset,
+            market=market,
+            strike=strike,
+            decimals=decimals,
+            eval_ts=trade_ts,
+            spot_ticks=spot_ticks,
+            fix_ticks=fix_ticks,
+            vol_window_seconds=vol_window_seconds,
+        )
+        if not snapshot.get("ready") or snapshot.get("vol_is_fallback"):
+            continue
+
+        p_market = yes_cents / 100.0
+        p_model = float(snapshot["p_model"])
+        model_brier, model_log_loss = _scores(p_model, actual_yes)
+        market_brier, market_log_loss = _scores(p_market, actual_yes)
+        rows.append(
+            MarketRelativeObservation(
+                market_ticker=ticker,
+                target_horizon_seconds=int(horizon),
+                trade_ts=trade_ts,
+                trade_age_seconds=age,
+                seconds_to_expiry=close_ts - trade_ts,
+                yes_trade_cents=yes_cents,
+                p_market=p_market,
+                p_model=p_model,
+                actual_yes=actual_yes,
+                model_minus_market_cents=p_model * 100.0 - yes_cents,
+                model_brier=model_brier,
+                market_brier=market_brier,
+                model_log_loss=model_log_loss,
+                market_log_loss=market_log_loss,
+                taker_outcome_side=(
+                    str(trade.get("taker_outcome_side"))
+                    if trade.get("taker_outcome_side") is not None
+                    else None
+                ),
+                taker_book_side=(
+                    str(trade.get("taker_book_side"))
+                    if trade.get("taker_book_side") is not None
+                    else None
+                ),
+                regime=str(snapshot["regime"]),
+            )
+        )
+    return rows
+
+
 def trade_tape_market(
     market: dict,
     *,
@@ -707,6 +864,7 @@ def _mean(values: list[float]) -> float | None:
 def summarize(
     model_rows: list[ModelObservation],
     quote_rows: list[QuoteObservation],
+    relative_rows: list[MarketRelativeObservation],
     tape_rows: list[TapeObservation],
     trades: list[BacktestTrade],
     *,
@@ -733,6 +891,32 @@ def summarize(
                 ),
                 "mean_known_fix_count": _mean(
                     [float(row.known_fix_count) for row in rows]
+                ),
+            }
+        )
+
+    market_relative_by_horizon = []
+    for horizon in sorted(
+        {row.target_horizon_seconds for row in relative_rows}, reverse=True
+    ):
+        rows = [row for row in relative_rows if row.target_horizon_seconds == horizon]
+        market_relative_by_horizon.append(
+            {
+                "horizon_seconds": horizon,
+                "n": len(rows),
+                "mean_trade_age_seconds": _mean(
+                    [row.trade_age_seconds for row in rows]
+                ),
+                "model_mean_brier": _mean([row.model_brier for row in rows]),
+                "market_mean_brier": _mean([row.market_brier for row in rows]),
+                "model_mean_log_loss": _mean(
+                    [row.model_log_loss for row in rows]
+                ),
+                "market_mean_log_loss": _mean(
+                    [row.market_log_loss for row in rows]
+                ),
+                "mean_model_minus_market_cents": _mean(
+                    [row.model_minus_market_cents for row in rows]
                 ),
             }
         )
@@ -774,6 +958,21 @@ def summarize(
         ),
         "by_horizon": by_horizon,
         "calibration": calibration,
+        "market_relative_observations": len(relative_rows),
+        "market_relative_markets": len({row.market_ticker for row in relative_rows}),
+        "market_relative_model_mean_brier": _mean(
+            [row.model_brier for row in relative_rows]
+        ),
+        "market_relative_market_mean_brier": _mean(
+            [row.market_brier for row in relative_rows]
+        ),
+        "market_relative_model_mean_log_loss": _mean(
+            [row.model_log_loss for row in relative_rows]
+        ),
+        "market_relative_market_mean_log_loss": _mean(
+            [row.market_log_loss for row in relative_rows]
+        ),
+        "market_relative_by_horizon": market_relative_by_horizon,
         "tape_observations": len(tape_rows),
         "tape_markets": len({row.market_ticker for row in tape_rows}),
         "tape_model_mean_brier": _mean([row.model_brier for row in tape_rows]),
@@ -808,20 +1007,28 @@ def run_backtest(
     min_edge_cents: float,
     horizons: tuple[int, ...] = DEFAULT_HORIZONS_SECONDS,
     vol_window_seconds: float = 300.0,
+    volatility_scale: float = 1.0,
+    include_tape: bool = False,
+    include_quotes: bool = True,
+    include_market_relative: bool = True,
+    max_trade_age_seconds: float = 5.0,
 ) -> tuple[
     list[ModelObservation],
     list[QuoteObservation],
+    list[MarketRelativeObservation],
     list[TapeObservation],
     list[BacktestTrade],
     dict[str, Any],
 ]:
     profile = get_market_profile(asset)
+    research_cutoff = time.time() - CF_HISTORY_DATA_LAG_BUFFER_SEC
     markets = [
         market
         for market in get_settled_markets(profile.kalshi_series_ticker)
         if str(market.get("result") or "").lower() in {"yes", "no"}
         and extract_suggested_strike(market) is not None
-        and parse_iso8601_to_epoch(market.get("close_time")) is not None
+        and (parse_iso8601_to_epoch(market.get("close_time")) or float("inf"))
+        <= research_cutoff
     ]
     markets.sort(
         key=lambda row: parse_iso8601_to_epoch(row.get("close_time")) or 0,
@@ -831,10 +1038,10 @@ def run_backtest(
         markets = markets[:max_markets]
     if not markets:
         empty = summarize(
-            [], [], [], [], cf_resolution="unavailable",
+            [], [], [], [], [], cf_resolution="unavailable",
             vol_window_seconds=vol_window_seconds
         )
-        return [], [], [], [], empty
+        return [], [], [], [], [], empty
 
     closes = [
         parse_iso8601_to_epoch(market.get("close_time"))
@@ -850,7 +1057,9 @@ def run_backtest(
     subsecond_offset = 0.4 if resolution == "PER_200MS" else 0.0
 
     model_rows: list[ModelObservation] = []
+    calibration_failures: dict[str, int] = {}
     quote_rows: list[QuoteObservation] = []
+    relative_rows: list[MarketRelativeObservation] = []
     tape_rows: list[TapeObservation] = []
     trades: list[BacktestTrade] = []
     for market in markets:
@@ -863,37 +1072,58 @@ def run_backtest(
                 horizons=horizons,
                 subsecond_offset=subsecond_offset,
                 vol_window_seconds=vol_window_seconds,
+                volatility_scale=volatility_scale,
+                failure_counts=calibration_failures,
             )
         )
-        tape_rows.extend(
-            trade_tape_market(
+        if include_market_relative:
+            relative_rows.extend(
+                market_relative_horizons(
+                    market,
+                    asset=profile.asset,
+                    spot_ticks=spot_ticks,
+                    fix_ticks=fix_ticks,
+                    horizons=horizons,
+                    subsecond_offset=subsecond_offset,
+                    vol_window_seconds=vol_window_seconds,
+                    max_trade_age_seconds=max_trade_age_seconds,
+                )
+            )
+        if include_tape:
+            tape_rows.extend(
+                trade_tape_market(
+                    market,
+                    asset=profile.asset,
+                    spot_ticks=spot_ticks,
+                    fix_ticks=fix_ticks,
+                    vol_window_seconds=vol_window_seconds,
+                )
+            )
+        if include_quotes:
+            market_quotes, trade = quote_screen_market(
                 market,
                 asset=profile.asset,
                 spot_ticks=spot_ticks,
                 fix_ticks=fix_ticks,
+                min_edge_cents=min_edge_cents,
                 vol_window_seconds=vol_window_seconds,
             )
-        )
-        market_quotes, trade = quote_screen_market(
-            market,
-            asset=profile.asset,
-            spot_ticks=spot_ticks,
-            fix_ticks=fix_ticks,
-            min_edge_cents=min_edge_cents,
-            vol_window_seconds=vol_window_seconds,
-        )
-        quote_rows.extend(market_quotes)
-        if trade is not None:
-            trades.append(trade)
+            quote_rows.extend(market_quotes)
+            if trade is not None:
+                trades.append(trade)
 
-    return model_rows, quote_rows, tape_rows, trades, summarize(
+    summary = summarize(
         model_rows,
         quote_rows,
+        relative_rows,
         tape_rows,
         trades,
         cf_resolution=resolution,
         vol_window_seconds=vol_window_seconds,
     )
+    summary["calibration_rejections"] = dict(sorted(calibration_failures.items()))
+    summary["volatility_scale"] = float(volatility_scale)
+    return model_rows, quote_rows, relative_rows, tape_rows, trades, summary
 
 
 def _write_csv(path: Path, rows: list[Any]) -> None:
@@ -925,6 +1155,15 @@ def main() -> None:
         help="Comma-separated seconds-to-expiry calibration horizons.",
     )
     parser.add_argument("--vol-window-seconds", type=float, default=300.0)
+    parser.add_argument("--volatility-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--full-tape",
+        action="store_true",
+        help="Also score every public trade; expensive and activity-weighted.",
+    )
+    parser.add_argument("--skip-market-relative", action="store_true")
+    parser.add_argument("--skip-quotes", action="store_true")
+    parser.add_argument("--max-trade-age-seconds", type=float, default=5.0)
     parser.add_argument("--output-dir", default="output/backtests")
     args = parser.parse_args()
 
@@ -938,16 +1177,22 @@ def main() -> None:
             reverse=True,
         )
     )
-    model_rows, quote_rows, tape_rows, trades, summary = run_backtest(
+    model_rows, quote_rows, relative_rows, tape_rows, trades, summary = run_backtest(
         asset=args.asset,
         max_markets=max(0, args.max_markets),
         min_edge_cents=max(0.0, args.min_edge_cents),
         horizons=horizons,
         vol_window_seconds=max(1.0, args.vol_window_seconds),
+        volatility_scale=max(0.01, args.volatility_scale),
+        include_tape=args.full_tape,
+        include_quotes=not args.skip_quotes,
+        include_market_relative=not args.skip_market_relative,
+        max_trade_age_seconds=max(0.0, args.max_trade_age_seconds),
     )
     out = Path(args.output_dir)
     _write_csv(out / "calibration.csv", model_rows)
     _write_csv(out / "quote_observations.csv", quote_rows)
+    _write_csv(out / "market_relative.csv", relative_rows)
     _write_csv(out / "tape_observations.csv", tape_rows)
     _write_csv(out / "trades.csv", trades)
     out.mkdir(parents=True, exist_ok=True)

@@ -7,8 +7,10 @@ import random
 import threading
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from core.asset_context import get_active_market_profile
+from core.config import RESEARCH_CAPTURE_HORIZON_SEC, RESEARCH_CAPTURE_PATH
 from data import account_state
 from data.kalshi_rest import (
     get_event,
@@ -36,6 +38,46 @@ _live_market_info: dict = {}
 _live_market_info_lock = threading.Lock()
 _market_results: dict[str, dict] = {}
 _stream_epoch = 0
+
+
+def _capture_research_event(
+    kind: str,
+    msg: dict,
+    *,
+    seq: int | None = None,
+    sid: int | None = None,
+    receipt_ts: float | None = None,
+) -> None:
+    """Persist raw late-market public data for forward microstructure research."""
+    if not RESEARCH_CAPTURE_PATH:
+        return
+    market = get_live_market_info()
+    ticker = str(market.get("ticker") or "")
+    close_ts = parse_iso8601_to_epoch(market.get("close_time"))
+    now = time.time() if receipt_ts is None else float(receipt_ts)
+    if not ticker or close_ts is None:
+        return
+    seconds_to_expiry = close_ts - now
+    if not 0 <= seconds_to_expiry <= RESEARCH_CAPTURE_HORIZON_SEC:
+        return
+
+    event = {
+        "receipt_ts": now,
+        "kind": str(kind),
+        "seq": seq,
+        "sid": sid,
+        "market_ticker": ticker,
+        "close_ts": close_ts,
+        "seconds_to_expiry": seconds_to_expiry,
+        "payload": msg,
+    }
+    try:
+        path = Path(RESEARCH_CAPTURE_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+    except OSError as exc:  # pragma: no cover - research capture is best effort
+        logger.warning("Could not persist research market-data event: %s", exc)
 
 
 def get_live_book():
@@ -331,6 +373,24 @@ async def _session(profile) -> None:
                         continue
                     raise ConnectionError(f"Kalshi stream error: {msg}")
                 sid, seq = data.get("sid"), data.get("seq")
+                if kind in {
+                    "orderbook_snapshot",
+                    "orderbook_delta",
+                    "cfbenchmarks_value",
+                    "cfbenchmarks_value_5hz",
+                    "market_lifecycle_v2",
+                    "event_fee_update",
+                    "fill",
+                    "market_position",
+                    "user_order",
+                }:
+                    _capture_research_event(
+                        kind,
+                        msg,
+                        seq=seq if isinstance(seq, int) else None,
+                        sid=sid if isinstance(sid, int) else None,
+                        receipt_ts=time.time(),
+                    )
                 if (
                     kind not in {"orderbook_snapshot", "orderbook_delta"}
                     and isinstance(sid, int)
