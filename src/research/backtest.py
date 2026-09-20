@@ -24,6 +24,8 @@ from data.kalshi_rest import (
 from engine.market_stream.discovery import parse_iso8601_to_epoch
 from engine.pricing.pipeline import compute_pricing_snapshot
 from engine.trading.fees import taker_fee_cents_per_contract
+from engine.trading.settings import TradingSettings
+from engine.trading.strategy import apply_pricing_overrides
 
 DEFAULT_HORIZONS_SECONDS = (600, 300, 120, 90, 60, 45, 30, 20, 10, 5, 1)
 CF_HISTORY_MIN_INTERVAL_SEC = 0.26
@@ -345,6 +347,7 @@ def _pricing_at(
     fix_ticks: list[dict[str, float]],
     force_one_second_spot: bool = False,
     vol_window_seconds: float = 300.0,
+    volatility_scale: float = 1.0,
 ) -> dict[str, Any]:
     spot_source = fix_ticks if force_one_second_spot else spot_ticks
     latest_spot = _latest_tick(spot_source, eval_ts)
@@ -364,7 +367,7 @@ def _pricing_at(
         eval_ts - max(float(vol_window_seconds), 1.0),
         eval_ts,
     )
-    return compute_pricing_snapshot(
+    snapshot = compute_pricing_snapshot(
         profile=profile,
         feed_asset=asset,
         spot=latest_spot["price"],
@@ -377,6 +380,12 @@ def _pricing_at(
         now_ts=eval_ts,
         vol_window_seconds=vol_window_seconds,
     )
+    if snapshot.get("ready") and abs(float(volatility_scale) - 1.0) > 1e-12:
+        snapshot = apply_pricing_overrides(
+            snapshot,
+            TradingSettings(volatility_scale=max(0.01, float(volatility_scale))),
+        )
+    return snapshot
 
 
 def _dollars_to_cents(value: Any) -> float | None:
@@ -418,6 +427,7 @@ def calibrate_market(
     horizons: tuple[int, ...],
     subsecond_offset: float,
     vol_window_seconds: float = 300.0,
+    volatility_scale: float = 1.0,
     failure_counts: dict[str, int] | None = None,
 ) -> list[ModelObservation]:
     """Evaluate the production model at fixed horizons, including the final minute."""
@@ -449,6 +459,7 @@ def calibrate_market(
             spot_ticks=spot_ticks,
             fix_ticks=fix_ticks,
             vol_window_seconds=vol_window_seconds,
+            volatility_scale=volatility_scale,
         )
         slow = _pricing_at(
             profile=profile,
@@ -461,6 +472,7 @@ def calibrate_market(
             fix_ticks=fix_ticks,
             force_one_second_spot=True,
             vol_window_seconds=vol_window_seconds,
+            volatility_scale=volatility_scale,
         )
         rejection = None
         if not fast.get("ready"):
@@ -995,6 +1007,7 @@ def run_backtest(
     min_edge_cents: float,
     horizons: tuple[int, ...] = DEFAULT_HORIZONS_SECONDS,
     vol_window_seconds: float = 300.0,
+    volatility_scale: float = 1.0,
     include_tape: bool = False,
     include_quotes: bool = True,
     include_market_relative: bool = True,
@@ -1059,6 +1072,7 @@ def run_backtest(
                 horizons=horizons,
                 subsecond_offset=subsecond_offset,
                 vol_window_seconds=vol_window_seconds,
+                volatility_scale=volatility_scale,
                 failure_counts=calibration_failures,
             )
         )
@@ -1108,6 +1122,7 @@ def run_backtest(
         vol_window_seconds=vol_window_seconds,
     )
     summary["calibration_rejections"] = dict(sorted(calibration_failures.items()))
+    summary["volatility_scale"] = float(volatility_scale)
     return model_rows, quote_rows, relative_rows, tape_rows, trades, summary
 
 
@@ -1140,6 +1155,7 @@ def main() -> None:
         help="Comma-separated seconds-to-expiry calibration horizons.",
     )
     parser.add_argument("--vol-window-seconds", type=float, default=300.0)
+    parser.add_argument("--volatility-scale", type=float, default=1.0)
     parser.add_argument(
         "--full-tape",
         action="store_true",
@@ -1167,6 +1183,7 @@ def main() -> None:
         min_edge_cents=max(0.0, args.min_edge_cents),
         horizons=horizons,
         vol_window_seconds=max(1.0, args.vol_window_seconds),
+        volatility_scale=max(0.01, args.volatility_scale),
         include_tape=args.full_tape,
         include_quotes=not args.skip_quotes,
         include_market_relative=not args.skip_market_relative,
