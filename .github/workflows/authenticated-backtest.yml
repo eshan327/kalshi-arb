@@ -47,10 +47,23 @@ jobs:
         if: steps.credentials.outputs.available == 'true'
         run: python -m pip install -e .
 
+      - name: Resolve sample size
+        id: sample
+        if: steps.credentials.outputs.available == 'true'
+        shell: bash
+        run: |
+          raw="$(tr -d '[:space:]' < .github/backtest-trigger)"
+          if [[ "$raw" =~ ^[0-9]+$ && "$raw" -gt 0 ]]; then
+            max_markets="$raw"
+          else
+            max_markets=100
+          fi
+          echo "max_markets=$max_markets" >> "$GITHUB_OUTPUT"
+
       - name: Model calibration and market-relative diagnostics
         if: steps.credentials.outputs.available == 'true'
         run: |
-          python src/research/backtest.py BTC             --max-markets 100             --min-edge-cents 2             --vol-window-seconds 300             --output-dir output/backtests
+          python src/research/backtest.py BTC             --max-markets ${{ steps.sample.outputs.max_markets }}             --min-edge-cents 2             --vol-window-seconds 300             --output-dir output/backtests
 
       - name: Production taker-strategy replay
         if: steps.credentials.outputs.available == 'true'
