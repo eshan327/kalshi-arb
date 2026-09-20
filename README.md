@@ -237,6 +237,21 @@ without maintaining a second pricing implementation. The dedicated
 chronological development/holdout split so a parameter choice is selected on
 older markets and judged on newer markets.
 
+The live/replay `TradingSettings` also support opt-in research policies without
+changing default production behavior:
+
+- `volatility_window_seconds`: realized-volatility lookback (default 300 s).
+- `pre_settlement_volatility_window_seconds` and
+  `pre_settlement_volatility_scale`: optional longer/more-conservative variance
+  policy while time to expiry is above `pre_settlement_until_seconds`.
+- `entry_start_seconds_to_expiry`: optional earliest systematic-entry horizon.
+  For example, 30 restricts new entries to the final 30 seconds while preserving
+  inventory exits. It is disabled by default.
+
+These controls are exposed in the dashboard and replayed by
+`strategy_backtest.py`. They exist to test the authenticated findings rather
+than hard-code a parameter choice from one historical sample.
+
 ### Production taker-strategy replay
 
 For the closest replay possible from Kalshi's public historical quote data:
@@ -292,12 +307,32 @@ history. The passthrough is entitlement-controlled; the backtest fails rather
 than substituting another crypto price source when official CF history is
 unavailable.
 
+### Forward sub-minute execution research
+
+Public historical candles cannot establish whether the apparent final-seconds
+model advantage was actually IOC-fillable. The live streamer can therefore
+optionally record raw sequenced market data near expiry:
+
+```bash
+KALSHI_RESEARCH_CAPTURE_PATH=.runtime/research_market_data.jsonl
+KALSHI_RESEARCH_CAPTURE_HORIZON_SEC=45
+```
+
+When enabled, the process appends orderbook snapshots/deltas, CF 1 Hz and 5 Hz
+updates, lifecycle messages, and account execution messages during the configured
+late-market horizon. Records include receipt time, sequence number when present,
+active market, close time, seconds to expiry, and the original payload. Capture
+is disabled by default and does not alter trading decisions.
+
 For the dated empirical conclusions from the authenticated BTC research suite,
 see [Historical research findings — 2026-09-20](docs/historical_research_2026-09-20.md).
 
 ## Default controls
 
 - Minimum taker edge: 2¢ per contract
+- Optional earliest-entry horizon: disabled
+- Realized-volatility window: 300 seconds
+- Optional early-period volatility policy: disabled
 - Locked-outcome edge: 0.5¢ per contract
 - Kelly fraction: 0.25
 - Active-market bankroll cap: 5%
