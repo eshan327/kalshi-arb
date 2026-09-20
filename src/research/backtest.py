@@ -18,6 +18,7 @@ from data.kalshi_rest import (
     get_cfbenchmarks_history,
     get_market_candlesticks,
     get_market_trades,
+    get_market_trades_page,
     get_settled_markets,
 )
 from engine.market_stream.discovery import parse_iso8601_to_epoch
@@ -664,38 +665,33 @@ def market_relative_horizons(
         return []
 
     start_ts = max(open_ts or close_ts - 900, close_ts - 900)
-    raw_trades = get_market_trades(
-        ticker=ticker,
-        min_ts=int(start_ts),
-        max_ts=int(close_ts),
-        include_block_trades=False,
-        historical=market.get("_data_tier") == "historical",
-    )
-    parsed: list[tuple[float, dict]] = []
-    for trade in raw_trades:
-        ts = _parse_timestamp(trade.get("created_time"))
-        if ts is not None and start_ts <= ts < close_ts:
-            parsed.append((ts, trade))
-    parsed.sort(key=lambda row: row[0])
-    if not parsed:
-        return []
-
-    trade_times = [row[0] for row in parsed]
     decimals = extract_settlement_decimals(
         market, profile.settlement_decimals_fallback
     )
     actual_yes = 1 if result == "yes" else 0
     rows: list[MarketRelativeObservation] = []
+    historical = market.get("_data_tier") == "historical"
 
     for horizon in horizons:
         target_ts = close_ts - float(horizon) + float(subsecond_offset)
-        index = bisect_right(trade_times, target_ts) - 1
-        if index < 0:
+        window_start = max(start_ts, target_ts - max_trade_age_seconds)
+        raw_trades = get_market_trades_page(
+            ticker=ticker,
+            min_ts=int(math.floor(window_start)),
+            max_ts=int(math.ceil(target_ts)),
+            include_block_trades=False,
+            historical=historical,
+            limit=100,
+        )
+        candidates: list[tuple[float, dict]] = []
+        for trade in raw_trades:
+            ts = _parse_timestamp(trade.get("created_time"))
+            if ts is not None and window_start <= ts <= target_ts:
+                candidates.append((ts, trade))
+        if not candidates:
             continue
-        trade_ts, trade = parsed[index]
+        trade_ts, trade = max(candidates, key=lambda row: row[0])
         age = target_ts - trade_ts
-        if age < 0 or age > max_trade_age_seconds:
-            continue
         yes_cents = _dollars_to_cents(trade.get("yes_price_dollars"))
         if yes_cents is None or not 0 < yes_cents < 100:
             continue
