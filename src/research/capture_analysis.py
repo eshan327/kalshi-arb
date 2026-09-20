@@ -5,6 +5,7 @@ import csv
 import json
 from collections import Counter, defaultdict
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 
@@ -73,6 +74,101 @@ def _decision_row(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _trade_row(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return {
+        "receipt_ts": event.get("receipt_ts"),
+        "market_ticker": event.get("market_ticker"),
+        "seconds_to_expiry": event.get("seconds_to_expiry"),
+        "trade_id": payload.get("trade_id"),
+        "yes_price_dollars": payload.get("yes_price_dollars"),
+        "no_price_dollars": payload.get("no_price_dollars"),
+        "count_fp": payload.get("count_fp"),
+        "taker_outcome_side": payload.get("taker_outcome_side")
+        or payload.get("taker_side"),
+        "taker_book_side": payload.get("taker_book_side"),
+        "is_block_trade": bool(payload.get("is_block_trade", False)),
+        "source_ts": payload.get("ts"),
+        "source_ts_ms": payload.get("ts_ms"),
+    }
+
+
+def _order_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    submissions: dict[str, dict[str, Any]] = {}
+    completions: dict[str, dict[str, Any]] = {}
+    first_fills: dict[str, dict[str, Any]] = {}
+
+    for event in events:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        client_id = payload.get("client_order_id")
+        if not isinstance(client_id, str) or not client_id:
+            continue
+        kind = event.get("kind")
+        if kind == "order_submission":
+            submissions.setdefault(client_id, event)
+        elif kind in {"order_result", "order_error"}:
+            completions.setdefault(client_id, event)
+        elif kind == "fill":
+            first_fills.setdefault(client_id, event)
+
+    rows: list[dict[str, Any]] = []
+    for client_id, submitted in sorted(
+        submissions.items(), key=lambda item: float(item[1].get("receipt_ts") or 0.0)
+    ):
+        payload = (
+            submitted.get("payload")
+            if isinstance(submitted.get("payload"), dict)
+            else {}
+        )
+        completion = completions.get(client_id)
+        completion_payload = (
+            completion.get("payload")
+            if completion and isinstance(completion.get("payload"), dict)
+            else {}
+        )
+        result = (
+            completion_payload.get("result")
+            if isinstance(completion_payload.get("result"), dict)
+            else {}
+        )
+        order = result.get("order") if isinstance(result.get("order"), dict) else {}
+        fill = first_fills.get(client_id)
+        submitted_ts = float(submitted.get("receipt_ts") or 0.0)
+        completion_ts = (
+            float(completion.get("receipt_ts") or 0.0) if completion else None
+        )
+        fill_ts = float(fill.get("receipt_ts") or 0.0) if fill else None
+        rows.append(
+            {
+                "client_order_id": client_id,
+                "market_ticker": submitted.get("market_ticker"),
+                "seconds_to_expiry": submitted.get("seconds_to_expiry"),
+                "execution_mode": payload.get("execution_mode"),
+                "side": payload.get("side"),
+                "action": payload.get("action"),
+                "requested_count": payload.get("count"),
+                "limit_price_cents": payload.get("price_cents"),
+                "submission_receipt_ts": submitted_ts,
+                "completion_kind": None if completion is None else completion.get("kind"),
+                "completion_receipt_ts": completion_ts,
+                "response_latency_ms": (
+                    None
+                    if completion_ts is None
+                    else round((completion_ts - submitted_ts) * 1000.0, 3)
+                ),
+                "first_fill_receipt_ts": fill_ts,
+                "first_fill_latency_ms": (
+                    None if fill_ts is None else round((fill_ts - submitted_ts) * 1000.0, 3)
+                ),
+                "fill_count": order.get("fill_count"),
+                "order_id": order.get("order_id"),
+                "error": completion_payload.get("error"),
+                "http_status": completion_payload.get("http_status"),
+            }
+        )
+    return rows
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -85,12 +181,21 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def analyze(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def analyze(
+    events: list[dict[str, Any]],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
     decisions = [
         _decision_row(event)
         for event in events
         if event.get("kind") == "strategy_decision"
     ]
+    trades = [_trade_row(event) for event in events if event.get("kind") == "trade"]
+    orders = _order_rows(events)
     event_counts = Counter(str(event.get("kind") or "unknown") for event in events)
     reasons = Counter(str(row.get("reason") or "unknown") for row in decisions)
 
@@ -108,6 +213,12 @@ def analyze(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[st
             if isinstance(row.get("seconds_to_expiry"), (int, float))
             and 0 <= float(row["seconds_to_expiry"]) <= horizon
         ]
+        trade_rows = [
+            row
+            for row in trades
+            if isinstance(row.get("seconds_to_expiry"), (int, float))
+            and 0 <= float(row["seconds_to_expiry"]) <= horizon
+        ]
         horizon_coverage.append(
             {
                 "horizon_seconds": horizon,
@@ -119,6 +230,16 @@ def analyze(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[st
                 "decisions": len(decision_rows),
                 "buy_signals": sum(
                     row.get("signal_action") == "buy" for row in decision_rows
+                ),
+                "public_trades": len(trade_rows),
+                "non_block_public_trades": sum(
+                    not bool(row.get("is_block_trade")) for row in trade_rows
+                ),
+                "public_trade_contracts": sum(
+                    float(row["count_fp"])
+                    for row in trade_rows
+                    if not bool(row.get("is_block_trade"))
+                    and row.get("count_fp") is not None
                 ),
             }
         )
@@ -145,6 +266,16 @@ def analyze(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[st
             )
 
     buy_signals = [row for row in decisions if row.get("signal_action") == "buy"]
+    response_latencies = [
+        float(row["response_latency_ms"])
+        for row in orders
+        if row.get("response_latency_ms") is not None
+    ]
+    fill_latencies = [
+        float(row["first_fill_latency_ms"])
+        for row in orders
+        if row.get("first_fill_latency_ms") is not None
+    ]
     summary = {
         "events": len(events),
         "markets": len(
@@ -155,6 +286,18 @@ def analyze(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[st
         "buy_signals": len(buy_signals),
         "sell_signals": sum(row.get("signal_action") == "sell" for row in decisions),
         "decision_reasons": dict(sorted(reasons.items())),
+        "public_trades": len(trades),
+        "non_block_public_trades": sum(
+            not bool(row.get("is_block_trade")) for row in trades
+        ),
+        "orders_submitted": len(orders),
+        "orders_with_fill": sum(row.get("first_fill_receipt_ts") is not None for row in orders),
+        "median_order_response_latency_ms": (
+            None if not response_latencies else round(median(response_latencies), 3)
+        ),
+        "median_first_fill_latency_ms": (
+            None if not fill_latencies else round(median(fill_latencies), 3)
+        ),
         "horizon_coverage": horizon_coverage,
         "sequence_gaps": gaps,
         "note": (
@@ -163,7 +306,7 @@ def analyze(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[st
             "sub-minute execution."
         ),
     }
-    return decisions, summary
+    return decisions, trades, orders, summary
 
 
 def main() -> None:
@@ -175,9 +318,11 @@ def main() -> None:
     args = parser.parse_args()
 
     events = load_events(Path(args.capture_path))
-    decisions, summary = analyze(events)
+    decisions, trades, orders, summary = analyze(events)
     out = Path(args.output_dir)
     _write_csv(out / "decisions.csv", decisions)
+    _write_csv(out / "public_trades.csv", trades)
+    _write_csv(out / "orders.csv", orders)
     out.mkdir(parents=True, exist_ok=True)
     (out / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True),

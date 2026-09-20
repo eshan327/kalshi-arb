@@ -143,6 +143,9 @@ One authenticated socket stays open across market rotation:
 - `market_lifecycle_v2`: pauses, terms, close-time changes, settlement, and fee
   override invalidation.
 - `fill`, `market_positions`, `user_orders`: live account and execution updates.
+- `trade`: subscribed only when forward research capture is enabled, to preserve
+  public trade price, size, taker direction, block-trade status, and exchange
+  timestamps alongside the L2 book.
 
 REST has distinct jobs: order entry/cancellation, initial market metadata,
 initial/reconnect portfolio snapshots, and balance refresh (there is no balance
@@ -323,9 +326,10 @@ KALSHI_RESEARCH_CAPTURE_PATH=.runtime/research_market_data.jsonl
 KALSHI_RESEARCH_CAPTURE_HORIZON_SEC=45
 ```
 
-When enabled, the process appends orderbook snapshots/deltas, CF 1 Hz and 5 Hz
-updates, lifecycle/account execution messages, and the production strategy's
-decision snapshots during the configured late-market horizon. Records include
+When enabled, the process appends orderbook snapshots/deltas, public trades,
+CF 1 Hz and 5 Hz updates, lifecycle/account execution messages, exact local order
+submission/result/error timestamps, and the production strategy's decision
+snapshots during the configured late-market horizon. Records include
 receipt time, subscription/sequence identifiers when present, active market,
 close time, seconds to expiry, and the original payload. Capture is disabled by
 default and does not alter trading decisions.
@@ -336,8 +340,10 @@ Analyze a capture with:
 uv run src/research/capture_analysis.py .runtime/research_market_data.jsonl
 ```
 
-This writes `output/live_capture/decisions.csv` and `summary.json`, including
-horizon coverage, signal/reason counts, and detected sequence gaps. It deliberately
+This writes `output/live_capture/decisions.csv`,
+`output/live_capture/public_trades.csv`, `output/live_capture/orders.csv`, and
+`summary.json`, including horizon coverage, non-block trade flow, signal/reason
+counts, local order-response and first-fill latency, and detected sequence gaps. It deliberately
 does not equate a model signal with an executable fill.
 
 For the dated empirical conclusions from the authenticated BTC research suite,

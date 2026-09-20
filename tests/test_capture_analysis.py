@@ -22,6 +22,70 @@ def test_capture_analysis_summarizes_decisions_and_sequence_gaps():
             "payload": {},
         },
         {
+            "receipt_ts": 100.25,
+            "kind": "trade",
+            "sid": 5,
+            "seq": 20,
+            "market_ticker": "TEST",
+            "seconds_to_expiry": 29.75,
+            "payload": {
+                "trade_id": "trade-1",
+                "yes_price_dollars": "0.6200",
+                "no_price_dollars": "0.3800",
+                "count_fp": "3.00",
+                "taker_outcome_side": "yes",
+                "taker_book_side": "bid",
+                "is_block_trade": False,
+                "ts_ms": 100250,
+            },
+        },
+        {
+            "receipt_ts": 100.26,
+            "kind": "order_submission",
+            "sid": None,
+            "seq": None,
+            "market_ticker": "TEST",
+            "seconds_to_expiry": 29.74,
+            "payload": {
+                "client_order_id": "kalshi-algo-1",
+                "execution_mode": "live",
+                "side": "yes",
+                "action": "buy",
+                "count": 2,
+                "price_cents": 62,
+            },
+        },
+        {
+            "receipt_ts": 100.28,
+            "kind": "fill",
+            "sid": 6,
+            "seq": None,
+            "market_ticker": "TEST",
+            "seconds_to_expiry": 29.72,
+            "payload": {
+                "client_order_id": "kalshi-algo-1",
+                "trade_id": "own-fill-1",
+                "count_fp": "2.00",
+            },
+        },
+        {
+            "receipt_ts": 100.29,
+            "kind": "order_result",
+            "sid": None,
+            "seq": None,
+            "market_ticker": "TEST",
+            "seconds_to_expiry": 29.71,
+            "payload": {
+                "client_order_id": "kalshi-algo-1",
+                "result": {
+                    "order": {
+                        "order_id": "order-1",
+                        "fill_count": "2.00",
+                    }
+                },
+            },
+        },
+        {
             "receipt_ts": 100.3,
             "kind": "strategy_decision",
             "sid": None,
@@ -55,13 +119,28 @@ def test_capture_analysis_summarizes_decisions_and_sequence_gaps():
         },
     ]
 
-    decisions, summary = analyze(events)
+    decisions, trades, orders, summary = analyze(events)
 
     assert len(decisions) == 1
+    assert len(trades) == 1
+    assert trades[0]["trade_id"] == "trade-1"
+    assert trades[0]["taker_outcome_side"] == "yes"
+    assert len(orders) == 1
+    assert orders[0]["client_order_id"] == "kalshi-algo-1"
+    assert orders[0]["response_latency_ms"] == 30.0
+    assert orders[0]["first_fill_latency_ms"] == 20.0
     assert decisions[0]["best_edge_cents"] == 7
     assert summary["markets"] == 1
     assert summary["buy_signals"] == 1
+    assert summary["public_trades"] == 1
+    assert summary["non_block_public_trades"] == 1
+    assert summary["orders_submitted"] == 1
+    assert summary["orders_with_fill"] == 1
+    assert summary["median_order_response_latency_ms"] == 30.0
+    assert summary["median_first_fill_latency_ms"] == 20.0
     assert summary["horizon_coverage"][-1]["decisions"] == 1
+    assert summary["horizon_coverage"][-1]["public_trades"] == 1
+    assert summary["horizon_coverage"][-1]["public_trade_contracts"] == 3.0
     assert summary["sequence_gaps"] == [
         {
             "kind": "orderbook_delta",

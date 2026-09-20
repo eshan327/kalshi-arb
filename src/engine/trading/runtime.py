@@ -353,20 +353,49 @@ def _place_order(
     fee_multiplier: float = 1.0,
     allow_when_stopped: bool = False,
 ) -> dict[str, Any]:
+    base_capture = {
+        "execution_mode": execution_mode,
+        "market_ticker": market_ticker,
+        "side": side,
+        "action": action,
+        "count": count,
+        "price_cents": price_cents,
+    }
     if execution_mode == "paper":
-        return _paper_account.place_ioc(
-            market_ticker=market_ticker,
-            side=side,
-            action=action,
-            count=int(count),
-            price_cents=price_cents,
-            book=get_live_book(),
-            fee_multiplier=fee_multiplier,
+        _capture_research_event(
+            "order_submission",
+            {**base_capture, "client_order_id": None},
+            receipt_ts=time.time(),
         )
+        try:
+            result = _paper_account.place_ioc(
+                market_ticker=market_ticker,
+                side=side,
+                action=action,
+                count=int(count),
+                price_cents=price_cents,
+                book=get_live_book(),
+                fee_multiplier=fee_multiplier,
+            )
+        except Exception as exc:
+            _capture_research_event(
+                "order_error",
+                {**base_capture, "client_order_id": None, "error": str(exc)},
+                receipt_ts=time.time(),
+            )
+            raise
+        _capture_research_event(
+            "order_result",
+            {**base_capture, "client_order_id": None, "result": result},
+            receipt_ts=time.time(),
+        )
+        return result
     if execution_mode != "live":
         raise RuntimeError("Choose Sim or Live first.")
     client_id = _client_order_id()
     account_state.begin_order(client_id, market_ticker)
+    capture = {**base_capture, "client_order_id": client_id}
+    _capture_research_event("order_submission", capture, receipt_ts=time.time())
     try:
         result = place_limit_order(
             market_ticker=market_ticker,
@@ -377,10 +406,24 @@ def _place_order(
             client_order_id=client_id,
             allow_when_stopped=allow_when_stopped,
         )
+        _capture_research_event(
+            "order_result",
+            {**capture, "result": result},
+            receipt_ts=time.time(),
+        )
         account_state.order_response(result["order"])
         return result
-    except KalshiAPIError as exc:
-        if 400 <= exc.status < 500 and exc.status not in {408, 409}:
+    except Exception as exc:
+        _capture_research_event(
+            "order_error",
+            {
+                **capture,
+                "error": str(exc),
+                "http_status": getattr(exc, "status", None),
+            },
+            receipt_ts=time.time(),
+        )
+        if isinstance(exc, KalshiAPIError) and 400 <= exc.status < 500 and exc.status not in {408, 409}:
             account_state.order_rejected()
         raise
     # Timeouts/5xx remain pending until the existing client ID is reconciled.

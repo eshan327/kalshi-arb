@@ -245,7 +245,13 @@ async def _session(profile) -> None:
         subscriptions: dict[str, int] = {}
         pending: dict[int, tuple[str, float]] = {}
         sequences: dict[int, int] = {}
-        optional = {"cfbenchmarks_value_5hz", "fill", "market_positions", "user_orders"}
+        optional = {
+            "cfbenchmarks_value_5hz",
+            "fill",
+            "market_positions",
+            "user_orders",
+            "trade",
+        }
 
         async def subscribe(channel, **params):
             cid = await command(ws, "subscribe", channels=[channel], **params)
@@ -277,12 +283,13 @@ async def _session(profile) -> None:
                     live_book = None
                     snapshot_deadline = None
                     _set_live_market_info(profile)
-                    if "orderbook_delta" in subscriptions:
-                        await command(
-                            ws,
-                            "unsubscribe",
-                            sids=[subscriptions.pop("orderbook_delta")],
-                        )
+                    for channel in ("orderbook_delta", "trade"):
+                        if channel in subscriptions:
+                            await command(
+                                ws,
+                                "unsubscribe",
+                                sids=[subscriptions.pop(channel)],
+                            )
                     discover_again = True
                     notify()
                 if discovery is not None and discovery.done():
@@ -296,12 +303,13 @@ async def _session(profile) -> None:
                             ticker = selected["ticker"]
                             _set_live_market_info(profile, selected)
                             if live_book is None or live_book.market_ticker != ticker:
-                                if "orderbook_delta" in subscriptions:
-                                    await command(
-                                        ws,
-                                        "unsubscribe",
-                                        sids=[subscriptions.pop("orderbook_delta")],
-                                    )
+                                for channel in ("orderbook_delta", "trade"):
+                                    if channel in subscriptions:
+                                        await command(
+                                            ws,
+                                            "unsubscribe",
+                                            sids=[subscriptions.pop(channel)],
+                                        )
                                 live_book = OrderBook(ticker)
                                 reset_live_pricing_for_new_market()
                                 await subscribe(
@@ -309,6 +317,8 @@ async def _session(profile) -> None:
                                     market_tickers=[ticker],
                                     use_yes_price=True,
                                 )
+                                if RESEARCH_CAPTURE_PATH:
+                                    await subscribe("trade", market_tickers=[ticker])
                                 snapshot_deadline = time.monotonic() + 5
                             next_discovery = time.monotonic() + 300
                             notify()
@@ -379,7 +389,9 @@ async def _session(profile) -> None:
                     "cfbenchmarks_value",
                     "cfbenchmarks_value_5hz",
                     "market_lifecycle_v2",
+                    "event_lifecycle",
                     "event_fee_update",
+                    "trade",
                     "fill",
                     "market_position",
                     "user_order",
