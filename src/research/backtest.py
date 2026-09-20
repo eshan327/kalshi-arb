@@ -831,6 +831,8 @@ def run_backtest(
     min_edge_cents: float,
     horizons: tuple[int, ...] = DEFAULT_HORIZONS_SECONDS,
     vol_window_seconds: float = 300.0,
+    include_tape: bool = True,
+    include_quotes: bool = True,
 ) -> tuple[
     list[ModelObservation],
     list[QuoteObservation],
@@ -890,26 +892,28 @@ def run_backtest(
                 vol_window_seconds=vol_window_seconds,
             )
         )
-        tape_rows.extend(
-            trade_tape_market(
+        if include_tape:
+            tape_rows.extend(
+                trade_tape_market(
+                    market,
+                    asset=profile.asset,
+                    spot_ticks=spot_ticks,
+                    fix_ticks=fix_ticks,
+                    vol_window_seconds=vol_window_seconds,
+                )
+            )
+        if include_quotes:
+            market_quotes, trade = quote_screen_market(
                 market,
                 asset=profile.asset,
                 spot_ticks=spot_ticks,
                 fix_ticks=fix_ticks,
+                min_edge_cents=min_edge_cents,
                 vol_window_seconds=vol_window_seconds,
             )
-        )
-        market_quotes, trade = quote_screen_market(
-            market,
-            asset=profile.asset,
-            spot_ticks=spot_ticks,
-            fix_ticks=fix_ticks,
-            min_edge_cents=min_edge_cents,
-            vol_window_seconds=vol_window_seconds,
-        )
-        quote_rows.extend(market_quotes)
-        if trade is not None:
-            trades.append(trade)
+            quote_rows.extend(market_quotes)
+            if trade is not None:
+                trades.append(trade)
 
     return model_rows, quote_rows, tape_rows, trades, summarize(
         model_rows,
@@ -950,6 +954,8 @@ def main() -> None:
         help="Comma-separated seconds-to-expiry calibration horizons.",
     )
     parser.add_argument("--vol-window-seconds", type=float, default=300.0)
+    parser.add_argument("--skip-tape", action="store_true")
+    parser.add_argument("--skip-quotes", action="store_true")
     parser.add_argument("--output-dir", default="output/backtests")
     args = parser.parse_args()
 
@@ -969,6 +975,8 @@ def main() -> None:
         min_edge_cents=max(0.0, args.min_edge_cents),
         horizons=horizons,
         vol_window_seconds=max(1.0, args.vol_window_seconds),
+        include_tape=not args.skip_tape,
+        include_quotes=not args.skip_quotes,
     )
     out = Path(args.output_dir)
     _write_csv(out / "calibration.csv", model_rows)
