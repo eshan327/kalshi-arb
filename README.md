@@ -110,7 +110,7 @@ official benchmark data, non-fallback volatility, a known fee policy, synchroniz
 account state, and at least 20 seconds to expiry. A mathematically locked outcome may
 trade inside the cutoff through its lower-edge path. Rolling index and
 volatility history are available immediately after rollover; contract-specific
-book features reset. Optional model/orderbook agreement can hard-gate entries.
+book state resets.
 
 Existing positions exit when the executable bid, after slippage and fees,
 exceeds model fair value by the configured edge. Entry gates never block this
@@ -188,76 +188,101 @@ channels are not subscribed because this strategy does not use those products.
 
 ## Historical backtesting
 
-The research backtester replays the same production pricing pipeline against
-Kalshi's archived 15-minute markets and historical CF Benchmarks values. It
-evaluates probability calibration and also runs a deliberately conservative
-one-contract alpha screen using historical one-minute quote closes.
+Historical research is split into two layers because model calibration and
+execution simulation have different data requirements.
 
-Use production credentials because CF Benchmarks passthrough data is entitlement
-controlled and the archived market data is production history:
+### Model calibration and coarse quote screen
 
 ```bash
 KALSHI_ENV=prod uv run --env-file .env src/research/backtest.py BTC \
   --max-markets 100 \
-  --min-edge-cents 2
+  --min-edge-cents 2 \
+  --vol-window-seconds 300
 ```
+
+This backtester merges recent settled markets from the live tier with older
+markets from Kalshi's historical tier. For assets with the high-frequency CF
+feed, it requests `PER_200MS` history for the current spot while retaining only
+exact second-boundary CF values for realized volatility and settlement fixes,
+matching the live separation between `cfbenchmarks_value_5hz` and
+`cfbenchmarks_value`. If subsecond history is unavailable, it falls back to
+`PER_SECOND` without inventing fixes.
+
+Probability calibration is evaluated at fixed horizons including 60, 45, 30,
+20, 10, 5, and 1 seconds before close. That is independent of Kalshi quote
+candles, so the collapsed final-minute Asian model is actually tested. For
+subsecond-capable assets, the report also compares the production fast-spot
+probability with the probability obtained from the latest one-second spot.
 
 Outputs are written to `output/backtests/`:
 
-- `observations.csv`: model probability, realized outcome, volatility, quote,
-  edge, Brier score, and log loss for every replay point.
-- `trades.csv`: first qualifying fee-aware signal per market, held to settlement.
-- `summary.json`: aggregate calibration, scoring, trade count, win rate, P&L,
-  ROI on entry cost, and calibration buckets.
+- `calibration.csv`: fixed-horizon model probabilities, outcomes, Brier/log
+  loss, known-fix count, and fast-vs-1Hz spot comparison.
+- `quote_observations.csv`: model value versus one-minute Kalshi quote closes.
+- `tape_observations.csv`: model probability versus actual public trade prices
+  at each trade timestamp, including sub-minute/final-minute transactions when
+  present. This is a market-relative diagnostic, not a fill simulation.
+- `trades.csv`: a deliberately simple first-signal-per-market alpha screen.
+- `summary.json`: aggregate and horizon-level calibration, model-versus-trade
+  proper scores, and the coarse quote screen.
 
-The backtester reconstructs Kalshi's final-minute fixing window as
-`(close - 60s, close]`, matching the documented CF accumulation semantics.
-The pre-settlement Asian fixing grid uses the same open-left/close-right
-convention.
+Use `--vol-window-seconds` to research alternatives to the production 300-second
+realized-volatility window without maintaining a second pricing implementation.
 
-Historical quote candles are only available at one-minute granularity, so the
-reported trade P&L is an alpha screen rather than a true execution replay. It
-does not claim historical top-of-book depth, queue position, subsecond latency,
-or IOC fill realism.
+### Production taker-strategy replay
 
-For the closest replay of the actual live taker strategy, use:
+For the closest replay possible from Kalshi's public historical quote data:
 
 ```bash
 KALSHI_ENV=prod uv run --env-file .env src/research/strategy_backtest.py BTC \
   --max-markets 100 \
   --starting-cash-cents 100000 \
   --fee-multiplier 1.0 \
-  --assumed-top-size 10 \
-  --min-edge-cents 2
+  --assumed-top-size 10
 ```
 
-That replay calls the production `apply_pricing_overrides()` and
-`build_trade_signal()` functions directly and executes their IOC signals through
-the same `PaperAccount` fill logic used by Sim. It therefore preserves the real
-minimum-edge gate, deterministic lower-edge path, 20-second cutoff, taker-fee
-rounding, slippage-aware limit construction, Kelly sizing, bankroll/position/cash
-caps, max-order clips, buy cooldown, edge-reversal exits, daily-loss lock/flatten,
-and settlement accounting. Market rotation also resets the cooldown exactly as
-the live runtime does.
+The replay calls the production `apply_pricing_overrides()` and
+`build_trade_signal()` functions directly and executes their IOC signals
+through the same `PaperAccount` path used by Sim. It preserves the minimum-edge
+and deterministic-edge gates, 20-second entry cutoff, taker-fee logic,
+price-range-aware slippage limits, Kelly sizing, bankroll/position/cash caps,
+max-order clips, buy cooldown, edge-reversal exits, daily-loss lock/flatten, and
+settlement accounting. Market rotation resets the cooldown exactly as the live
+runtime does.
+
+Every `TradingSettings` field can be replayed from a JSON file:
+
+```bash
+KALSHI_ENV=prod uv run --env-file .env src/research/strategy_backtest.py BTC \
+  --settings-json research-settings.json
+```
+
+`--min-edge-cents` can still be supplied separately and overrides the JSON
+value.
 
 Outputs are written to `output/strategy_backtests/`:
 
-- `decisions.csv`: every replayed production-strategy decision and account state.
-- `fills.csv`: every simulated IOC fill, including buys and edge-reversal sells.
+- `decisions.csv`: replayed production-strategy decisions and account state.
+- `fills.csv`: simulated IOC fills, including edge-reversal sells.
 - `markets.csv`: per-market realized P&L and turnover.
-- `summary.json`: portfolio P&L plus an explicit split between exact production
-  logic and unavoidable historical-data assumptions.
+- `summary.json`: portfolio results and an explicit list of exact versus
+  approximated replay behavior.
 
-The remaining approximation is market-data fidelity, not strategy logic. Kalshi
-archives one-minute YES bid/ask OHLC but not the historical sequenced L2 book.
-The strategy replay therefore constructs the correct YES/NO top-of-book prices
-from each candle close and uses `--assumed-top-size` only for the otherwise
-unobservable displayed quantity. It allows at most one buy per archived minute
-rather than assuming that the observed ask persisted long enough for repeated
-five-second cooldown entries. Historical event fee overrides and exchange-shard
-cash allocations are also unavailable, so the fee multiplier is explicit and
-simulated cash is assumed usable on the active shard. For true L2/latency
-execution research, record and replay the live sequenced orderbook stream.
+Kalshi only archives quote candles at one-minute minimum resolution, not the
+sequenced historical L2 book. The execution replay therefore constructs the
+correct YES/NO top of book from each candle close and uses
+`--assumed-top-size` only for otherwise unobservable displayed quantity. A
+hypothetical fill consumes that assumed liquidity, and the replay permits at
+most one new buy per archived minute rather than assuming the quote persisted
+through repeated five-second cooldowns. This makes the P&L replay deliberately
+conservative, but it still cannot recover latency, queue position, sub-minute
+quote changes, historical pause events, exact shard cash, or historical event
+fee overrides. Those require recording the live sequenced book.
+
+Both research tools require production Kalshi credentials for CF Benchmarks
+history. The passthrough is entitlement-controlled; the backtest fails rather
+than substituting another crypto price source when official CF history is
+unavailable.
 
 ## Default controls
 

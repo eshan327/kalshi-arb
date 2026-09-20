@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from core.config import PAPER_STARTING_CASH_CENTS
+from core.config import KALSHI_ENV, PAPER_STARTING_CASH_CENTS
 from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
 from core.market_profiles import get_market_profile
-from data.kalshi_rest import get_historical_candlesticks, get_historical_markets
+from data.kalshi_rest import get_market_candlesticks, get_settled_markets
 from engine.market_stream.discovery import parse_iso8601_to_epoch
 from engine.orderbook import OrderBook
 from engine.pricing.pipeline import compute_pricing_snapshot
@@ -26,7 +26,7 @@ from engine.trading.strategy import (
     build_trade_signal,
     slipped_price_cents,
 )
-from research.backtest import _latest_tick, _settlement_state, fetch_cf_range
+from research.backtest import _latest_tick, _settlement_state, fetch_cf_feeds
 
 _NY = ZoneInfo("America/New_York")
 
@@ -121,7 +121,10 @@ class DailyRiskTracker:
 
 
 def _quote_component(candle: dict, side: str, field: str = "close") -> float | None:
-    raw = (candle.get(side) or {}).get(field)
+    quote = candle.get(side) or {}
+    raw = quote.get(f"{field}_dollars")
+    if raw is None:
+        raw = quote.get(field)
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -324,7 +327,8 @@ def replay_market(
     market: dict,
     *,
     asset: str,
-    cf_ticks: list[dict[str, float]],
+    spot_ticks: list[dict[str, float]],
+    fix_ticks: list[dict[str, float]],
     account: PaperAccount,
     risk: DailyRiskTracker,
     settings: TradingSettings,
@@ -349,11 +353,13 @@ def replay_market(
         return [], [], None, last_submission_ts
 
     start_ts = max(open_ts or close_ts - 900, close_ts - 900)
-    candles = get_historical_candlesticks(
+    candles = get_market_candlesticks(
+        series_ticker=profile.kalshi_series_ticker,
         ticker=ticker,
         start_ts=int(start_ts),
         end_ts=int(close_ts),
         period_interval=1,
+        historical=market.get("_data_tier") == "historical",
     )
     candles.sort(key=lambda row: int(row.get("end_period_ts") or 0))
     decimals = extract_settlement_decimals(market, profile.settlement_decimals_fallback)
@@ -378,17 +384,18 @@ def replay_market(
         if book is None:
             continue
 
-        latest = _latest_tick(cf_ticks, eval_ts)
+        latest = _latest_tick(spot_ticks, eval_ts)
         if latest is None:
             continue
 
         state = _settlement_state(
-            cf_ticks,
+            fix_ticks,
             now_ts=eval_ts,
             close_ts=close_ts,
             window=profile.settlement_window_seconds,
+            spot_ts=latest["ts"],
         )
-        available_ticks = [tick for tick in cf_ticks if tick["ts"] <= eval_ts]
+        available_ticks = [tick for tick in fix_ticks if tick["ts"] <= eval_ts]
         pricing = compute_pricing_snapshot(
             profile=profile,
             feed_asset=asset,
@@ -601,6 +608,7 @@ def summarize(
     fee_multiplier: float,
     assumed_top_size: int,
     settings: TradingSettings,
+    cf_resolution: str,
 ) -> dict[str, Any]:
     ending = account.snapshot()
     total_fees = sum(fill.fees_cents for fill in fills)
@@ -624,6 +632,7 @@ def summarize(
         "sell_contracts": sum(fill.filled_count for fill in sell_fills),
         "fees_cents": round(total_fees, 6),
         "fee_multiplier": float(fee_multiplier),
+        "cf_spot_resolution": cf_resolution,
         "assumed_top_size": int(assumed_top_size),
         "settings": settings.model_dump(),
         "replay_fidelity": {
@@ -676,7 +685,8 @@ def run_strategy_backtest(
     starting_cash_cents: int,
     fee_multiplier: float,
     assumed_top_size: int,
-    min_edge_cents: float,
+    min_edge_cents: float | None = None,
+    settings: TradingSettings | None = None,
 ) -> tuple[
     list[StrategyDecision],
     list[StrategyFill],
@@ -684,9 +694,21 @@ def run_strategy_backtest(
     dict[str, Any],
 ]:
     profile = get_market_profile(asset)
+    if settings is None:
+        settings = TradingSettings(
+            **(
+                {"min_edge_cents": float(min_edge_cents)}
+                if min_edge_cents is not None
+                else {}
+            )
+        )
+    elif min_edge_cents is not None:
+        settings = TradingSettings.model_validate(
+            {**settings.model_dump(), "min_edge_cents": float(min_edge_cents)}
+        )
     markets = [
         market
-        for market in get_historical_markets(series_ticker=profile.kalshi_series_ticker)
+        for market in get_settled_markets(profile.kalshi_series_ticker)
         if str(market.get("result") or "").lower() in {"yes", "no"}
     ]
     markets.sort(key=lambda row: parse_iso8601_to_epoch(row.get("close_time")) or 0)
@@ -694,7 +716,6 @@ def run_strategy_backtest(
         markets = markets[-max_markets:]
     if not markets:
         account = PaperAccount(starting_cash_cents)
-        settings = TradingSettings(min_edge_cents=min_edge_cents)
         return [], [], [], summarize(
             starting_cash_cents=starting_cash_cents,
             account=account,
@@ -704,6 +725,7 @@ def run_strategy_backtest(
             fee_multiplier=fee_multiplier,
             assumed_top_size=assumed_top_size,
             settings=settings,
+            cf_resolution="unavailable",
         )
 
     closes = [
@@ -711,13 +733,12 @@ def run_strategy_backtest(
         for market in markets
     ]
     closes = [ts for ts in closes if ts is not None]
-    cf_ticks = fetch_cf_range(
-        profile.index_id,
+    spot_ticks, fix_ticks, cf_resolution = fetch_cf_feeds(
+        profile,
         min(closes) - 20 * 60,
         max(closes) + 1,
     )
 
-    settings = TradingSettings(min_edge_cents=min_edge_cents)
     account = PaperAccount(starting_cash_cents)
     risk = DailyRiskTracker()
     all_decisions: list[StrategyDecision] = []
@@ -727,7 +748,8 @@ def run_strategy_backtest(
         decisions, fills, result, _ = replay_market(
             market,
             asset=profile.asset,
-            cf_ticks=cf_ticks,
+            spot_ticks=spot_ticks,
+            fix_ticks=fix_ticks,
             account=account,
             risk=risk,
             settings=settings,
@@ -749,10 +771,15 @@ def run_strategy_backtest(
         fee_multiplier=fee_multiplier,
         assumed_top_size=assumed_top_size,
         settings=settings,
+        cf_resolution=cf_resolution,
     )
 
 
 def main() -> None:
+    if KALSHI_ENV != "prod":
+        raise RuntimeError(
+            "Historical research uses production Kalshi/CF data; set KALSHI_ENV=prod."
+        )
     parser = argparse.ArgumentParser(
         description="Replay the production Kalshi taker strategy on historical data."
     )
@@ -761,9 +788,25 @@ def main() -> None:
     parser.add_argument("--starting-cash-cents", type=int, default=PAPER_STARTING_CASH_CENTS)
     parser.add_argument("--fee-multiplier", type=float, default=1.0)
     parser.add_argument("--assumed-top-size", type=int, default=10)
-    parser.add_argument("--min-edge-cents", type=float, default=2.0)
+    parser.add_argument("--min-edge-cents", type=float)
+    parser.add_argument(
+        "--settings-json",
+        help=(
+            "Optional JSON file with any TradingSettings fields. "
+            "--min-edge-cents overrides the file when both are supplied."
+        ),
+    )
     parser.add_argument("--output-dir", default="output/strategy_backtests")
     args = parser.parse_args()
+
+    settings = TradingSettings()
+    if args.settings_json:
+        raw = json.loads(Path(args.settings_json).read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("--settings-json must contain a JSON object")
+        settings = TradingSettings.model_validate(
+            {**settings.model_dump(), **raw}
+        )
 
     decisions, fills, markets, summary = run_strategy_backtest(
         asset=args.asset,
@@ -771,7 +814,10 @@ def main() -> None:
         starting_cash_cents=max(100, args.starting_cash_cents),
         fee_multiplier=max(0.0, args.fee_multiplier),
         assumed_top_size=max(1, args.assumed_top_size),
-        min_edge_cents=max(0.5, args.min_edge_cents),
+        min_edge_cents=(
+            None if args.min_edge_cents is None else max(0.5, args.min_edge_cents)
+        ),
+        settings=settings,
     )
 
     out = Path(args.output_dir)
