@@ -134,3 +134,14 @@ def test_strategy_backtest_preserves_full_settings_when_no_history(monkeypatch):
     )
     assert summary["settings"] == settings.model_dump()
     assert summary["cf_spot_resolution"] == "unavailable"
+
+
+
+def test_strategy_candle_book_accepts_live_tier_dollar_fields():
+    candle = {
+        "yes_bid": {"close_dollars": "0.5900"},
+        "yes_ask": {"close_dollars": "0.6000"},
+    }
+    book = candle_book("TEST", candle, eval_ts=1000.0, assumed_top_size=10)
+    assert book is not None
+    assert book.get_best_prices() == (59.0, 60.0, 40.0, 41.0)
