@@ -292,6 +292,9 @@ history. The passthrough is entitlement-controlled; the backtest fails rather
 than substituting another crypto price source when official CF history is
 unavailable.
 
+For the dated empirical conclusions from the authenticated BTC research suite,
+see [Historical research findings — 2026-09-20](docs/historical_research_2026-09-20.md).
+
 ## Default controls
 
 - Minimum taker edge: 2¢ per contract
