@@ -39,12 +39,13 @@ def _fixing_times_years(seconds_to_expiry: float, n: int) -> list[float]:
     """
     Seconds from *now* until each of the n TWAP samples inside the settlement window.
 
-    Window ends at expiry and contains the second marks in [expiry-n, expiry).
+    Kalshi's final-minute CF accumulation uses (expiry-n, expiry]: the start-boundary
+    tick is excluded and the close tick is included.
     """
     tau = float(seconds_to_expiry)
     out: list[float] = []
     for j in range(n):
-        sec_from_now = (tau - n) + j
+        sec_from_now = (tau - n) + j + 1
         out.append(max(sec_from_now, 0.0) / SECONDS_PER_YEAR)
     return out
 
