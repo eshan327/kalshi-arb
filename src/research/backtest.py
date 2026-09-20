@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from engine.pricing.pipeline import compute_pricing_snapshot
 from engine.trading.fees import taker_fee_cents_per_contract
 
 DEFAULT_HORIZONS_SECONDS = (600, 300, 120, 90, 60, 45, 30, 20, 10, 5, 1)
+CF_HISTORY_MIN_INTERVAL_SEC = 0.26
 
 
 @dataclass(frozen=True)
@@ -187,7 +189,12 @@ def fetch_cf_range(
     raw: list[dict] = []
     cursor = _hour_start(start_ts)
     final_hour = _hour_start(end_ts)
+    first = True
     while cursor <= final_hour:
+        if not first:
+            # Passthrough history reads cost 50 read tokens. Basic accounts have a
+            # 200-token/sec budget, so pace bulk research at just under 4 req/sec.
+            time.sleep(CF_HISTORY_MIN_INTERVAL_SEC)
         raw.extend(
             get_cfbenchmarks_history(
                 index_id,
@@ -196,6 +203,7 @@ def fetch_cf_range(
                 max_resolution=max_resolution,
             )
         )
+        first = False
         cursor += 3600
 
     return [
