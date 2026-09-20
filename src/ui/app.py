@@ -502,7 +502,15 @@ class DashboardState(rx.State):
             self.spot = _price(spot)
             self.strike = _price(strike)
             self.expires = _duration(pricing.get("seconds_to_expiry"))
-            self.volatility = _percent(sigma_fit, ratio=True)
+            effective_sigma = _number(
+                pricing.get("sigma_override_applied")
+                if pricing.get("sigma_override_applied") is not None
+                else pricing.get("sigma_annual")
+            )
+            self.volatility = _percent(
+                effective_sigma if effective_sigma is not None else sigma_fit,
+                ratio=True,
+            )
             self.probability = (
                 _percent(pricing.get("p_model_pct")) if pricing.get("ready") else "—"
             )
@@ -1221,7 +1229,7 @@ def _dashboard() -> rx.Component:
                                         DashboardState.settlement_average,
                                     ),
                                     _metric(
-                                        "5m realized vol (ann.)",
+                                        "Model vol (ann.)",
                                         DashboardState.volatility,
                                     ),
                                     class_name="market-metrics",
