@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import time
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -254,15 +255,31 @@ def fetch_cf_feeds(
     )
 
 
+def _ticks_between(
+    ticks: list[dict[str, float]],
+    start_ts: float,
+    end_ts: float,
+    *,
+    start_inclusive: bool = True,
+) -> list[dict[str, float]]:
+    """Slice sorted ticks in O(log n + k) without rescanning the full history."""
+    key = lambda row: row["ts"]
+    left = (
+        bisect_left(ticks, start_ts, key=key)
+        if start_inclusive
+        else bisect_right(ticks, start_ts, key=key)
+    )
+    right = bisect_right(ticks, end_ts, key=key)
+    return ticks[left:right]
+
+
 def _latest_tick(
     ticks: list[dict[str, float]], now_ts: float
 ) -> dict[str, float] | None:
-    latest = None
-    for tick in ticks:
-        if tick["ts"] > now_ts:
-            break
-        latest = tick
-    return latest
+    if not ticks:
+        return None
+    index = bisect_right(ticks, now_ts, key=lambda row: row["ts"])
+    return None if index == 0 else ticks[index - 1]
 
 
 def _settlement_state(
@@ -288,11 +305,12 @@ def _settlement_state(
     if now_ts <= start:
         return state
 
-    fixes = [
-        tick
-        for tick in fix_ticks
-        if start < tick["ts"] <= min(now_ts, close_ts)
-    ]
+    fixes = _ticks_between(
+        fix_ticks,
+        start,
+        min(now_ts, close_ts),
+        start_inclusive=False,
+    )
     if not fixes:
         return state
 
@@ -335,7 +353,11 @@ def _pricing_at(
         window=profile.settlement_window_seconds,
         spot_ts=latest_spot["ts"],
     )
-    available_fixes = [tick for tick in fix_ticks if tick["ts"] <= eval_ts]
+    available_fixes = _ticks_between(
+        fix_ticks,
+        eval_ts - max(float(vol_window_seconds), 1.0),
+        eval_ts,
+    )
     return compute_pricing_snapshot(
         profile=profile,
         feed_asset=asset,
