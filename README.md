@@ -245,8 +245,13 @@ changing default production behavior:
   `pre_settlement_volatility_scale`: optional longer/more-conservative variance
   policy while time to expiry is above `pre_settlement_until_seconds`.
 - `entry_start_seconds_to_expiry`: optional earliest systematic-entry horizon.
-  For example, 30 restricts new entries to the final 30 seconds while preserving
-  inventory exits. It is disabled by default.
+- `entry_cutoff_seconds_to_expiry`: ordinary-entry cutoff before close (default
+  20 s). Inventory exits and mathematically locked outcomes keep their existing
+  special handling.
+
+Together these can isolate a forward-research window without changing defaults.
+For example, start=30 and cutoff=1 tests ordinary entries from 30→1 seconds;
+start=30 with the default cutoff tests only 30→20 seconds.
 
 These controls are exposed in the dashboard and replayed by
 `strategy_backtest.py`. They exist to test the authenticated findings rather
@@ -319,10 +324,21 @@ KALSHI_RESEARCH_CAPTURE_HORIZON_SEC=45
 ```
 
 When enabled, the process appends orderbook snapshots/deltas, CF 1 Hz and 5 Hz
-updates, lifecycle messages, and account execution messages during the configured
-late-market horizon. Records include receipt time, sequence number when present,
-active market, close time, seconds to expiry, and the original payload. Capture
-is disabled by default and does not alter trading decisions.
+updates, lifecycle/account execution messages, and the production strategy's
+decision snapshots during the configured late-market horizon. Records include
+receipt time, subscription/sequence identifiers when present, active market,
+close time, seconds to expiry, and the original payload. Capture is disabled by
+default and does not alter trading decisions.
+
+Analyze a capture with:
+
+```bash
+uv run src/research/capture_analysis.py .runtime/research_market_data.jsonl
+```
+
+This writes `output/live_capture/decisions.csv` and `summary.json`, including
+horizon coverage, signal/reason counts, and detected sequence gaps. It deliberately
+does not equate a model signal with an executable fill.
 
 For the dated empirical conclusions from the authenticated BTC research suite,
 see [Historical research findings — 2026-09-20](docs/historical_research_2026-09-20.md).
@@ -331,6 +347,7 @@ see [Historical research findings — 2026-09-20](docs/historical_research_2026-
 
 - Minimum taker edge: 2¢ per contract
 - Optional earliest-entry horizon: disabled
+- Ordinary-entry cutoff: 20 seconds
 - Realized-volatility window: 300 seconds
 - Optional early-period volatility policy: disabled
 - Locked-outcome edge: 0.5¢ per contract
