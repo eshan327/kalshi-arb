@@ -82,6 +82,7 @@ def _decision_state(monologue: dict[str, Any], armed: bool) -> tuple[str, str, s
         "at_target_allocation": "Target allocation reached.",
         "edge_below_threshold": "Edge is below the required minimum.",
         "entry_cutoff": "Too close to settlement.",
+        "entry_window_not_started": "Waiting for the configured late-entry window.",
         "fee_policy_unavailable": "Fee schedule unavailable.",
         "insufficient_available_cash": "Available cash is below reserve.",
         "invalid_model_probability": "Model probability unavailable.",
@@ -373,6 +374,11 @@ class DashboardState(rx.State):
     vol_override = ""
     vol_source = "realized"
     vol_scale = "1"
+    vol_window = "300"
+    pre_settlement_vol_window = ""
+    pre_settlement_vol_scale = ""
+    pre_settlement_until = "60"
+    entry_start = ""
     settings_status = ""
     manual_side = "yes"
     manual_action = "buy"
@@ -402,6 +408,16 @@ class DashboardState(rx.State):
         self.vol_override = "" if override is None else str(override)
         self.vol_source = "realized" if override is None else "override"
         self.vol_scale = str(settings.get("volatility_scale", 1))
+        self.vol_window = str(settings.get("volatility_window_seconds", 300))
+        pre_window = settings.get("pre_settlement_volatility_window_seconds")
+        self.pre_settlement_vol_window = "" if pre_window is None else str(pre_window)
+        pre_scale = settings.get("pre_settlement_volatility_scale")
+        self.pre_settlement_vol_scale = "" if pre_scale is None else str(pre_scale)
+        self.pre_settlement_until = str(
+            settings.get("pre_settlement_until_seconds", 60)
+        )
+        entry_start = settings.get("entry_start_seconds_to_expiry")
+        self.entry_start = "" if entry_start is None else str(entry_start)
 
     def _refresh(self) -> None:
         self._require_operator()
@@ -642,6 +658,21 @@ class DashboardState(rx.State):
                     "slippage_ticks": int(self.slippage),
                     "volatility_override": self.vol_override or None,
                     "volatility_scale": float(self.vol_scale),
+                    "volatility_window_seconds": float(self.vol_window),
+                    "pre_settlement_volatility_window_seconds": (
+                        float(self.pre_settlement_vol_window)
+                        if self.pre_settlement_vol_window
+                        else None
+                    ),
+                    "pre_settlement_volatility_scale": (
+                        float(self.pre_settlement_vol_scale)
+                        if self.pre_settlement_vol_scale
+                        else None
+                    ),
+                    "pre_settlement_until_seconds": float(self.pre_settlement_until),
+                    "entry_start_seconds_to_expiry": (
+                        float(self.entry_start) if self.entry_start else None
+                    ),
                 }
             )
             if errors:
@@ -710,6 +741,26 @@ class DashboardState(rx.State):
     @rx.event
     def set_vol_scale(self, value: str) -> None:
         self.vol_scale = value
+
+    @rx.event
+    def set_vol_window(self, value: str) -> None:
+        self.vol_window = value
+
+    @rx.event
+    def set_pre_settlement_vol_window(self, value: str) -> None:
+        self.pre_settlement_vol_window = value
+
+    @rx.event
+    def set_pre_settlement_vol_scale(self, value: str) -> None:
+        self.pre_settlement_vol_scale = value
+
+    @rx.event
+    def set_pre_settlement_until(self, value: str) -> None:
+        self.pre_settlement_until = value
+
+    @rx.event
+    def set_entry_start(self, value: str) -> None:
+        self.entry_start = value
 
     @rx.event
     def set_manual_side(self, value: str) -> None:
@@ -1484,6 +1535,15 @@ def _dashboard() -> rx.Component:
                                     max="25",
                                 ),
                                 _field(
+                                    "Earliest entry horizon (s)",
+                                    DashboardState.entry_start,
+                                    DashboardState.set_entry_start,
+                                    step="1",
+                                    min="20",
+                                    max="900",
+                                    placeholder="Disabled",
+                                ),
+                                _field(
                                     "Re-entry cooldown (s)",
                                     DashboardState.cooldown,
                                     DashboardState.set_cooldown,
@@ -1567,12 +1627,46 @@ def _dashboard() -> rx.Component:
                                     ),
                                 ),
                                 _field(
+                                    "Realized-vol window (s)",
+                                    DashboardState.vol_window,
+                                    DashboardState.set_vol_window,
+                                    step="30",
+                                    min="30",
+                                    max="3600",
+                                ),
+                                _field(
                                     "Volatility adjustment",
                                     DashboardState.vol_scale,
                                     DashboardState.set_vol_scale,
                                     step="0.05",
                                     min="0.5",
                                     max="2",
+                                ),
+                                _field(
+                                    "Early-period vol window (s)",
+                                    DashboardState.pre_settlement_vol_window,
+                                    DashboardState.set_pre_settlement_vol_window,
+                                    step="30",
+                                    min="30",
+                                    max="3600",
+                                    placeholder="Disabled",
+                                ),
+                                _field(
+                                    "Early-period vol adjustment",
+                                    DashboardState.pre_settlement_vol_scale,
+                                    DashboardState.set_pre_settlement_vol_scale,
+                                    step="0.05",
+                                    min="0.5",
+                                    max="2",
+                                    placeholder="Disabled",
+                                ),
+                                _field(
+                                    "Early-period cutoff (s)",
+                                    DashboardState.pre_settlement_until,
+                                    DashboardState.set_pre_settlement_until,
+                                    step="1",
+                                    min="1",
+                                    max="900",
                                 ),
                             ),
                             class_name="control-grid",
