@@ -5,9 +5,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from data import account_state
-from engine import streamer
-from feeds.state import tick_store
+from data import account_state, streamer
+from data import benchmark as tick_store
 
 
 def test_official_ticks_keep_one_second_history_and_reject_bad_values(monkeypatch):
@@ -124,7 +123,7 @@ def test_rest_response_cannot_overwrite_concurrent_stream_update(account, monkey
         return []
 
     monkeypatch.setattr(account_state, "get_positions", positions)
-    monkeypatch.setattr(account_state, "get_open_orders", lambda: [])
+    monkeypatch.setattr(account_state, "get_open_orders", list)
     account_state.refresh()
     assert account_state._positions["TEST"]["position_fp"] == "3.00"
     assert account_state._needs_snapshot
@@ -381,7 +380,7 @@ def test_recovery_paginates_and_cancellation_routes_by_market(monkeypatch):
 
 def test_reconnect_to_same_market_always_resubscribes(monkeypatch):
     async def check():
-        from engine.orderbook import OrderBook
+        from data.orderbook import OrderBook
 
         ws = FakeSocket()
 
@@ -430,45 +429,10 @@ def test_reconnect_to_same_market_always_resubscribes(monkeypatch):
 
 
 def test_manual_fee_lookup_does_not_guess_after_invalidation(monkeypatch):
-    from engine.trading import runtime
+    from trading import runtime
 
     monkeypatch.setattr(
         runtime, "get_live_market_info", lambda: {"fee_policy": {"ready": False}}
     )
     with pytest.raises(RuntimeError, match="fee policy"):
         runtime._current_fee_multiplier()
-
-
-def test_research_capture_is_opt_in_and_horizon_bounded(monkeypatch, tmp_path):
-    path = tmp_path / "capture.jsonl"
-    close = 130.0
-    monkeypatch.setattr(streamer, "RESEARCH_CAPTURE_PATH", str(path))
-    monkeypatch.setattr(streamer, "RESEARCH_CAPTURE_HORIZON_SEC", 45.0)
-    monkeypatch.setattr(
-        streamer,
-        "_live_market_info",
-        {
-            "ticker": "TEST",
-            "close_time": datetime.fromtimestamp(close, UTC).isoformat(),
-        },
-    )
-
-    streamer._capture_research_event(
-        "cfbenchmarks_value_5hz",
-        {"value_usd": "100.0"},
-        seq=7,
-        receipt_ts=80.0,
-    )
-    assert not path.exists()
-
-    streamer._capture_research_event(
-        "orderbook_delta",
-        {"market_ticker": "TEST", "side": "yes", "price_dollars": "0.50"},
-        seq=8,
-        receipt_ts=100.0,
-    )
-    row = json.loads(path.read_text().strip())
-    assert row["kind"] == "orderbook_delta"
-    assert row["market_ticker"] == "TEST"
-    assert row["seconds_to_expiry"] == pytest.approx(30.0)
-    assert row["seq"] == 8

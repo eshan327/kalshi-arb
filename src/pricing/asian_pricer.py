@@ -59,10 +59,7 @@ def _levy_moment_match_m2(
     M1 = S0
     # t_years is sorted. In the covariance matrix min(t_i, t_j), the
     # value t_k appears 2(n-k)-1 times, so the double sum is exactly O(n).
-    acc = sum(
-        (2 * (n - k) - 1) * math.exp(sig2 * t_years[k])
-        for k in range(n)
-    )
+    acc = sum((2 * (n - k) - 1) * math.exp(sig2 * t_years[k]) for k in range(n))
     M2 = (S0 * S0) / (n * n) * acc
     return M1, M2
 
@@ -93,7 +90,7 @@ def prob_levy_tw_binary(
     P(TWAP > K) before the settlement window starts: lognormal matched to first two moments
     of the discrete arithmetic average (Levy-style).
     """
-    if strike <= 0 or S0 <= 0 or sigma_annual <= 0:
+    if strike <= 0 or S0 <= 0 or sigma_annual < 0:
         return AsianBinaryPricerResult(
             p_model=0.5,
             regime="levy_tw",
@@ -138,6 +135,7 @@ def prob_collapsed_variance_binary(
     k: int,
     mean_known_samples: float | None,
     mu_fwd: float,
+    seconds_to_expiry: float | None = None,
 ) -> AsianBinaryPricerResult:
     """
     Inside the settlement window:
@@ -145,7 +143,7 @@ def prob_collapsed_variance_binary(
     The observed sum is fixed. The remaining arithmetic average is matched to a
     lognormal distribution using the covariance of every remaining one-second fix.
     """
-    if strike <= 0 or sigma_annual <= 0 or mu_fwd <= 0:
+    if strike <= 0 or sigma_annual < 0 or mu_fwd <= 0:
         return AsianBinaryPricerResult(
             p_model=0.5,
             regime="collapsed",
@@ -168,20 +166,13 @@ def prob_collapsed_variance_binary(
         )
 
     rem = n - k
-    if rem <= 0:
-        p = 1.0 if (mean_known_samples or mu_fwd) >= strike else 0.0
-        return AsianBinaryPricerResult(
-            p_model=_clamp_prob(p),
-            regime="terminal",
-            sigma_eff=0.0,
-            detail={"k": k, "n": n},
-        )
-
     known_sum = (
         k * float(mean_known_samples) if k and mean_known_samples is not None else 0.0
     )
     required_future_avg = (n * strike - known_sum) / rem
-    remaining_times = [second / SECONDS_PER_YEAR for second in range(1, rem + 1)]
+    remaining_times = _fixing_times_years(
+        rem if seconds_to_expiry is None else seconds_to_expiry, rem
+    )
     mean, second_moment = _levy_moment_match_m2(mu_fwd, sigma_annual, remaining_times)
     p, sigma_eff, d2 = _prob_moment_matched_lognormal(
         mean, second_moment, required_future_avg

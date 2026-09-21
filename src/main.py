@@ -1,7 +1,7 @@
 import argparse
 import os
 
-from core.market_profiles import (
+from core.markets import (
     get_supported_assets,
     normalize_asset,
 )

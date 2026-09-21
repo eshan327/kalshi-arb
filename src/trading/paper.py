@@ -5,8 +5,8 @@ import uuid
 from threading import RLock
 from typing import Any
 
-from engine.orderbook import OrderBook
-from engine.trading.fees import taker_fee_cents_per_contract
+from data.orderbook import OrderBook
+from trading.fees import taker_fee_cents_per_contract
 
 
 class PaperAccount:

@@ -12,7 +12,6 @@ from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from core.asset_context import get_active_market_profile
 from core.config import (
     EXECUTION_EVENTS_PATH,
     EXECUTION_LOOP_INTERVAL_SEC,
@@ -20,7 +19,11 @@ from core.config import (
     KALSHI_ENV,
     PAPER_STARTING_CASH_CENTS,
 )
-from core.market_metadata import extract_settlement_decimals, extract_suggested_strike
+from core.markets import (
+    extract_settlement_decimals,
+    extract_suggested_strike,
+    get_active_market_profile,
+)
 from data import account_state
 from data.kalshi_rest import get_market
 from data.kalshi_trading import (
@@ -30,32 +33,29 @@ from data.kalshi_trading import (
     place_limit_order,
     set_live_order_entry_enabled,
 )
-from engine.live_pricing import compute_live_pricing_snapshot
-from engine.streamer import (
-    _capture_research_event,
+from data.streamer import (
     get_live_book,
     get_live_market_info,
     get_market_result,
     get_stream_epoch,
 )
-from engine.trading.fees import taker_fee_cents_per_contract
-from engine.trading.models import TradeSignal
-from engine.trading.paper import PaperAccount
-from engine.trading.settings import get_trading_settings_model
-from engine.trading.strategy import (
+from data.updates import bind, changed
+from pricing.live_pricing import compute_live_pricing_snapshot
+from trading.fees import taker_fee_cents_per_contract
+from trading.paper import PaperAccount
+from trading.settings import get_trading_settings_model
+from trading.strategy import (
     MAX_ORDERBOOK_AGE_SECONDS,
-    apply_pricing_overrides,
+    TradeSignal,
     build_trade_signal,
     slipped_price_cents,
 )
-from engine.updates import bind, changed
 
 logger = logging.getLogger(__name__)
 _NY = ZoneInfo("America/New_York")
 
 _lock = RLock()
 _execution_lock = RLock()
-_market_started_ts = time.time()
 _execution_mode: str | None = None
 _armed = False
 _last_submission_ts = 0.0
@@ -85,7 +85,7 @@ def _decimal(value: Any) -> Decimal:
     try:
         return Decimal(str(value or "0"))
     except (InvalidOperation, ValueError):
-        return Decimal("0")
+        return Decimal(0)
 
 
 def _set_state(**kwargs: Any) -> None:
@@ -127,7 +127,7 @@ def _position_payload(raw: dict[str, Any]) -> dict[str, Any] | None:
         return None
     contracts = abs(signed)
     exposure_cents = abs(_decimal(raw.get("market_exposure_dollars"))) * 100
-    avg_entry = exposure_cents / contracts if contracts else Decimal("0")
+    avg_entry = exposure_cents / contracts if contracts else Decimal(0)
     return {
         "market_ticker": str(raw.get("ticker") or ""),
         "side": "yes" if signed > 0 else "no",
@@ -278,10 +278,6 @@ def _position_inputs(
     return 0, contracts, None, avg_entry
 
 
-def _signal_payload(signal: TradeSignal | None) -> dict[str, Any] | None:
-    return asdict(signal) if signal is not None else None
-
-
 def _monologue(
     signal: TradeSignal | None,
     reason: str,
@@ -348,54 +344,25 @@ def _place_order(
     market_ticker: str,
     side: str,
     action: str,
-    count: int | float,
+    count: float,
     price_cents: float,
     fee_multiplier: float = 1.0,
     allow_when_stopped: bool = False,
 ) -> dict[str, Any]:
-    base_capture = {
-        "execution_mode": execution_mode,
-        "market_ticker": market_ticker,
-        "side": side,
-        "action": action,
-        "count": count,
-        "price_cents": price_cents,
-    }
     if execution_mode == "paper":
-        _capture_research_event(
-            "order_submission",
-            {**base_capture, "client_order_id": None},
-            receipt_ts=time.time(),
+        return _paper_account.place_ioc(
+            market_ticker=market_ticker,
+            side=side,
+            action=action,
+            count=int(count),
+            price_cents=price_cents,
+            book=get_live_book(),
+            fee_multiplier=fee_multiplier,
         )
-        try:
-            result = _paper_account.place_ioc(
-                market_ticker=market_ticker,
-                side=side,
-                action=action,
-                count=int(count),
-                price_cents=price_cents,
-                book=get_live_book(),
-                fee_multiplier=fee_multiplier,
-            )
-        except Exception as exc:
-            _capture_research_event(
-                "order_error",
-                {**base_capture, "client_order_id": None, "error": str(exc)},
-                receipt_ts=time.time(),
-            )
-            raise
-        _capture_research_event(
-            "order_result",
-            {**base_capture, "client_order_id": None, "result": result},
-            receipt_ts=time.time(),
-        )
-        return result
     if execution_mode != "live":
         raise RuntimeError("Choose Sim or Live first.")
     client_id = _client_order_id()
     account_state.begin_order(client_id, market_ticker)
-    capture = {**base_capture, "client_order_id": client_id}
-    _capture_research_event("order_submission", capture, receipt_ts=time.time())
     try:
         result = place_limit_order(
             market_ticker=market_ticker,
@@ -406,24 +373,14 @@ def _place_order(
             client_order_id=client_id,
             allow_when_stopped=allow_when_stopped,
         )
-        _capture_research_event(
-            "order_result",
-            {**capture, "result": result},
-            receipt_ts=time.time(),
-        )
         account_state.order_response(result["order"])
         return result
     except Exception as exc:
-        _capture_research_event(
-            "order_error",
-            {
-                **capture,
-                "error": str(exc),
-                "http_status": getattr(exc, "status", None),
-            },
-            receipt_ts=time.time(),
-        )
-        if isinstance(exc, KalshiAPIError) and 400 <= exc.status < 500 and exc.status not in {408, 409}:
+        if (
+            isinstance(exc, KalshiAPIError)
+            and 400 <= exc.status < 500
+            and exc.status not in {408, 409}
+        ):
             account_state.order_rejected()
         raise
     # Timeouts/5xx remain pending until the existing client ID is reconciled.
@@ -807,7 +764,7 @@ async def _refresh_paper_account(
 
 
 def _active_market() -> bool:
-    from engine.market_stream.discovery import parse_iso8601_to_epoch
+    from core.markets import parse_iso8601_to_epoch
 
     market = get_live_market_info()
     close = parse_iso8601_to_epoch(market.get("close_time"))
@@ -846,7 +803,7 @@ def _enforce_daily_loss_lock(
 
 
 async def _run_single_cycle() -> None:
-    global _last_market_ticker, _last_submission_ts, _market_started_ts
+    global _last_market_ticker, _last_submission_ts
 
     cycle_ts = time.time()
     settings = get_trading_settings_model()
@@ -899,26 +856,22 @@ async def _run_single_cycle() -> None:
                 cancel_bot_orders, market_ticker=_last_market_ticker
             )
         _last_submission_ts = 0.0
-        _market_started_ts = cycle_ts
         _set_state(last_order=None)
     _last_market_ticker = market_ticker
 
     strike = extract_suggested_strike(market_info)
     profile = get_active_market_profile()
-    pricing = apply_pricing_overrides(
-        compute_live_pricing_snapshot(
-            strike=strike,
-            market_ticker=market_ticker,
-            close_time_iso=(
-                market_info.get("close_time")
-                if isinstance(market_info.get("close_time"), str)
-                else None
-            ),
-            settlement_decimals=extract_settlement_decimals(
-                market_info, profile.settlement_decimals_fallback
-            ),
+    pricing = compute_live_pricing_snapshot(
+        strike=strike,
+        market_ticker=market_ticker,
+        close_time_iso=(
+            market_info.get("close_time")
+            if isinstance(market_info.get("close_time"), str)
+            else None
         ),
-        settings,
+        settlement_decimals=extract_settlement_decimals(
+            market_info, profile.settlement_decimals_fallback
+        ),
     )
 
     fee_policy = market_info.get("fee_policy") or {"ready": False}
@@ -938,7 +891,6 @@ async def _run_single_cycle() -> None:
         open_no_contracts=no_qty,
         open_yes_avg_entry_cents=yes_avg,
         open_no_avg_entry_cents=no_avg,
-        runtime_uptime_seconds=cycle_ts - _market_started_ts,
         available_cash_cents=max(
             0,
             int(account.get("available_cash_cents", account["cash_cents"]))
@@ -949,20 +901,8 @@ async def _run_single_cycle() -> None:
         price_ranges=market_info.get("price_ranges"),
         now_ts=cycle_ts,
     )
-    signal_payload = _signal_payload(signal)
+    signal_payload = asdict(signal) if signal is not None else None
     monologue = _monologue(signal, reason, pricing, diagnostics)
-    _capture_research_event(
-        "strategy_decision",
-        {
-            "reason": reason,
-            "pricing": pricing,
-            "diagnostics": diagnostics,
-            "signal": signal_payload,
-            "execution_mode": execution_mode,
-            "armed": _is_armed(),
-        },
-        receipt_ts=cycle_ts,
-    )
 
     common_state = {
         "current_market_ticker": market_ticker,

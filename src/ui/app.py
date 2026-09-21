@@ -10,19 +10,15 @@ from typing import Any
 
 import reflex as rx
 
-from core.auth import verify_dashboard_token
+from core.auth import get_dashboard_token, get_ws_auth_headers, verify_dashboard_token
 from core.config import ORDERBOOK_VIEW_DEPTH
-from engine.market_stream.discovery import parse_iso8601_to_epoch
-from engine.trading.runtime import control_trading, submit_manual_order
-from engine.trading.settings import reset_trading_settings, update_trading_settings
-from engine.trading.strategy import MAX_ORDERBOOK_AGE_SECONDS
-from engine.vol_estimator import realized_vol_from_price_points
-from feeds.state.tick_store import get_index_ticks
-from ui.services.dashboard_state_service import build_dashboard_state_payload
-from ui.services.runtime_services import (
-    run_background_services,
-    validate_auth_or_exit,
-)
+from data.account_state import run_account_sync
+from data.benchmark import get_index_ticks
+from data.streamer import run_market_streamer
+from trading.runtime import control_trading, run_trading_loop, submit_manual_order
+from trading.settings import reset_trading_settings, update_trading_settings
+from trading.strategy import MAX_ORDERBOOK_AGE_SECONDS
+from ui.state import build_dashboard_state_payload
 
 _PLOT_WINDOW_SECONDS = 4 * 60
 
@@ -82,7 +78,6 @@ def _decision_state(monologue: dict[str, Any], armed: bool) -> tuple[str, str, s
         "at_target_allocation": "Target allocation reached.",
         "edge_below_threshold": "Edge is below the required minimum.",
         "entry_cutoff": "Too close to settlement.",
-        "entry_window_not_started": "Waiting for the configured late-entry window.",
         "fee_policy_unavailable": "Fee schedule unavailable.",
         "insufficient_available_cash": "Available cash is below reserve.",
         "invalid_model_probability": "Model probability unavailable.",
@@ -92,7 +87,7 @@ def _decision_state(monologue: dict[str, Any], armed: bool) -> tuple[str, str, s
         "position_notional_cap_reached": "Position cap reached.",
         "pricing_not_ready": "Model is warming up.",
         "stale_orderbook": "Order book is stale.",
-        "volatility_fallback": "Waiting for realized volatility.",
+        "volatility_unavailable": "Waiting for a complete 300-second benchmark history.",
     }.get(
         reason,
         reason.replace("_", " ").capitalize() + "."
@@ -277,20 +272,6 @@ def index_history(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def market_open_time(close_time_iso: str | None) -> float | None:
-    close_ts = parse_iso8601_to_epoch(close_time_iso)
-    return None if close_ts is None else close_ts - 15 * 60
-
-
-def market_ticks(
-    rows: list[dict[str, Any]], close_time_iso: str | None
-) -> list[dict[str, Any]]:
-    market_open_ts = market_open_time(close_time_iso)
-    if market_open_ts is None:
-        return rows
-    return [row for row in rows if (_number(row.get("ts")) or 0) >= market_open_ts]
-
-
 class DashboardState(rx.State):
     operator_token = ""
     auth_error = ""
@@ -362,7 +343,6 @@ class DashboardState(rx.State):
     no_quote: dict[str, str] = {"bid": "—", "ask": "—", "spread": "—"}
 
     min_edge = "2"
-    deterministic_edge = "0.5"
     kelly_fraction = "0.25"
     position_fraction = "5"
     max_order = "10"
@@ -371,14 +351,6 @@ class DashboardState(rx.State):
     cash_buffer = "25"
     cooldown = "5"
     slippage = "1"
-    vol_override = ""
-    vol_source = "realized"
-    vol_scale = "1"
-    vol_window = "300"
-    pre_settlement_vol_window = ""
-    pre_settlement_vol_scale = ""
-    pre_settlement_until = "60"
-    entry_start = ""
     entry_cutoff = "20"
     settings_status = ""
     manual_side = "yes"
@@ -386,7 +358,6 @@ class DashboardState(rx.State):
     manual_count = "1"
     manual_status = ""
 
-    _snapshot: dict[str, Any] = {}
     _settings: dict[str, Any] = {}
     _history_market = ""
     _mode_touched = False
@@ -394,7 +365,6 @@ class DashboardState(rx.State):
     def _apply_settings(self, settings: dict[str, Any]) -> None:
         self._settings = settings
         self.min_edge = str(settings.get("min_edge_cents", 2))
-        self.deterministic_edge = str(settings.get("deterministic_min_edge_cents", 0.5))
         self.kelly_fraction = str(settings.get("kelly_fraction", 0.25))
         self.position_fraction = str(
             float(settings.get("max_position_fraction", 0.05)) * 100
@@ -405,27 +375,12 @@ class DashboardState(rx.State):
         self.cash_buffer = str(settings.get("cash_buffer_usd", 25))
         self.cooldown = str(settings.get("cooldown_seconds", 5))
         self.slippage = str(settings.get("slippage_ticks", 1))
-        override = settings.get("volatility_override")
-        self.vol_override = "" if override is None else str(override)
-        self.vol_source = "realized" if override is None else "override"
-        self.vol_scale = str(settings.get("volatility_scale", 1))
-        self.vol_window = str(settings.get("volatility_window_seconds", 300))
-        pre_window = settings.get("pre_settlement_volatility_window_seconds")
-        self.pre_settlement_vol_window = "" if pre_window is None else str(pre_window)
-        pre_scale = settings.get("pre_settlement_volatility_scale")
-        self.pre_settlement_vol_scale = "" if pre_scale is None else str(pre_scale)
-        self.pre_settlement_until = str(
-            settings.get("pre_settlement_until_seconds", 60)
-        )
-        entry_start = settings.get("entry_start_seconds_to_expiry")
-        self.entry_start = "" if entry_start is None else str(entry_start)
         self.entry_cutoff = str(settings.get("entry_cutoff_seconds_to_expiry", 20))
 
     def _refresh(self) -> None:
         self._require_operator()
         try:
             state = build_dashboard_state_payload(depth=ORDERBOOK_VIEW_DEPTH)
-            self._snapshot = state
             runtime = state.get("trading_runtime") or {}
             risk = runtime.get("daily_risk") or {}
             account = state.get("account") or runtime.get("account") or {}
@@ -435,12 +390,6 @@ class DashboardState(rx.State):
             index = state.get("index") or {}
             ticks = get_index_ticks(limit=4000)
             history_ticks = recent_rows(ticks, _PLOT_WINDOW_SECONDS)
-            sigma_fit = realized_vol_from_price_points(
-                [(tick["ts"], tick["price"]) for tick in ticks],
-                window_seconds=300,
-                min_samples=8,
-            )
-
             self.asset = str(state.get("asset_display") or state.get("asset") or "—")
             self.index_label = str(state.get("index_label") or "Index")
             market_ticker = str(
@@ -504,15 +453,7 @@ class DashboardState(rx.State):
             self.spot = _price(spot)
             self.strike = _price(strike)
             self.expires = _duration(pricing.get("seconds_to_expiry"))
-            effective_sigma = _number(
-                pricing.get("sigma_override_applied")
-                if pricing.get("sigma_override_applied") is not None
-                else pricing.get("sigma_annual")
-            )
-            self.volatility = _percent(
-                effective_sigma if effective_sigma is not None else sigma_fit,
-                ratio=True,
-            )
+            self.volatility = _percent(pricing.get("sigma_annual"), ratio=True)
             self.probability = (
                 _percent(pricing.get("p_model_pct")) if pricing.get("ready") else "—"
             )
@@ -525,7 +466,7 @@ class DashboardState(rx.State):
                 else (state.get("trading_settings") or {}).get("min_edge_cents")
             )
             self.lean = str(monologue.get("lean_side") or "—").upper()
-            fee_policy = runtime.get("fee_policy") or {}
+            fee_policy = (state.get("market_info") or {}).get("fee_policy") or {}
             fee_multiplier = _number(fee_policy.get("fee_multiplier"))
             self.fee_policy = (
                 f"{str(fee_policy.get('fee_type') or '').replace('_', ' ').title()} · {fee_multiplier:g}×"
@@ -657,7 +598,6 @@ class DashboardState(rx.State):
             settings, errors = update_trading_settings(
                 {
                     "min_edge_cents": float(self.min_edge),
-                    "deterministic_min_edge_cents": float(self.deterministic_edge),
                     "kelly_fraction": float(self.kelly_fraction),
                     "max_position_fraction": float(self.position_fraction) / 100,
                     "max_order_contracts": int(self.max_order),
@@ -666,23 +606,6 @@ class DashboardState(rx.State):
                     "cash_buffer_usd": float(self.cash_buffer),
                     "cooldown_seconds": int(self.cooldown),
                     "slippage_ticks": int(self.slippage),
-                    "volatility_override": self.vol_override or None,
-                    "volatility_scale": float(self.vol_scale),
-                    "volatility_window_seconds": float(self.vol_window),
-                    "pre_settlement_volatility_window_seconds": (
-                        float(self.pre_settlement_vol_window)
-                        if self.pre_settlement_vol_window
-                        else None
-                    ),
-                    "pre_settlement_volatility_scale": (
-                        float(self.pre_settlement_vol_scale)
-                        if self.pre_settlement_vol_scale
-                        else None
-                    ),
-                    "pre_settlement_until_seconds": float(self.pre_settlement_until),
-                    "entry_start_seconds_to_expiry": (
-                        float(self.entry_start) if self.entry_start else None
-                    ),
                     "entry_cutoff_seconds_to_expiry": float(self.entry_cutoff),
                 }
             )
@@ -702,10 +625,6 @@ class DashboardState(rx.State):
     @rx.event
     def set_min_edge(self, value: str) -> None:
         self.min_edge = value
-
-    @rx.event
-    def set_deterministic_edge(self, value: str) -> None:
-        self.deterministic_edge = value
 
     @rx.event
     def set_kelly_fraction(self, value: str) -> None:
@@ -738,40 +657,6 @@ class DashboardState(rx.State):
     @rx.event
     def set_slippage(self, value: str) -> None:
         self.slippage = value
-
-    @rx.event
-    def set_vol_override(self, value: str) -> None:
-        self.vol_override = value
-
-    @rx.event
-    def set_vol_source(self, value: str) -> None:
-        self.vol_source = value
-        if value == "realized":
-            self.vol_override = ""
-
-    @rx.event
-    def set_vol_scale(self, value: str) -> None:
-        self.vol_scale = value
-
-    @rx.event
-    def set_vol_window(self, value: str) -> None:
-        self.vol_window = value
-
-    @rx.event
-    def set_pre_settlement_vol_window(self, value: str) -> None:
-        self.pre_settlement_vol_window = value
-
-    @rx.event
-    def set_pre_settlement_vol_scale(self, value: str) -> None:
-        self.pre_settlement_vol_scale = value
-
-    @rx.event
-    def set_pre_settlement_until(self, value: str) -> None:
-        self.pre_settlement_until = value
-
-    @rx.event
-    def set_entry_start(self, value: str) -> None:
-        self.entry_start = value
 
     @rx.event
     def set_entry_cutoff(self, value: str) -> None:
@@ -932,6 +817,24 @@ def _chart_header(title: str, *readings: rx.Component) -> rx.Component:
     )
 
 
+def _confirm(trigger, title: str, description: str, label: str, action) -> rx.Component:
+    return rx.alert_dialog.root(
+        rx.alert_dialog.trigger(trigger),
+        rx.alert_dialog.content(
+            rx.alert_dialog.title(title),
+            rx.alert_dialog.description(description),
+            rx.hstack(
+                rx.alert_dialog.cancel(rx.button("Cancel", class_name="button")),
+                rx.alert_dialog.action(
+                    rx.button(label, on_click=action, class_name="button danger")
+                ),
+                class_name="dialog-actions",
+            ),
+            class_name="confirm-dialog",
+        ),
+    )
+
+
 def _dashboard() -> rx.Component:
     return rx.box(
         rx.moment(
@@ -1026,34 +929,16 @@ def _dashboard() -> rx.Component:
                     ),
                     rx.cond(
                         DashboardState.selected_mode == "live",
-                        rx.alert_dialog.root(
-                            rx.alert_dialog.trigger(
-                                rx.button(
-                                    "Start Live",
-                                    disabled=DashboardState.armed,
-                                    class_name="button danger",
-                                )
+                        _confirm(
+                            rx.button(
+                                "Start Live",
+                                disabled=DashboardState.armed,
+                                class_name="button danger",
                             ),
-                            rx.alert_dialog.content(
-                                rx.alert_dialog.title("Start live trading?"),
-                                rx.alert_dialog.description(
-                                    "Real orders can be submitted immediately using the active risk settings."
-                                ),
-                                rx.hstack(
-                                    rx.alert_dialog.cancel(
-                                        rx.button("Cancel", class_name="button")
-                                    ),
-                                    rx.alert_dialog.action(
-                                        rx.button(
-                                            "Start Live",
-                                            on_click=DashboardState.start,
-                                            class_name="button danger",
-                                        )
-                                    ),
-                                    class_name="dialog-actions",
-                                ),
-                                class_name="confirm-dialog",
-                            ),
+                            "Start live trading?",
+                            "Real orders can be submitted immediately using the active risk settings.",
+                            "Start Live",
+                            DashboardState.start,
                         ),
                         rx.button(
                             "Start Sim",
@@ -1068,34 +953,16 @@ def _dashboard() -> rx.Component:
                         disabled=~DashboardState.armed,
                         class_name="button stop",
                     ),
-                    rx.alert_dialog.root(
-                        rx.alert_dialog.trigger(
-                            rx.button(
-                                "Flatten",
-                                disabled=~DashboardState.has_position,
-                                class_name="button danger",
-                            )
+                    _confirm(
+                        rx.button(
+                            "Flatten",
+                            disabled=~DashboardState.has_position,
+                            class_name="button danger",
                         ),
-                        rx.alert_dialog.content(
-                            rx.alert_dialog.title("Flatten open position?"),
-                            rx.alert_dialog.description(
-                                "This submits an immediate exit for the current market position."
-                            ),
-                            rx.hstack(
-                                rx.alert_dialog.cancel(
-                                    rx.button("Cancel", class_name="button")
-                                ),
-                                rx.alert_dialog.action(
-                                    rx.button(
-                                        "Flatten position",
-                                        on_click=DashboardState.flatten,
-                                        class_name="button danger",
-                                    )
-                                ),
-                                class_name="dialog-actions",
-                            ),
-                            class_name="confirm-dialog",
-                        ),
+                        "Flatten open position?",
+                        "This submits an immediate exit for the current market position.",
+                        "Flatten position",
+                        DashboardState.flatten,
                     ),
                     class_name="command-bar",
                 ),
@@ -1186,40 +1053,13 @@ def _dashboard() -> rx.Component:
                                 rx.box(
                                     rx.text(
                                         DashboardState.decision,
-                                        class_name=rx.cond(
-                                            DashboardState.decision_tone == "positive",
-                                            "decision-label positive",
-                                            rx.cond(
-                                                DashboardState.decision_tone
-                                                == "danger",
-                                                "decision-label danger",
-                                                rx.cond(
-                                                    DashboardState.decision_tone
-                                                    == "warning",
-                                                    "decision-label warning",
-                                                    "decision-label",
-                                                ),
-                                            ),
-                                        ),
+                                        class_name=f"decision-label {DashboardState.decision_tone}",
                                     ),
                                     rx.text(
                                         DashboardState.decision_reason,
                                         class_name="decision-reason",
                                     ),
-                                    class_name=rx.cond(
-                                        DashboardState.decision_tone == "danger",
-                                        "decision-block danger",
-                                        rx.cond(
-                                            DashboardState.decision_tone == "warning",
-                                            "decision-block warning",
-                                            rx.cond(
-                                                DashboardState.decision_tone
-                                                == "positive",
-                                                "decision-block positive",
-                                                "decision-block",
-                                            ),
-                                        ),
-                                    ),
+                                    class_name=f"decision-block {DashboardState.decision_tone}",
                                 ),
                                 class_name="model-block",
                             ),
@@ -1407,7 +1247,7 @@ def _dashboard() -> rx.Component:
                             rx.box(
                                 rx.heading("High-Touch Trading", as_="h2"),
                                 rx.text(
-                                    "IOC execution and systematic parameters",
+                                    "Execution controls and risk limits",
                                     class_name="status-note",
                                 ),
                             ),
@@ -1472,34 +1312,16 @@ def _dashboard() -> rx.Component:
                             ),
                             rx.cond(
                                 DashboardState.selected_mode == "live",
-                                rx.alert_dialog.root(
-                                    rx.alert_dialog.trigger(
-                                        rx.button(
-                                            "Review live IOC",
-                                            disabled=~DashboardState.armed,
-                                            class_name="button danger ticket-submit",
-                                        )
+                                _confirm(
+                                    rx.button(
+                                        "Review live IOC",
+                                        disabled=~DashboardState.armed,
+                                        class_name="button danger ticket-submit",
                                     ),
-                                    rx.alert_dialog.content(
-                                        rx.alert_dialog.title("Submit live IOC?"),
-                                        rx.alert_dialog.description(
-                                            "This sends a real risk-checked order for the active market. Any unfilled quantity is canceled immediately."
-                                        ),
-                                        rx.hstack(
-                                            rx.alert_dialog.cancel(
-                                                rx.button("Cancel", class_name="button")
-                                            ),
-                                            rx.alert_dialog.action(
-                                                rx.button(
-                                                    "Submit live IOC",
-                                                    on_click=DashboardState.submit_manual,
-                                                    class_name="button danger",
-                                                )
-                                            ),
-                                            class_name="dialog-actions",
-                                        ),
-                                        class_name="confirm-dialog",
-                                    ),
+                                    "Submit live IOC?",
+                                    "This sends a real risk-checked order for the active market. Any unfilled quantity is canceled immediately.",
+                                    "Submit live IOC",
+                                    DashboardState.submit_manual,
                                 ),
                                 rx.button(
                                     "Submit sim IOC",
@@ -1534,29 +1356,12 @@ def _dashboard() -> rx.Component:
                                     max="25",
                                 ),
                                 _field(
-                                    "Locked-outcome edge (¢)",
-                                    DashboardState.deterministic_edge,
-                                    DashboardState.set_deterministic_edge,
-                                    step="0.1",
-                                    min="0",
-                                    max="5",
-                                ),
-                                _field(
                                     "Contracts per order",
                                     DashboardState.max_order,
                                     DashboardState.set_max_order,
                                     step="1",
                                     min="1",
                                     max="25",
-                                ),
-                                _field(
-                                    "Earliest entry horizon (s)",
-                                    DashboardState.entry_start,
-                                    DashboardState.set_entry_start,
-                                    step="1",
-                                    min="20",
-                                    max="900",
-                                    placeholder="Disabled",
                                 ),
                                 _field(
                                     "Entry cutoff before close (s)",
@@ -1626,70 +1431,16 @@ def _dashboard() -> rx.Component:
                                 ),
                             ),
                             _control_group(
-                                "Model",
-                                rx.el.label(
-                                    rx.text("Volatility source"),
-                                    rx.el.select(
-                                        rx.el.option("Realized", value="realized"),
-                                        rx.el.option("Override", value="override"),
-                                        value=DashboardState.vol_source,
-                                        on_change=DashboardState.set_vol_source,
-                                    ),
-                                    class_name="field",
+                                "Baseline model",
+                                rx.text(
+                                    "Official CF spot · 300-second realized volatility · final-minute settlement average.",
+                                    class_name="status-note",
+                                    grid_column="1 / -1",
                                 ),
-                                rx.cond(
-                                    DashboardState.vol_source == "override",
-                                    _field(
-                                        "Override volatility",
-                                        DashboardState.vol_override,
-                                        DashboardState.set_vol_override,
-                                        step="0.01",
-                                        min="0.01",
-                                        max="5",
-                                        placeholder="0.45",
-                                    ),
-                                ),
-                                _field(
-                                    "Realized-vol window (s)",
-                                    DashboardState.vol_window,
-                                    DashboardState.set_vol_window,
-                                    step="30",
-                                    min="30",
-                                    max="3600",
-                                ),
-                                _field(
-                                    "Volatility adjustment",
-                                    DashboardState.vol_scale,
-                                    DashboardState.set_vol_scale,
-                                    step="0.05",
-                                    min="0.5",
-                                    max="2",
-                                ),
-                                _field(
-                                    "Early-period vol window (s)",
-                                    DashboardState.pre_settlement_vol_window,
-                                    DashboardState.set_pre_settlement_vol_window,
-                                    step="30",
-                                    min="30",
-                                    max="3600",
-                                    placeholder="Disabled",
-                                ),
-                                _field(
-                                    "Early-period vol adjustment",
-                                    DashboardState.pre_settlement_vol_scale,
-                                    DashboardState.set_pre_settlement_vol_scale,
-                                    step="0.05",
-                                    min="0.5",
-                                    max="2",
-                                    placeholder="Disabled",
-                                ),
-                                _field(
-                                    "Early-period cutoff (s)",
-                                    DashboardState.pre_settlement_until,
-                                    DashboardState.set_pre_settlement_until,
-                                    step="1",
-                                    min="1",
-                                    max="900",
+                                rx.text(
+                                    "Model experiments belong in historical research.",
+                                    class_name="status-note",
+                                    grid_column="1 / -1",
                                 ),
                             ),
                             class_name="control-grid",
@@ -1755,8 +1506,9 @@ def index() -> rx.Component:
 
 @asynccontextmanager
 async def runtime_lifespan():
-    validate_auth_or_exit()
-    task = asyncio.create_task(run_background_services())
+    get_dashboard_token()
+    get_ws_auth_headers()
+    task = asyncio.gather(run_market_streamer(), run_account_sync(), run_trading_loop())
     try:
         yield
     finally:

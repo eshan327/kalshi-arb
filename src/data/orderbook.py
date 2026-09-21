@@ -19,14 +19,13 @@ class OrderBook:
 
     def __init__(self, market_ticker):
         self.market_ticker = market_ticker
-        self.yes = {}  # {price_cents_int: quantity_float}
+        self.yes = {}  # {price_cents: quantity}
         self.no = {}
         self.expected_seq = None
         self.initialized = False
         self.needs_resync = False
         self.last_update_ts = None
         self.last_verified_ts = None
-        self.qty_epsilon = 1e-6
         self._lock = RLock()
 
     def _normalize_qty(self, qty_value):
@@ -34,38 +33,23 @@ class OrderBook:
         qty = round(float(qty_value), 2)
         if not math.isfinite(qty):
             raise ValueError("Nonfinite quantity")
-        if abs(qty) < self.qty_epsilon:
-            return 0.0
         return qty
 
     @staticmethod
-    def _normalize_price(price_value, *, dollars=None):
-        """Normalizes REST/WS prices to fixed-point cents."""
+    def _normalize_price(price_value):
+        """Convert WebSocket dollar prices to cents."""
         value = float(price_value)
         if not math.isfinite(value):
             raise ValueError("Nonfinite price")
         if value <= 0:
             return None
 
-        cents = (
-            value * 100.0
-            if dollars is True or (dollars is None and value <= 1)
-            else value
-        )
+        cents = value * 100
         if cents >= 100:
             raise ValueError("Price out of range")
         return round(cents, 4)
 
-    @staticmethod
-    def _extract_seq(snapshot_msg):
-        """Extracts sequence from a snapshot payload if present."""
-        for key in ("seq", "sequence"):
-            seq = snapshot_msg.get(key)
-            if isinstance(seq, int):
-                return seq
-        return None
-
-    def _load_levels(self, levels, destination, *, dollars, invert_price=False):
+    def _load_levels(self, levels, destination, *, invert_price=False):
         """Loads [price, qty] levels into a destination side dict."""
         destination.clear()
         for level in levels:
@@ -73,7 +57,7 @@ class OrderBook:
                 continue
             price_raw, qty_raw = level[0], level[1]
             qty = self._normalize_qty(qty_raw)
-            price_cents = self._normalize_price(price_raw, dollars=dollars)
+            price_cents = self._normalize_price(price_raw)
             if qty <= 0:
                 continue
             if price_cents is None:
@@ -97,49 +81,16 @@ class OrderBook:
             for price_cents, qty in top_items
         ]
 
-    def load_rest_snapshot(self, snapshot):
-        """
-        Loads REST snapshot payload into yes/no books.
-        Accepts both {yes,no} and {yes_dollars_fp,no_dollars_fp} structures.
-        Returns snapshot sequence if available, else None.
-        """
-        with self._lock:
-            yes_levels = snapshot.get("yes")
-            no_levels = snapshot.get("no")
-
-            dollars = yes_levels is None or no_levels is None
-            if dollars:
-                yes_levels = snapshot.get("yes_dollars_fp", [])
-                no_levels = snapshot.get("no_dollars_fp", [])
-
-            self._load_levels(yes_levels or [], self.yes, dollars=dollars)
-            self._load_levels(no_levels or [], self.no, dollars=dollars)
-
-            self.initialized = True
-            self.needs_resync = self._is_crossed_unlocked()
-            self.last_update_ts = time.time()
-
-            seq = self._extract_seq(snapshot)
-            logger.info(
-                "REST snapshot loaded: %s yes, %s no | seq=%s",
-                len(self.yes),
-                len(self.no),
-                seq if seq is not None else "n/a",
-            )
-            return seq
-
     def load_ws_snapshot(self, snapshot, seq):
         """Load a unified-YES-price WebSocket snapshot at its exact sequence."""
         with self._lock:
             self._load_levels(
                 snapshot.get("yes_dollars_fp", []),
                 self.yes,
-                dollars=True,
             )
             self._load_levels(
                 snapshot.get("no_dollars_fp", []),
                 self.no,
-                dollars=True,
                 invert_price=True,
             )
             self.expected_seq = seq + 1 if isinstance(seq, int) else None
@@ -156,7 +107,7 @@ class OrderBook:
         """
         with self._lock:
             side_str = msg.get("side")
-            price = self._normalize_price(msg.get("price_dollars"), dollars=True)
+            price = self._normalize_price(msg.get("price_dollars"))
             delta = self._normalize_qty(msg.get("delta_fp", 0))
 
             if price is None:

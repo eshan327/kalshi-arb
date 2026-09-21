@@ -29,8 +29,8 @@ p { margin: 0; }
 .topbar-title, .state-strip, .command-bar, .button-row, .controls-summary, .probability-row, .panel-header, .panel-meta, .book-title, .book-summary, .position-line, .chart-header, .chart-readings { display: flex; align-items: center; }
 .topbar-title { display: flex; align-items: center; padding: 0 18px; border-right: 1px solid var(--line); }
 .page h1 { margin: 0; color: var(--amber); font: 720 17px/1.15 var(--sans) !important; letter-spacing: .025em; }
-.page h2 { margin: 0; font: 680 17px/1.2 var(--sans) !important; letter-spacing: .025em; text-transform: uppercase; }
-.page h3 { margin: 0; font: 700 12px/1.2 var(--sans) !important; letter-spacing: .06em; text-transform: uppercase; }
+.page h2 { margin: 0; color: var(--text); font: 680 17px/1.2 var(--sans) !important; letter-spacing: .025em; text-transform: uppercase; }
+.page h3 { margin: 0; color: var(--text); font: 700 12px/1.2 var(--sans) !important; letter-spacing: .06em; text-transform: uppercase; }
 .state-strip { justify-content: stretch; min-width: 0; overflow: hidden; }
 .terminal-cell { display: grid; flex: 1 1 auto; min-width: 86px; align-content: center; gap: 7px; padding: 8px 13px; border-right: 1px solid var(--line); }
 .terminal-cell:nth-child(2) { flex: 1.8 1 210px; }

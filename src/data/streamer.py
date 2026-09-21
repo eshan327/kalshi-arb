@@ -7,11 +7,15 @@ import random
 import threading
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 
-from core.asset_context import get_active_market_profile
-from core.config import RESEARCH_CAPTURE_HORIZON_SEC, RESEARCH_CAPTURE_PATH
+from core.markets import get_active_market_profile, parse_iso8601_to_epoch
 from data import account_state
+from data.benchmark import (
+    ingest_index,
+    reset_tick_state,
+    seed_history,
+    set_index_connected,
+)
 from data.kalshi_rest import (
     get_event,
     get_open_markets,
@@ -20,17 +24,9 @@ from data.kalshi_rest import (
     invalidate_metadata,
 )
 from data.kalshi_ws import command, connect, request_orderbook_snapshot
-from engine.live_pricing import reset_live_pricing_for_new_market
-from engine.market_stream.discovery import parse_iso8601_to_epoch, select_target_market
-from engine.market_stream.display import top_levels_for_display
-from engine.orderbook import OrderBook
-from engine.updates import notify
-from feeds.state.tick_store import (
-    ingest_index,
-    reset_tick_state,
-    seed_history,
-    set_index_connected,
-)
+from data.orderbook import OrderBook
+from data.updates import notify
+from pricing.live_pricing import reset_live_pricing_for_new_market
 
 logger = logging.getLogger(__name__)
 live_book: OrderBook | None = None
@@ -38,46 +34,6 @@ _live_market_info: dict = {}
 _live_market_info_lock = threading.Lock()
 _market_results: dict[str, dict] = {}
 _stream_epoch = 0
-
-
-def _capture_research_event(
-    kind: str,
-    msg: dict,
-    *,
-    seq: int | None = None,
-    sid: int | None = None,
-    receipt_ts: float | None = None,
-) -> None:
-    """Persist raw late-market public data for forward microstructure research."""
-    if not RESEARCH_CAPTURE_PATH:
-        return
-    market = get_live_market_info()
-    ticker = str(market.get("ticker") or "")
-    close_ts = parse_iso8601_to_epoch(market.get("close_time"))
-    now = time.time() if receipt_ts is None else float(receipt_ts)
-    if not ticker or close_ts is None:
-        return
-    seconds_to_expiry = close_ts - now
-    if not 0 <= seconds_to_expiry <= RESEARCH_CAPTURE_HORIZON_SEC:
-        return
-
-    event = {
-        "receipt_ts": now,
-        "kind": str(kind),
-        "seq": seq,
-        "sid": sid,
-        "market_ticker": ticker,
-        "close_ts": close_ts,
-        "seconds_to_expiry": seconds_to_expiry,
-        "payload": msg,
-    }
-    try:
-        path = Path(RESEARCH_CAPTURE_PATH)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, separators=(",", ":")) + "\n")
-    except OSError as exc:  # pragma: no cover - research capture is best effort
-        logger.warning("Could not persist research market-data event: %s", exc)
 
 
 def get_live_book():
@@ -130,7 +86,9 @@ def get_live_orderbook_snapshot(depth: int = 10) -> dict:
         expected_seq=book.expected_seq,
         last_update_ts=book.last_verified_ts or book.last_update_ts,
         **{
-            key: top_levels_for_display(value, depth)
+            key: ([level for level in value if 1 <= level[0] <= 99] or value)[
+                : max(0, depth)
+            ]
             for key, value in zip(
                 ("yes_bids", "yes_asks", "no_bids", "no_asks"), levels
             )
@@ -150,7 +108,9 @@ def _discover(profile) -> dict:
         ]
         if not markets:
             return {}
-        market = dict(select_target_market(markets))
+        market = dict(
+            min(markets, key=lambda m: parse_iso8601_to_epoch(m["close_time"]))
+        )
     series = get_series(profile.kalshi_series_ticker)
     event = market.get("_event_fee_override")
     if event is None:
@@ -250,7 +210,6 @@ async def _session(profile) -> None:
             "fill",
             "market_positions",
             "user_orders",
-            "trade",
         }
 
         async def subscribe(channel, **params):
@@ -283,7 +242,7 @@ async def _session(profile) -> None:
                     live_book = None
                     snapshot_deadline = None
                     _set_live_market_info(profile)
-                    for channel in ("orderbook_delta", "trade"):
+                    for channel in ("orderbook_delta",):
                         if channel in subscriptions:
                             await command(
                                 ws,
@@ -303,7 +262,7 @@ async def _session(profile) -> None:
                             ticker = selected["ticker"]
                             _set_live_market_info(profile, selected)
                             if live_book is None or live_book.market_ticker != ticker:
-                                for channel in ("orderbook_delta", "trade"):
+                                for channel in ("orderbook_delta",):
                                     if channel in subscriptions:
                                         await command(
                                             ws,
@@ -317,8 +276,6 @@ async def _session(profile) -> None:
                                     market_tickers=[ticker],
                                     use_yes_price=True,
                                 )
-                                if RESEARCH_CAPTURE_PATH:
-                                    await subscribe("trade", market_tickers=[ticker])
                                 snapshot_deadline = time.monotonic() + 5
                             next_discovery = time.monotonic() + 300
                             notify()
@@ -383,26 +340,6 @@ async def _session(profile) -> None:
                         continue
                     raise ConnectionError(f"Kalshi stream error: {msg}")
                 sid, seq = data.get("sid"), data.get("seq")
-                if kind in {
-                    "orderbook_snapshot",
-                    "orderbook_delta",
-                    "cfbenchmarks_value",
-                    "cfbenchmarks_value_5hz",
-                    "market_lifecycle_v2",
-                    "event_lifecycle",
-                    "event_fee_update",
-                    "trade",
-                    "fill",
-                    "market_position",
-                    "user_order",
-                }:
-                    _capture_research_event(
-                        kind,
-                        msg,
-                        seq=seq if isinstance(seq, int) else None,
-                        sid=sid if isinstance(sid, int) else None,
-                        receipt_ts=time.time(),
-                    )
                 if (
                     kind not in {"orderbook_snapshot", "orderbook_delta"}
                     and isinstance(sid, int)
@@ -452,7 +389,7 @@ async def _session(profile) -> None:
                 elif kind in {"fill", "market_position", "user_order"}:
                     account_state.ingest(kind, msg)
                     if kind == "fill":
-                        from engine.trading.runtime import _emit_event
+                        from trading.runtime import _emit_event
 
                         _emit_event("fill", "exchange_fill", fill=msg)
                 # An unchanged sequenced book remains valid while the session is alive.

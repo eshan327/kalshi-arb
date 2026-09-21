@@ -61,12 +61,3 @@ EXECUTION_EVENTS_PATH = os.getenv(
 EXECUTION_STATE_PATH = os.getenv(
     "KALSHI_EXECUTION_STATE_PATH", ".runtime/trading_state.json"
 )
-
-
-# Optional forward-research capture. When set, raw public market-data events within
-# the configured seconds-to-expiry horizon are appended as JSONL for later
-# microstructure replay. Leave the path empty to disable capture.
-RESEARCH_CAPTURE_PATH = os.getenv("KALSHI_RESEARCH_CAPTURE_PATH", "").strip()
-RESEARCH_CAPTURE_HORIZON_SEC = max(
-    1.0, _env_float("KALSHI_RESEARCH_CAPTURE_HORIZON_SEC", 45.0)
-)

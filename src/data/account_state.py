@@ -16,7 +16,7 @@ from data.kalshi_trading import (
     get_open_orders,
     get_positions,
 )
-from engine.updates import notify
+from data.updates import notify
 
 logger = logging.getLogger(__name__)
 _lock = RLock()

@@ -4,10 +4,12 @@ import math
 import time
 from typing import Any
 
-from core.market_profiles import MarketProfile
-from engine.asian_pricer import prob_collapsed_variance_binary, prob_levy_tw_binary
-from engine.market_stream.discovery import parse_iso8601_to_epoch
-from engine.vol_estimator import realized_vol_from_price_points
+from core.markets import MarketProfile, parse_iso8601_to_epoch
+from pricing.asian_pricer import prob_collapsed_variance_binary, prob_levy_tw_binary
+from pricing.vol_estimator import (
+    BASELINE_VOL_WINDOW_SECONDS,
+    realized_vol_from_price_points,
+)
 
 
 def compute_pricing_snapshot(
@@ -22,9 +24,7 @@ def compute_pricing_snapshot(
     settlement_decimals: int | None = None,
     index_state: dict | None = None,
     now_ts: float | None = None,
-    vol_window_seconds: float = 300.0,
-    pre_settlement_vol_window_seconds: float | None = None,
-    pre_settlement_until_seconds: float = 60.0,
+    vol_window_seconds: float = BASELINE_VOL_WINDOW_SECONDS,
 ) -> dict[str, Any]:
     """Compute the live/replay pricing snapshot from information available at now_ts.
 
@@ -55,7 +55,7 @@ def compute_pricing_snapshot(
         seconds_to_expiry=None if close is None else max(0.0, close - now),
         p_model=None,
         p_model_pct=None,
-        vol_is_fallback=True,
+        sigma_annual=None,
         twap_samples_observed=0,
         twap_partial_avg=None,
         twap_partial_avg_raw=None,
@@ -66,7 +66,15 @@ def compute_pricing_snapshot(
     def fail(reason):
         return {**base, "reason": reason}
 
-    if close is None or strike is None or not math.isfinite(strike):
+    if (
+        close is None
+        or strike is None
+        or not math.isfinite(strike)
+        or strike <= 0
+        or not math.isfinite(now)
+        or not isinstance(decimals, int)
+        or not 0 <= decimals <= 12
+    ):
         return fail("missing_market_terms")
     if feed_asset != profile.asset or not state.get("connected"):
         return fail("index_disconnected")
@@ -81,27 +89,15 @@ def compute_pricing_snapshot(
 
     seconds = close - now
     points = [(t["ts"], t["price"]) for t in ticks]
-    vol_window = max(1.0, float(vol_window_seconds))
-    vol_window_policy = "base"
-    if (
-        pre_settlement_vol_window_seconds is not None
-        and seconds > max(0.0, float(pre_settlement_until_seconds))
-    ):
-        vol_window = max(1.0, float(pre_settlement_vol_window_seconds))
-        vol_window_policy = "pre_settlement"
     sigma = realized_vol_from_price_points(
-        points, window_seconds=vol_window, now_ts=now, min_samples=8
+        points, window_seconds=vol_window_seconds, now_ts=now
     )
-    sigma_samples = sum(1 for ts, _ in points if now - vol_window <= ts <= now)
-    fallback = sigma is None or sigma <= 0
-    sigma = profile.fallback_sigma_annual if fallback else sigma
+    if sigma is None:
+        return fail("volatility_unavailable")
     model_strike = strike - 0.5 * 10**-decimals
     base.update(
         sigma_annual=sigma,
-        sigma_samples=sigma_samples,
-        vol_window_seconds=vol_window,
-        vol_window_policy=vol_window_policy,
-        vol_is_fallback=fallback,
+        vol_window_seconds=vol_window_seconds,
         model_strike_usd=model_strike,
         rounding_half_unit=0.5 * 10**-decimals,
     )
@@ -121,13 +117,18 @@ def compute_pricing_snapshot(
                 return fail("stale_settlement_average")
             count, mean = avg["count"], avg["value"]
             if (
-                not 0 <= count <= min(window, elapsed)
+                not isinstance(count, int)
+                or not 0 <= count <= min(window, elapsed)
+                or not isinstance(mean, (int, float))
+                or not math.isfinite(mean)
+                or mean <= 0
+                or abs(avg["end"] - (avg["start"] + count)) > 0.001
                 or avg["end"] < avg["start"]
                 or avg["end"] > close
                 or avg["end"] > now + 0.001
             ):
                 return fail("invalid_settlement_average")
-            if count < max(0, elapsed - 1):
+            if count != elapsed:
                 return fail("incomplete_settlement_average")
         base.update(
             twap_samples_observed=count,
@@ -139,7 +140,13 @@ def compute_pricing_snapshot(
                 window - count
             )
         result = prob_collapsed_variance_binary(
-            model_strike, sigma, n=window, k=count, mean_known_samples=mean, mu_fwd=spot
+            model_strike,
+            sigma,
+            n=window,
+            k=count,
+            mean_known_samples=mean,
+            mu_fwd=spot,
+            seconds_to_expiry=seconds,
         )
     base.update(
         p_model=result.p_model,

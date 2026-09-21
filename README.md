@@ -1,378 +1,131 @@
-# Kalshi 15-minute crypto trader
+# Kalshi baseline research
 
-Fee-aware systematic trading for Kalshi's single-asset 15-minute crypto
-markets, with optional discretionary overrides.
+A settlement-aware probability baseline for Kalshi 15-minute crypto markets, shared
+by historical evaluation and a guarded live/paper trader. This is a research
+foundation; the baseline and trading policy are not validated alpha.
 
-## Quick start
+## Run
 
 ```bash
-uv sync
+uv sync --group dev
 cp .env.example .env
-# Generate a token, then set KALSHI_DASHBOARD_TOKEN in .env:
-python -c 'import secrets; print(secrets.token_urlsafe(32))'
-uv run --env-file .env src/main.py bitcoin
+# Configure your Kalshi key and a random dashboard token of at least 32 characters.
+uv run --env-file .env src/main.py BTC
 ```
 
-Open [http://127.0.0.1:3000](http://127.0.0.1:3000), enter the configured
-dashboard token, choose **Sim**, then click **Start**
-or **Start Live**. The process starts stopped; live start and live manual orders
-require confirmation.
+Open [localhost:3000](http://127.0.0.1:3000), authenticate, and select **Sim** or
+**Live**. The engine starts stopped. Live orders use the environment in `.env`;
+Sim uses an ephemeral paper account against the live top of book. Stop disables
+entry; Flatten submits a reduce-only IOC. Paper fills omit network latency.
 
-Supported assets: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `ADA`, `NEAR`,
-`BCH`, `HYPE`, `TON`, and `ZEC`. Names such as `bitcoin` and `solana` also work.
+Both modes require authenticated market feeds. Settings cover net edge, bounded
+fractional Kelly sizing, order/position/cash limits, daily loss, cooldown, slippage,
+and the entry cutoff. The dashboard shows baseline state without model overrides.
+
+## The frozen baseline
+
+`src/pricing/baseline.py:compute_pricing_snapshot` consumes only official CF spot,
+one-second benchmark history, market strike/rounding terms, known settlement fixes,
+and an explicit evaluation timestamp. Live calls enter through `live_pricing.py`.
+
+- Volatility is the annualized sample standard deviation of one-second log returns
+  over the last 300 seconds (`vol_estimator.py`). A complete exact-second grid is
+  required. Missing history means no forecast; zero observed variance stays zero.
+  The window is a baseline convention, not an optimized parameter.
+- `asian_pricer.py` assumes zero-drift GBM and moment-matches the arithmetic average
+  to a lognormal distribution. Before settlement it prices all 60 future fixes;
+  inside the final minute it conditions on the known sum and actual remaining fix
+  times, including fractional seconds.
+- The fixing interval is `(close - 60s, close]`. Published rounding digits shift the
+  comparison threshold by half a rounding unit. Profile rounding defaults apply
+  when the exchange omits that metadata. Kalshi's final result supplies the label.
+- The 5 Hz stream updates spot only. The 1 Hz stream owns volatility and settlement
+  averages. Replay uses exact-second publications; it never floors 200 ms ticks.
+
+The baseline has no quote inputs, calibration, volatility scaling, momentum,
+entry-timing forecast adjustment, or learned features.
+
+## Generate a dataset
 
 ```bash
-uv run --env-file .env src/main.py ETH
-uv run --env-file .env src/main.py SOL
+uv run --env-file .env src/backtest.py BTC \
+  --max-markets 100 --output-dir output/baseline
+
+# Reproduce the same rows without network access or credentials:
+uv run src/backtest.py BTC \
+  --input-dir output/baseline --output-dir output/replay
 ```
 
-If the asset is omitted, `KALSHI_MARKET_ASSET` is used, then BTC.
+Fetching requires production credentials (`KALSHI_ENV=prod`). Recent and archived
+markets/trades are merged and paginated; CF history is fetched once per hour.
+Source data and outputs are:
 
-## Credentials and modes
+| File | Purpose |
+| --- | --- |
+| `source.json` | Market terms, outcomes, public trades, retrieval time |
+| `cf_ticks.csv` | Published CF prices and original timestamps |
+| `observations.csv` | One baseline row per market/horizon, with train/holdout labels |
+| `summary.json` | Brier/log loss, paired market comparisons, rejections, conventions |
 
-Both modes need a Kalshi API key because the live orderbook WebSocket is
-authenticated. Configure the demo or production key selected by `KALSHI_ENV` in
-`.env`.
+Rows include spot, strike/rounding threshold, volatility, known-fix count, partial
+average, required remaining average, and recent market-trade probability with its
+age. Missing or stale market comparisons stay null. Metrics compare model and
+market on exactly the same paired rows. The last 20% of market close-time groups
+form the holdout; a market's horizons never cross the split. At least two valid
+close-time groups are required. Missing CF windows fail or appear as rejected
+observations; nothing is interpolated or fabricated.
 
-The orderbook uses Kalshi's sequenced WebSocket snapshot and deltas. A sequence
-gap pauses book consumers while the same subscription requests a fresh snapshot;
-only a failed recovery reconnects the socket.
+Public trades are probability proxies, not executable quotes. Historical vendor
+timestamps cannot reconstruct feed latency, historical revisions, or sequenced L2.
+This harness reports forecast accuracy, not simulated fills or profitability.
 
-### Sim and live
+For future work, reuse `pricing_at`/`evaluate_market` to reconstruct state, freeze
+the exported dataset and split, develop candidates on training rows, and use
+`score_predictions` for the same held-out scoring. Keep candidates in research;
+changing ingestion or execution is unnecessary. Do not tune on the holdout.
 
-**Sim** never calls Kalshi's order-entry API. It:
+## Code map and safety
 
-- starts with an ephemeral $1,000 balance by default;
-- simulates IOC fills against displayed live top-of-book price and quantity;
-- applies the active Kalshi fee multiplier;
-- marks open positions to the live bid;
-- supports automated exits, discretionary orders, pause, and flatten; and
-- waits for Kalshi's finalized outcome before settling expired positions.
+| Location under `src/` | Responsibility |
+| --- | --- |
+| `core/` | Configuration, authentication, market profiles and terms |
+| `data/` | REST/WebSocket adapters, benchmark history, orderbook, account state |
+| `pricing/` | Baseline forecast, Asian math, realized volatility, live snapshot cache |
+| `trading/` | Fee-aware decisions, limits, execution and paper accounting |
+| `backtest.py` | Historical reconstruction, dataset export and chronological scoring |
+| `ui/` | Dashboard and its read-only snapshot |
 
-Set `KALSHI_PAPER_STARTING_CASH_CENTS` to change the starting balance. The paper
-account resets when the process restarts.
-
-**Start Live** sends IOC orders to the Kalshi environment selected by `KALSHI_ENV`:
-`demo` uses Kalshi demo and `prod` uses production. **Stop** disables order
-entry. Switching from live to paper also cancels any of this bot's live orders.
-
-## Operating workflow
-
-The engine always submits model entries and exits while it is running. The
-dashboard's open-by-default **High-Touch Trading** panel contains model/risk
-settings and an IOC ticket for discretionary overrides.
-
-Book, benchmark, and account changes wake a serialized strategy evaluation;
-bursts coalesce for 50ms. A one-second timer advances expiry and risk when feeds
-are quiet. New buys retain the configured five-second cooldown. Unresolved
-live orders block further submissions until reconciliation completes.
-
-Choose Buy or Sell/Reduce, YES or NO, and a contract count in **Click Order**.
-These discretionary orders use the active market, top of book, configured
-slippage, order and position limits, cash buffer, reduce-only checks, and
-daily-loss guard. They do not disable the systematic engine.
-
-### Stop and flatten
-
-- **Stop** stops the engine. In live mode it also cancels this bot's resting
-  orders.
-- **Flatten Active Market** disarms, cancels, and submits a reduce-only IOC for
-  the active position.
-- A daily-loss breach disarms and attempts to flatten the active market. The
-  lock persists until the next New York trading day.
-
-## How the strategy decides
-
-The model estimates the probability that Kalshi's final-minute settlement
-average finishes at or above the rounded contract strike. Prices and accumulated
-final-minute fixes come directly from Kalshi's CF Benchmarks feed; there is no
-synthetic index or basis adjustment. Before taking liquidity, model value must clear:
-
-- the current marketable IOC price;
-- the current Kalshi taker fee;
-- configured slippage; and
-- the configured minimum net edge.
-
-The desired outcome-side position is the smallest of several ceilings:
-
-- configurable fractional Kelly on current account equity;
-- a percentage-of-equity cap for the active market;
-- available cash after the cash buffer;
-- max order contracts;
-- displayed top-of-book quantity; and
-- an absolute position-dollar circuit breaker.
-
-The systematic strategy is deliberately taker-only and never posts resting
-quotes.
-
-Entries require an initialized, sequence-aligned book on a live stream, fresh
-official benchmark data, non-fallback volatility, a known fee policy, synchronized
-account state, and at least 20 seconds to expiry. A mathematically locked outcome may
-trade inside the cutoff through its lower-edge path. Rolling index and
-volatility history are available immediately after rollover; contract-specific
-book state resets.
-
-Existing positions exit when the executable bid, after slippage and fees,
-exceeds model fair value by the configured edge. Entry gates never block this
-edge-reversal exit.
-
-## Dashboard map
-
-- **Autotrader strip:** sim/live mode, session change in NAV, start, stop, and flatten.
-- **Positions:** cash, average cost, bid mark, gross mark-to-market P&L, and daily loss capacity.
-- **Market & Model:** index, model/market probability, edge, pricing, and
-  realized-volatility fit.
-- **Order book:** live YES/NO bids, asks, and depth.
-- **High-Touch Trading:** model/risk parameters and manual orders.
-
-Contract-specific model state resets at each 15-minute boundary. The socket,
-official price history, rolling averages, and realized volatility carry across
-markets; account state, daily P&L, risk locks, and settlement tracking continue.
-The chart displays Kalshi's trailing 60-second average, while the final-minute
-pricer uses Kalshi's separate quarter-hour accumulation.
-
-## Kalshi data ownership
-
-One authenticated socket stays open across market rotation:
-
-- `orderbook_delta`: snapshot and sequenced depth, with in-band gap recovery.
-- `cfbenchmarks_value`: 1 Hz reference values, trailing average, and final-minute
-  accumulation. Its sample count and window boundaries are used directly.
-- `cfbenchmarks_value_5hz`: faster spot updates for BTC, ETH, SOL, XRP, and DOGE.
-  These ticks do not enter the 1 Hz history or count as settlement fixes.
-- `market_lifecycle_v2`: pauses, terms, close-time changes, settlement, and fee
-  override invalidation.
-- `fill`, `market_positions`, `user_orders`: live account and execution updates.
-- `trade`: subscribed only when forward research capture is enabled, to preserve
-  public trade price, size, taker direction, block-trade status, and exchange
-  timestamps alongside the L2 book.
-
-REST has distinct jobs: order entry/cancellation, initial market metadata,
-initial/reconnect portfolio snapshots, and balance refresh (there is no balance
-channel). Balances refresh every five seconds or after account changes.
-After an order, streamed fills and positions satisfy position reconciliation;
-REST recovers missing notifications or ambiguous HTTP outcomes. Unknown orders
-are looked up by the original client ID and never blindly resubmitted. An
-unresolved result keeps live entry blocked.
-
-A single `/cfbenchmarks/values?maxResolution=PER_SECOND` read at connection time
-seeds recent price history for volatility. If unavailable, the live stream warms
-up naturally. It never supplies a fabricated settlement average. Missing or
-stale final-minute accumulation pauses model trading.
-
-Series/event fee metadata refreshes at most every five minutes and after relevant
-stream events. Paper settlement uses lifecycle results, with a slow REST recovery
-check for missed notifications. Full books and ordinary positions are not polled.
-
-Live sizing uses the active market's `exchange_index` balance allocation;
-cancellations include the market ticker for automatic shard routing. Missing
-shard allocation fails closed. No collateral transfers or automatic rebalancing
-are performed by this process.
-
-The exchange adapters, synthetic benchmark calculation, proxy anchoring, and
-local settlement forward-fill machinery have been removed. Strategy probability,
-volatility estimation, fee-aware sizing, paper simulation, and local risk limits
-remain application responsibilities. RFQ, multivariate, Pyth, and order-group
-channels are not subscribed because this strategy does not use those products.
-
-### API references checked September 20, 2026
-
-- [Kalshi changelog](https://docs.kalshi.com/changelog)
-- [CF 1 Hz and averaging semantics](https://docs.kalshi.com/websockets/cfbenchmarks-value)
-- [CF 5 Hz](https://docs.kalshi.com/websockets/cfbenchmarks-value-5hz)
-- [CF REST passthrough](https://docs.kalshi.com/cfbenchmarks/rest-passthrough)
-- [Historical data](https://docs.kalshi.com/getting_started/historical_data)
-- [Historical market candlesticks](https://docs.kalshi.com/api-reference/historical/get-historical-market-candlesticks)
-- [Exchange sharding](https://docs.kalshi.com/getting_started/exchange_sharding)
-- [REST replication watermark](https://docs.kalshi.com/api-reference/exchange/get-user-data-timestamp)
-- [SDK guidance](https://docs.kalshi.com/sdks/overview): Kalshi warns SDKs can lag;
-  this project uses the direct API with existing dependencies.
-
-
-## Historical backtesting
-
-Historical research is split into two layers because model calibration and
-execution simulation have different data requirements.
-
-### Model calibration and coarse quote screen
+Sequence gaps invalidate the book until recovery. Stale/disconnected feeds,
+unknown fees, unsynchronized accounts, and ambiguous submissions block trading.
+IOC sell orders are reduce-only; unresolved live orders reconcile by the existing
+client ID instead of being resent. Daily-loss state and execution audit events
+remain separate from research. Reserve cash and sizing use the worst permitted
+IOC price including fees. Default risk/edge parameters have not been optimized.
 
 ```bash
-KALSHI_ENV=prod uv run --env-file .env src/research/backtest.py BTC \
-  --max-markets 100 \
-  --min-edge-cents 2 \
-  --vol-window-seconds 300
+uv run --group dev pytest -q
 ```
 
-This backtester merges recent settled markets from the live tier with older
-markets from Kalshi's historical tier. CF's `/history/values` endpoint returns
-the published historical tick stream and does not expose the `maxResolution`
-selector used by the recent-value endpoints. For high-frequency RTIs, replay
-therefore uses every historical tick as the production fast spot while filtering
-the exact second-boundary publications for realized volatility and settlement
-fixes. That reproduces the live separation between
-`cfbenchmarks_value_5hz` and `cfbenchmarks_value` without fabricating 1 Hz
-fixes from subsecond observations.
+## Local files
 
-Probability calibration is evaluated at fixed horizons including 60, 45, 30,
-20, 10, 5, and 1 seconds before close. That is independent of Kalshi quote
-candles, so the collapsed final-minute Asian model is actually tested. For
-subsecond-capable assets, the report also compares the production fast-spot
-probability with the probability obtained from the latest one-second spot.
+- `.venv/` is the Python environment managed by `uv sync`; keep it while working.
+- `.runtime/web/` is Reflex's generated frontend and npm dependencies;
+  `.runtime/states/` holds dashboard sessions. Reflex recreates both.
+- `.runtime/trading_state.json` preserves the live daily-loss guard across restarts;
+  its `.paper` sibling is separate. `execution_events.jsonl` is the trading audit.
+  Do not clear these as build caches.
+- `output/baseline/` holds the saved research dataset. New runs use `--output-dir`.
+- `assets/dashboard.css` and `rxconfig.py` are Reflex inputs. `reflex.lock/` pins
+  frontend dependencies; `uv.lock` pins Python dependencies. Commit both locks.
+- `.github/workflows/` runs offline safety checks and an optional manual dataset export.
 
-Outputs are written to `output/backtests/`:
+Old simulation reports, superseded research notes and abandoned package trees are
+removed. Tests focus on pricing/replay correctness, feed recovery, authentication
+and trading safety. Test runs disable pytest's disk cache; use
+`PYTHONDONTWRITEBYTECODE=1 uv run pytest -q` to avoid Python bytecode too.
 
-- `calibration.csv`: fixed-horizon model probabilities, outcomes, Brier/log
-  loss, known-fix count, and fast-vs-1Hz spot comparison.
-- `quote_observations.csv`: model value versus one-minute Kalshi quote closes.
-- `market_relative.csv`: at each fixed horizon, compares the model with the
-  latest actual non-block Kalshi trade no more than five seconds old. Each market
-  contributes at most once per horizon, avoiding activity-weighted scoring.
-- `tape_observations.csv`: optional full trade-tape scoring when `--full-tape`
-  is requested. It is intentionally off by default because highly active markets
-  otherwise dominate the sample.
-- `trades.csv`: a deliberately simple first-signal-per-market alpha screen.
-- `summary.json`: aggregate/horizon calibration, equal-weight model-versus-market
-  proper scores, and the coarse quote screen.
-
-Use `--vol-window-seconds` and `--volatility-scale` to research alternatives
-without maintaining a second pricing implementation. The dedicated
-`src/research/model_sweep.py` evaluates a small window/scale grid with a
-chronological development/holdout split so a parameter choice is selected on
-older markets and judged on newer markets.
-
-The live/replay `TradingSettings` also support opt-in research policies without
-changing default production behavior:
-
-- `volatility_window_seconds`: realized-volatility lookback (default 300 s).
-- `pre_settlement_volatility_window_seconds` and
-  `pre_settlement_volatility_scale`: optional longer/more-conservative variance
-  policy while time to expiry is above `pre_settlement_until_seconds`.
-- `entry_start_seconds_to_expiry`: optional earliest systematic-entry horizon.
-- `entry_cutoff_seconds_to_expiry`: ordinary-entry cutoff before close (default
-  20 s). Inventory exits and mathematically locked outcomes keep their existing
-  special handling.
-
-Together these can isolate a forward-research window without changing defaults.
-For example, start=30 and cutoff=1 tests ordinary entries from 30→1 seconds;
-start=30 with the default cutoff tests only 30→20 seconds.
-
-These controls are exposed in the dashboard and replayed by
-`strategy_backtest.py`. They exist to test the authenticated findings rather
-than hard-code a parameter choice from one historical sample.
-
-### Production taker-strategy replay
-
-For the closest replay possible from Kalshi's public historical quote data:
-
-```bash
-KALSHI_ENV=prod uv run --env-file .env src/research/strategy_backtest.py BTC \
-  --max-markets 100 \
-  --starting-cash-cents 100000 \
-  --fee-multiplier 1.0 \
-  --assumed-top-size 10
-```
-
-The replay calls the production `apply_pricing_overrides()` and
-`build_trade_signal()` functions directly and executes their IOC signals
-through the same `PaperAccount` path used by Sim. It preserves the minimum-edge
-and deterministic-edge gates, 20-second entry cutoff, taker-fee logic,
-price-range-aware slippage limits, Kelly sizing, bankroll/position/cash caps,
-max-order clips, buy cooldown, edge-reversal exits, daily-loss lock/flatten, and
-settlement accounting. Market rotation resets the cooldown exactly as the live
-runtime does.
-
-Every `TradingSettings` field can be replayed from a JSON file:
-
-```bash
-KALSHI_ENV=prod uv run --env-file .env src/research/strategy_backtest.py BTC \
-  --settings-json research-settings.json
-```
-
-`--min-edge-cents` can still be supplied separately and overrides the JSON
-value.
-
-Outputs are written to `output/strategy_backtests/`:
-
-- `decisions.csv`: replayed production-strategy decisions and account state.
-- `fills.csv`: simulated IOC fills, including edge-reversal sells.
-- `markets.csv`: per-market realized P&L and turnover.
-- `summary.json`: portfolio results and an explicit list of exact versus
-  approximated replay behavior.
-
-Kalshi only archives quote candles at one-minute minimum resolution, not the
-sequenced historical L2 book. The execution replay therefore constructs the
-correct YES/NO top of book from each candle close and uses
-`--assumed-top-size` only for otherwise unobservable displayed quantity. A
-hypothetical fill consumes that assumed liquidity, and the replay permits at
-most one new buy per archived minute rather than assuming the quote persisted
-through repeated five-second cooldowns. This makes the P&L replay deliberately
-conservative, but it still cannot recover latency, queue position, sub-minute
-quote changes, historical pause events, exact shard cash, or historical event
-fee overrides. Those require recording the live sequenced book.
-
-Both research tools require production Kalshi credentials for CF Benchmarks
-history. The passthrough is entitlement-controlled; the backtest fails rather
-than substituting another crypto price source when official CF history is
-unavailable.
-
-### Forward sub-minute execution research
-
-Public historical candles cannot establish whether the apparent final-seconds
-model advantage was actually IOC-fillable. The live streamer can therefore
-optionally record raw sequenced market data near expiry:
-
-```bash
-KALSHI_RESEARCH_CAPTURE_PATH=.runtime/research_market_data.jsonl
-KALSHI_RESEARCH_CAPTURE_HORIZON_SEC=45
-```
-
-When enabled, the process appends orderbook snapshots/deltas, public trades,
-CF 1 Hz and 5 Hz updates, lifecycle/account execution messages, exact local order
-submission/result/error timestamps, and the production strategy's decision
-snapshots during the configured late-market horizon. Records include
-receipt time, subscription/sequence identifiers when present, active market,
-close time, seconds to expiry, and the original payload. Capture is disabled by
-default and does not alter trading decisions.
-
-Analyze a capture with:
-
-```bash
-uv run src/research/capture_analysis.py .runtime/research_market_data.jsonl
-```
-
-This writes `output/live_capture/decisions.csv`,
-`output/live_capture/public_trades.csv`, `output/live_capture/orders.csv`, and
-`summary.json`, including horizon coverage, non-block trade flow, signal/reason
-counts, local order-response and first-fill latency, and detected sequence gaps. It deliberately
-does not equate a model signal with an executable fill.
-
-For the dated empirical conclusions from the authenticated BTC research suite,
-see [Historical research findings — 2026-09-20](docs/historical_research_2026-09-20.md).
-
-## Default controls
-
-- Minimum taker edge: 2¢ per contract
-- Optional earliest-entry horizon: disabled
-- Ordinary-entry cutoff: 20 seconds
-- Realized-volatility window: 300 seconds
-- Optional early-period volatility policy: disabled
-- Locked-outcome edge: 0.5¢ per contract
-- Kelly fraction: 0.25
-- Active-market bankroll cap: 5%
-- Max order: 10 contracts
-- Absolute position circuit breaker: $50 per outcome side
-- Max daily equity loss: $10
-- Cash buffer: $25
-- Entry cooldown: 5 seconds
-- Decision wakeup: market/account events, with a 1-second clock fallback
-- IOC tolerance: 1 exchange tick
-
-Settings are process-local. Trading events are appended to
-`.runtime/execution_events.jsonl`; the paper and live daily-risk states are kept
-separate under `.runtime/`.
-
-## Tests
-
-```bash
-uv run --with pytest pytest -q
-```
+API references: [historical data](https://docs.kalshi.com/api-reference/historical/get-historical-cutoff-timestamps),
+[CF REST history](https://docs.kalshi.com/cfbenchmarks/rest-passthrough),
+[1 Hz and settlement averages](https://docs.kalshi.com/websockets/cfbenchmarks-value),
+[5 Hz spot](https://docs.kalshi.com/websockets/cfbenchmarks-value-5hz),
+[WebSockets](https://docs.kalshi.com/websockets).

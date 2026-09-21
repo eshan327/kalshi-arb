@@ -4,7 +4,7 @@ import time
 from threading import RLock
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.config import KALSHI_ENV
 
@@ -13,7 +13,6 @@ class TradingSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     min_edge_cents: float = Field(default=2.0, ge=0.5, le=25.0)
-    deterministic_min_edge_cents: float = Field(default=0.5, ge=0.0, le=5.0)
     kelly_fraction: float = Field(default=0.25, ge=0.01, le=0.5)
     max_position_fraction: float = Field(default=0.05, ge=0.005, le=0.25)
     max_position_usd: float = Field(default=50.0, ge=1.0, le=50.0)
@@ -22,35 +21,7 @@ class TradingSettings(BaseModel):
     cash_buffer_usd: float = Field(default=25.0, ge=0.0, le=10_000.0)
     cooldown_seconds: int = Field(default=5, ge=1, le=900)
     slippage_ticks: int = Field(default=1, ge=0, le=5)
-    volatility_override: float | None = Field(default=None, ge=0.01, le=5.0)
-    volatility_scale: float = Field(default=1.0, ge=0.5, le=2.0)
-    volatility_window_seconds: float = Field(default=300.0, ge=30.0, le=3600.0)
-    pre_settlement_volatility_window_seconds: float | None = Field(
-        default=None, ge=30.0, le=3600.0
-    )
-    pre_settlement_volatility_scale: float | None = Field(
-        default=None, ge=0.5, le=2.0
-    )
-    pre_settlement_until_seconds: float = Field(default=60.0, ge=1.0, le=900.0)
-    entry_start_seconds_to_expiry: float | None = Field(
-        default=None, ge=1.0, le=900.0
-    )
     entry_cutoff_seconds_to_expiry: float = Field(default=20.0, ge=0.0, le=60.0)
-
-    @field_validator(
-        "volatility_override",
-        "pre_settlement_volatility_window_seconds",
-        "pre_settlement_volatility_scale",
-        "entry_start_seconds_to_expiry",
-        mode="before",
-    )
-    @classmethod
-    def normalize_optional_float(cls, value: Any) -> Any:
-        if value is None or (
-            isinstance(value, str) and value.strip().lower() in {"", "null"}
-        ):
-            return None
-        return value
 
 
 _DEFAULT_SETTINGS = TradingSettings()

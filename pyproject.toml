@@ -1,7 +1,7 @@
 [project]
 name = "kalshi-arb"
 version = "0.1.0"
-description = "Live and paper Kalshi 15-minute crypto algorithmic trader"
+description = "Settlement-aware Kalshi baseline, historical research, and guarded execution"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,3 +11,10 @@ dependencies = [
     "requests>=2.32.5",
     "websockets>=16.0",
 ]
+
+[dependency-groups]
+dev = ["pytest>=9.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-p no:cacheprovider"

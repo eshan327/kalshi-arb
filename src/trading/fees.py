@@ -39,13 +39,3 @@ def kelly_fraction_binary(*, p_win: float, cost_cents: float) -> float:
     c = max(0.01, min(99.99, float(cost_cents)))
     odds = (100.0 - c) / c
     return max(0.0, p - ((1.0 - p) / odds))
-
-
-def expected_value_cents(
-    *, p_win: float, price_cents: float, fee_multiplier: float = 1.0
-) -> float:
-    return (
-        max(0.0, min(1.0, float(p_win))) * 100.0
-        - float(price_cents)
-        - taker_fee_cents_per_contract(price_cents, fee_multiplier=fee_multiplier)
-    )

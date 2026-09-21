@@ -2,9 +2,14 @@ from datetime import UTC, datetime
 
 import pytest
 
-from core.market_profiles import get_market_profile
-from engine.asian_pricer import prob_collapsed_variance_binary
-from engine.pricing import pipeline
+from core.markets import (
+    extract_settlement_decimals,
+    extract_suggested_strike,
+    get_market_profile,
+)
+from pricing import baseline as pipeline
+from pricing import live_pricing
+from pricing.asian_pricer import prob_collapsed_variance_binary
 
 
 def test_final_minute_probability_is_price_scale_invariant_and_equality_is_yes() -> (
@@ -39,7 +44,7 @@ def test_official_price_is_not_basis_adjusted(monkeypatch):
         profile=get_market_profile("BTC"),
         feed_asset="BTC",
         spot=95.16,
-        ticks=[{"ts": 1200.0, "price": 95.16}],
+        ticks=[{"ts": t, "price": 95.16 + (t % 2) * 0.01} for t in range(900, 1201)],
         strike=100.03,
         market_ticker="TEST",
         close_time_iso=datetime.fromtimestamp(2000, UTC).isoformat(),
@@ -56,7 +61,7 @@ def test_final_minute_uses_server_sample_count_and_mean(monkeypatch):
         profile=get_market_profile("BTC"),
         feed_asset="BTC",
         spot=100.0,
-        ticks=[{"ts": 1970.0, "price": 100.0}],
+        ticks=[{"ts": t, "price": 100.0 + (t % 2) * 0.01} for t in range(1670, 1971)],
         strike=100.0,
         market_ticker="TEST",
         close_time_iso=datetime.fromtimestamp(2000, UTC).isoformat(),
@@ -85,7 +90,7 @@ def test_final_minute_uses_server_sample_count_and_mean(monkeypatch):
     kwargs["index_state"]["final_average"]["count"] = 12
     assert (
         pipeline.compute_pricing_snapshot(**kwargs)["reason"]
-        == "incomplete_settlement_average"
+        == "invalid_settlement_average"
     )
     kwargs["index_state"]["final_average"]["count"] = 60
     assert (
@@ -96,49 +101,126 @@ def test_final_minute_uses_server_sample_count_and_mean(monkeypatch):
     assert pipeline.compute_pricing_snapshot(**kwargs)["reason"] == "index_disconnected"
 
 
-def test_horizon_aware_volatility_window_switches_before_settlement() -> None:
-    now = 1_000.0
-    ticks = [
-        {"ts": now - i, "price": 100.0 + (0.02 if i % 2 else -0.02)}
-        for i in range(700)
-    ]
-    common = dict(
+def test_volatility_excludes_future_and_subsecond_data_and_rejects_gaps():
+    from pricing.vol_estimator import realized_vol_from_price_points
+
+    points = [(float(t), 100 + (t % 2) * 0.01) for t in range(700, 1001)]
+    expected = realized_vol_from_price_points(points, now_ts=1000)
+    assert expected > 0
+    assert (
+        realized_vol_from_price_points(
+            list(reversed(points)) + [(1001, 10000), (999.8, 10000)], now_ts=1000
+        )
+        == expected
+    )
+    assert realized_vol_from_price_points(points[1:], now_ts=1000) is None
+    assert (
+        realized_vol_from_price_points([(t, 100) for t, _ in points], now_ts=1000) == 0
+    )
+    with pytest.raises(ValueError, match="Conflicting"):
+        realized_vol_from_price_points(points + [(999, 101)], now_ts=1000)
+
+
+def test_conditional_fixing_times_use_actual_fractional_clock():
+    import math
+
+    from pricing.asian_pricer import SECONDS_PER_YEAR
+
+    # One remaining fix: the approximation is the exact one-step GBM probability.
+    result = prob_collapsed_variance_binary(
+        strike=100.01,
+        sigma_annual=0.5,
+        n=60,
+        k=59,
+        mean_known_samples=100,
+        mu_fwd=100,
+        seconds_to_expiry=0.2,
+    )
+    required = 60 * 100.01 - 59 * 100
+    sigma = 0.5 * math.sqrt(0.2 / SECONDS_PER_YEAR)
+    d2 = (math.log(100 / required) - 0.5 * sigma * sigma) / sigma
+    expected = 0.5 * (1 + math.erf(d2 / math.sqrt(2)))
+    assert result.p_model == pytest.approx(max(1e-12, expected), abs=1e-10)
+
+
+def test_baseline_fails_without_history_instead_of_inventing_volatility():
+    result = pipeline.compute_pricing_snapshot(
         profile=get_market_profile("BTC"),
         feed_asset="BTC",
-        spot=100.0,
-        ticks=ticks,
-        strike=100.0,
+        spot=100,
+        ticks=[],
+        strike=100,
         market_ticker="TEST",
-        settlement_decimals=2,
-        index_state={"connected": True, "timestamp": now},
-        now_ts=now,
-        vol_window_seconds=300,
-        pre_settlement_vol_window_seconds=600,
-        pre_settlement_until_seconds=60,
+        close_time_iso=datetime.fromtimestamp(2000, UTC).isoformat(),
+        index_state={"connected": True, "timestamp": 1000},
+        now_ts=1000,
     )
-    early = pipeline.compute_pricing_snapshot(
-        **common,
-        close_time_iso=datetime.fromtimestamp(now + 120, UTC).isoformat(),
-    )
-    assert early["ready"]
-    assert early["vol_window_seconds"] == 600
-    assert early["vol_window_policy"] == "pre_settlement"
+    assert not result["ready"]
+    assert result["reason"] == "volatility_unavailable"
+    assert result["p_model"] is None
 
-    late_state = {
-        "connected": True,
-        "timestamp": now,
-        "average_ts": now,
-        "final_average": {
-            "start": now - 30,
-            "end": now,
-            "count": 30,
-            "value": 100.0,
-        },
-    }
-    late = pipeline.compute_pricing_snapshot(
-        **{**common, "index_state": late_state},
-        close_time_iso=datetime.fromtimestamp(now + 30, UTC).isoformat(),
+
+def test_asian_moments_match_discrete_covariance_and_zero_volatility():
+    import math
+
+    from pricing.asian_pricer import (
+        _fixing_times_years,
+        _levy_moment_match_m2,
+        prob_levy_tw_binary,
     )
-    assert late["ready"]
-    assert late["vol_window_seconds"] == 300
-    assert late["vol_window_policy"] == "base"
+
+    times = _fixing_times_years(100.4, 60)
+    mean, m2 = _levy_moment_match_m2(100, 0.7, times)
+    expected = (
+        100**2 / 60**2 * sum(math.exp(0.7**2 * min(a, b)) for a in times for b in times)
+    )
+    assert mean == 100
+    assert m2 == pytest.approx(expected)
+    assert prob_levy_tw_binary(100, 99, 0, 100).p_model > 0.999999
+    assert prob_levy_tw_binary(100, 101, 0, 100).p_model < 0.000001
+
+
+def test_strike_parser_uses_structured_exchange_terms() -> None:
+    assert extract_suggested_strike({"floor_strike": "123456.78"}) == 123_456.78
+    assert extract_suggested_strike({"title": "Bitcoin on Sep 8, 2026"}) is None
+    assert extract_settlement_decimals({"custom_strike": {"round_digits": "7"}}, 2) == 7
+
+
+def test_live_and_historical_use_identical_baseline_state(monkeypatch):
+    from datetime import UTC, datetime
+
+    from backtest import _settlement_state, pricing_at
+    from core.markets import get_market_profile
+
+    now, close = 1970.4, 2000.0
+    fixes = [{"ts": float(t), "price": 100 + (t % 2) * 0.01} for t in range(1500, 2001)]
+    spots = sorted(fixes + [{"ts": now, "price": 100.03}], key=lambda t: t["ts"])
+    market = {
+        "ticker": "TEST",
+        "close_time": datetime.fromtimestamp(close, UTC).isoformat(),
+    }
+    state = _settlement_state(fixes, now_ts=now, close_ts=close, window=60, spot_ts=now)
+    state.update(asset="BTC", price=100.03)
+    monkeypatch.setattr(live_pricing, "get_index_state", lambda: state)
+    monkeypatch.setattr(live_pricing, "get_index_ticks", lambda: fixes)
+    monkeypatch.setattr(live_pricing, "get_index_tick_version", lambda: 1)
+    monkeypatch.setattr(live_pricing.time, "time", lambda: now)
+    live_pricing.reset_live_pricing_for_new_market()
+    live = live_pricing.compute_live_pricing_snapshot(
+        strike=100,
+        market_ticker="TEST",
+        close_time_iso=market["close_time"],
+        settlement_decimals=2,
+    )
+    replay = pricing_at(
+        profile=get_market_profile("BTC"),
+        asset="BTC",
+        market=market,
+        strike=100,
+        decimals=2,
+        eval_ts=now,
+        spot_ticks=spots,
+        fix_ticks=fixes,
+    )
+    assert live == replay
+    assert live["ready"] and live["twap_samples_observed"] == 30

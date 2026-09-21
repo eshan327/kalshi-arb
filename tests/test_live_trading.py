@@ -2,14 +2,13 @@ import asyncio
 
 import pytest
 
-from engine.orderbook import OrderBook
-from engine.trading.fees import (
-    expected_value_cents,
+from data.orderbook import OrderBook
+from trading.fees import (
     taker_fee_cents_per_contract,
 )
-from engine.trading.paper import PaperAccount
-from engine.trading.settings import TradingSettings
-from engine.trading.strategy import (
+from trading.paper import PaperAccount
+from trading.settings import TradingSettings
+from trading.strategy import (
     _kelly_target_contracts,
     build_trade_signal,
     slipped_price_cents,
@@ -17,14 +16,12 @@ from engine.trading.strategy import (
 
 
 def test_orderbook_quotes_and_market_midpoint_use_yes_probability() -> None:
-    from engine.trading.runtime import _monologue
+    from trading.runtime import _monologue
 
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {
-            "yes_dollars_fp": [["0.2500", "10.00"]],
-            "no_dollars_fp": [["0.7200", "20.00"]],
-        }
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [["0.2500", "10.00"]], "no_dollars_fp": [["0.28", "20.00"]]},
+        seq=1,
     )
     assert book.get_best_prices() == (25.0, 28.0, 72.0, 75.0)
 
@@ -45,11 +42,9 @@ def test_orderbook_quotes_and_market_midpoint_use_yes_probability() -> None:
 
 def test_unified_websocket_no_price_is_converted_to_no_leg() -> None:
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {
-            "yes_dollars_fp": [["0.4900", "10.00"]],
-            "no_dollars_fp": [["0.5000", "20.00"]],
-        }
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [["0.4900", "10.00"]], "no_dollars_fp": [["0.5", "20.00"]]},
+        seq=1,
     )
 
     book.apply_delta({"side": "no", "price_dollars": "0.6200", "delta_fp": "5.00"})
@@ -74,11 +69,9 @@ def test_unified_websocket_snapshot_is_sequence_aligned_and_reciprocal() -> None
 
 def test_crossed_book_fails_closed() -> None:
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {
-            "yes_dollars_fp": [["0.6100", "10.00"]],
-            "no_dollars_fp": [["0.5400", "20.00"]],
-        }
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [["0.6100", "10.00"]], "no_dollars_fp": [["0.46", "20.00"]]},
+        seq=1,
     )
 
     assert book.get_best_prices() == (None, None, None, None)
@@ -163,27 +156,27 @@ def test_v2_order_mapping(monkeypatch) -> None:
 
 def test_fee_aware_signal_is_small_and_actionable() -> None:
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
+    book.load_ws_snapshot(
         {
             "yes_dollars_fp": [[0.59, 200], [0.58, 100]],
-            "no_dollars_fp": [[0.40, 200], [0.39, 100]],
-            "seq": 1,
-        }
+            "no_dollars_fp": [["0.6", 200], ["0.61", 100]],
+        },
+        seq=1,
     )
     settings = TradingSettings()
     signal, reason, diagnostics = build_trade_signal(
+        fee_multiplier=1.0,
+        fee_type="quadratic",
         pricing={
             "ready": True,
             "p_model": 0.68,
             "seconds_to_expiry": 850,
-            "vol_is_fallback": False,
         },
         market_ticker="TEST",
         book=book,
         settings=settings,
         bankroll_cents=100_000,
         available_cash_cents=90_000,
-        runtime_uptime_seconds=0,
     )
     assert reason == "ev_signal_ready"
     assert signal is not None
@@ -198,113 +191,24 @@ def test_fee_aware_signal_is_small_and_actionable() -> None:
     assert diagnostics["position_notional_cap_cents"] <= 5_000
 
 
-def test_locked_outcome_can_trade_near_expiry_at_smaller_edge() -> None:
-    book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.97, 100]], "no_dollars_fp": [[0.02, 100]]}
-    )
-
-    signal, reason, diagnostics = build_trade_signal(
-        pricing={
-            "ready": True,
-            "p_model": 1 - 1e-12,
-            "seconds_to_expiry": 10,
-            "vol_is_fallback": False,
-            "regime": "collapsed",
-            "pricer_detail": {"required_future_avg": -1.0},
-        },
-        market_ticker="TEST",
-        book=book,
-        settings=TradingSettings(),
-        bankroll_cents=100_000,
-        available_cash_cents=90_000,
-    )
-
-    assert reason == "ev_signal_ready"
-    assert signal is not None and signal.quote_price_cents == 98
-    assert signal.edge_cents == pytest.approx(1)
-    assert diagnostics["deterministic_outcome"] is True
-    assert diagnostics["required_taker_edge_cents"] == pytest.approx(0.5)
-
-
-def test_extreme_market_probability_is_sized_instead_of_blanket_blocked() -> None:
-    inside_book = OrderBook("TEST")
-    inside_book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.50, 10]], "no_dollars_fp": [[0.49, 10]]}
-    )
-    pricing = {
-        "ready": True,
-        "p_model": 0.99,
-        "seconds_to_expiry": 850,
-        "vol_is_fallback": False,
-    }
-    _, inside_reason, inside_diagnostics = build_trade_signal(
-        pricing=pricing,
-        market_ticker="TEST",
-        book=inside_book,
-        settings=TradingSettings(),
-        bankroll_cents=100_000,
-        runtime_uptime_seconds=60,
-    )
-
-    assert inside_reason != "market_probability_out_of_bounds"
-    assert inside_diagnostics["market_probability"] == pytest.approx(0.505)
-
-    outside_book = OrderBook("TEST")
-    outside_book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.04, 10]], "no_dollars_fp": [[0.95, 10]]}
-    )
-    _, outside_reason, outside_diagnostics = build_trade_signal(
-        pricing={**pricing, "p_model": 0.50},
-        market_ticker="TEST",
-        book=outside_book,
-        settings=TradingSettings(),
-        bankroll_cents=100_000,
-        runtime_uptime_seconds=60,
-    )
-
-    assert outside_reason != "market_probability_out_of_bounds"
-    assert outside_diagnostics["market_probability"] == pytest.approx(0.045)
-
-    deterministic_book = OrderBook("TEST")
-    deterministic_book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.97, 10]], "no_dollars_fp": [[0.02, 10]]}
-    )
-    _, deterministic_reason, deterministic_diagnostics = build_trade_signal(
-        pricing={
-            **pricing,
-            "regime": "collapsed",
-            "pricer_detail": {"required_future_avg": -1.0},
-        },
-        market_ticker="TEST",
-        book=deterministic_book,
-        settings=TradingSettings(),
-        bankroll_cents=100_000,
-        runtime_uptime_seconds=60,
-    )
-
-    assert deterministic_reason != "market_probability_out_of_bounds"
-    assert deterministic_diagnostics["deterministic_outcome"] is True
-
-
 def test_systematic_strategy_manages_open_positions() -> None:
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [["0.6", 10]]}, seq=1
     )
     inputs = {
         "pricing": {
             "ready": True,
             "p_model": 0.10,
             "seconds_to_expiry": 850,
-            "vol_is_fallback": False,
         },
         "market_ticker": "TEST",
         "book": book,
         "bankroll_cents": 100_000,
         "open_yes_contracts": 1,
         "open_yes_avg_entry_cents": 60,
-        "runtime_uptime_seconds": 60,
+        "fee_multiplier": 1.0,
+        "fee_type": "quadratic",
     }
 
     signal, reason, _ = build_trade_signal(**inputs, settings=TradingSettings())
@@ -316,7 +220,6 @@ def test_systematic_strategy_manages_open_positions() -> None:
 def test_fee_rounding_matches_order_level_formula() -> None:
     assert taker_fee_cents_per_contract(50) == 2
     assert taker_fee_cents_per_contract(50, fee_multiplier=2) == 4
-    assert expected_value_cents(p_win=0.60, price_cents=55) == 3
     assert taker_fee_cents_per_contract(6.3, action="buy") == pytest.approx(0.7)
     assert taker_fee_cents_per_contract(6.3, action="sell") == pytest.approx(1.3)
 
@@ -331,14 +234,14 @@ def test_tapered_slippage_moves_by_exchange_ticks() -> None:
     assert slipped_price_cents(10.0, 1, "up", ranges) == 11.0
 
     book = OrderBook("SUBPENNY")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.062, 10]], "no_dollars_fp": [[0.937, 10]]}
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.062, 10]], "no_dollars_fp": [["0.063", 10]]}, seq=1
     )
     assert book.get_best_prices()[:2] == (6.2, 6.3)
 
 
 def test_daily_loss_guard_persists(monkeypatch, tmp_path) -> None:
-    from engine.trading import runtime
+    from trading import runtime
 
     state_path = tmp_path / "risk.json"
     monkeypatch.setattr(runtime, "EXECUTION_STATE_PATH", str(state_path))
@@ -358,7 +261,7 @@ def test_daily_loss_guard_persists(monkeypatch, tmp_path) -> None:
 
 
 def test_disarmed_runtime_cannot_submit(monkeypatch) -> None:
-    from engine.trading import runtime
+    from trading import runtime
 
     monkeypatch.setattr(runtime, "_armed", False)
     monkeypatch.setattr(
@@ -370,29 +273,8 @@ def test_disarmed_runtime_cannot_submit(monkeypatch) -> None:
     assert (status, result) == ("disarmed", None)
 
 
-def test_start_selects_execution_mode_without_confirmation(monkeypatch) -> None:
-    from engine.trading import runtime
-
-    account = {"cash_cents": 10_000, "equity_cents": 10_000, "positions": []}
-    monkeypatch.setattr(runtime, "_execution_mode", None)
-    monkeypatch.setattr(runtime, "_armed", False)
-    monkeypatch.setattr(runtime, "_runtime_state", {"armed": False})
-    monkeypatch.setattr(runtime, "_fetch_account_snapshot", lambda mode: account)
-    monkeypatch.setattr(
-        runtime, "_sync_daily_risk", lambda *_, **__: ({"locked": False}, False)
-    )
-    monkeypatch.setattr(runtime, "_emit_event", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(runtime, "set_live_order_entry_enabled", lambda _enabled: None)
-
-    result = runtime.control_trading("start", "paper")
-
-    assert result == {"ok": True, "status": "started", "execution_mode": "paper"}
-    assert runtime._get_execution_mode() == "paper"
-    assert runtime._is_armed() is True
-
-
 def test_mode_selection_loads_account_without_arming(monkeypatch) -> None:
-    from engine.trading import runtime
+    from trading import runtime
 
     account = {"cash_cents": 10_000, "equity_cents": 10_000, "positions": []}
     monkeypatch.setattr(runtime, "_execution_mode", "paper")
@@ -415,8 +297,8 @@ def test_mode_selection_loads_account_without_arming(monkeypatch) -> None:
 
 def test_paper_ioc_accounting_and_settlement() -> None:
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 2]]}
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [["0.6", 2]]}, seq=1
     )
     account = PaperAccount(10_000)
 
@@ -445,11 +327,11 @@ def test_paper_ioc_accounting_and_settlement() -> None:
 
 
 def test_paper_rollover_resolves_the_finished_market(monkeypatch) -> None:
-    from engine.trading import runtime
+    from trading import runtime
 
     old_book = OrderBook("OLD")
-    old_book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    old_book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [["0.6", 10]]}, seq=1
     )
     account = PaperAccount(10_000)
     account.place_ioc(
@@ -484,8 +366,8 @@ def test_paper_rollover_resolves_the_finished_market(monkeypatch) -> None:
 
 def test_subpenny_fees_and_pnl_follow_cash_rounding() -> None:
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.05, 10]], "no_dollars_fp": [[0.937, 10]]}
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.05, 10]], "no_dollars_fp": [["0.063", 10]]}, seq=1
     )
     account = PaperAccount(10_000)
 
@@ -513,7 +395,7 @@ def test_subpenny_fees_and_pnl_follow_cash_rounding() -> None:
 
 
 def test_live_portfolio_value_is_position_value(monkeypatch):
-    from engine.trading import runtime
+    from trading import runtime
 
     monkeypatch.setattr(
         runtime.account_state,
@@ -537,11 +419,11 @@ def test_live_portfolio_value_is_position_value(monkeypatch):
 
 
 def test_paper_mode_cannot_reach_live_order_api(monkeypatch) -> None:
-    from engine.trading import runtime
+    from trading import runtime
 
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [["0.6", 10]]}, seq=1
     )
     monkeypatch.setattr(runtime, "_paper_account", PaperAccount(10_000))
     monkeypatch.setattr(runtime, "get_live_book", lambda: book)
@@ -563,11 +445,11 @@ def test_paper_mode_cannot_reach_live_order_api(monkeypatch) -> None:
 
 
 def test_discretionary_order_uses_shared_risk_boundary(monkeypatch) -> None:
-    from engine.trading import runtime
+    from trading import runtime
 
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [["0.6", 10]]}, seq=1
     )
     monkeypatch.setattr(runtime, "_execution_mode", "paper")
     monkeypatch.setattr(runtime, "_armed", True)
@@ -610,11 +492,11 @@ def test_discretionary_order_uses_shared_risk_boundary(monkeypatch) -> None:
 
 
 def test_live_discretionary_fill_reconciles_runtime_account(monkeypatch) -> None:
-    from engine.trading import runtime
+    from trading import runtime
 
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [["0.6", 10]]}, seq=1
     )
     empty = {"cash_cents": 10_000, "equity_cents": 10_000, "positions": []}
     filled = {
@@ -676,98 +558,20 @@ def test_live_discretionary_fill_reconciles_runtime_account(monkeypatch) -> None
     assert runtime._last_submission_ts > 0
 
 
-def test_optional_late_entry_window_blocks_early_buys_but_not_exits() -> None:
+def test_configurable_entry_cutoff_controls_new_buys() -> None:
     book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
-    )
-    settings = TradingSettings(entry_start_seconds_to_expiry=30)
-
-    signal, reason, diagnostics = build_trade_signal(
-        pricing={
-            "ready": True,
-            "p_model": 0.68,
-            "seconds_to_expiry": 120,
-            "vol_is_fallback": False,
-        },
-        market_ticker="TEST",
-        book=book,
-        settings=settings,
-        bankroll_cents=100_000,
-        available_cash_cents=90_000,
-    )
-    assert signal is None
-    assert reason == "entry_window_not_started"
-    assert diagnostics["entry_start_seconds_to_expiry"] == 30
-
-    exit_signal, exit_reason, _ = build_trade_signal(
-        pricing={
-            "ready": True,
-            "p_model": 0.10,
-            "seconds_to_expiry": 120,
-            "vol_is_fallback": False,
-        },
-        market_ticker="TEST",
-        book=book,
-        settings=settings,
-        bankroll_cents=100_000,
-        open_yes_contracts=1,
-        open_yes_avg_entry_cents=60,
-    )
-    assert exit_signal is not None and exit_signal.action == "sell"
-    assert exit_reason == "edge_reversal_exit_yes"
-
-
-def test_pre_settlement_volatility_scale_only_applies_before_cutoff() -> None:
-    from engine.trading.strategy import apply_pricing_overrides
-
-    settings = TradingSettings(
-        volatility_scale=1.0,
-        pre_settlement_volatility_scale=1.25,
-        pre_settlement_until_seconds=60,
-    )
-    base = {
-        "ready": True,
-        "p_model": 0.6,
-        "spot_index": 100.0,
-        "model_strike_usd": 100.0,
-        "sigma_annual": 0.5,
-        "settlement_window_seconds": 60,
-        "vol_is_fallback": False,
-    }
-
-    early = apply_pricing_overrides(
-        {**base, "seconds_to_expiry": 120.0},
-        settings,
-    )
-    late = apply_pricing_overrides(
-        {
-            **base,
-            "seconds_to_expiry": 30.0,
-            "twap_samples_observed": 30,
-            "twap_partial_avg_raw": 100.0,
-        },
-        settings,
-    )
-    assert early["volatility_scale_applied"] == pytest.approx(1.25)
-    assert early["sigma_override_applied"] == pytest.approx(0.625)
-    assert late["volatility_scale_applied"] == pytest.approx(1.0)
-    assert late["sigma_override_applied"] == pytest.approx(0.5)
-
-
-def test_configurable_entry_cutoff_can_open_forward_research_window() -> None:
-    book = OrderBook("TEST")
-    book.load_rest_snapshot(
-        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [[0.40, 10]]}
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.59, 10]], "no_dollars_fp": [["0.6", 10]]}, seq=1
     )
     pricing = {
         "ready": True,
         "p_model": 0.68,
         "seconds_to_expiry": 10,
-        "vol_is_fallback": False,
     }
 
     blocked, blocked_reason, _ = build_trade_signal(
+        fee_multiplier=1.0,
+        fee_type="quadratic",
         pricing=pricing,
         market_ticker="TEST",
         book=book,
@@ -779,11 +583,12 @@ def test_configurable_entry_cutoff_can_open_forward_research_window() -> None:
     assert blocked_reason == "entry_cutoff"
 
     signal, reason, diagnostics = build_trade_signal(
+        fee_multiplier=1.0,
+        fee_type="quadratic",
         pricing=pricing,
         market_ticker="TEST",
         book=book,
         settings=TradingSettings(
-            entry_start_seconds_to_expiry=30,
             entry_cutoff_seconds_to_expiry=1,
         ),
         bankroll_cents=100_000,
@@ -792,3 +597,33 @@ def test_configurable_entry_cutoff_can_open_forward_research_window() -> None:
     assert reason == "ev_signal_ready"
     assert signal is not None and signal.action == "buy"
     assert diagnostics["entry_cutoff_seconds_to_expiry"] == 1
+
+
+def test_signal_caps_worst_case_limit_cost_and_requires_fee_policy():
+    book = OrderBook("TEST")
+    book.load_ws_snapshot(
+        {"yes_dollars_fp": [[0.49, 100]], "no_dollars_fp": [["0.5", 100]]}, seq=1
+    )
+    inputs = dict(
+        pricing={"ready": True, "p_model": 0.7, "seconds_to_expiry": 100},
+        market_ticker="TEST",
+        book=book,
+        settings=TradingSettings(),
+        bankroll_cents=100_000,
+        available_cash_cents=106,
+    )
+    assert build_trade_signal(**inputs)[1] == "fee_policy_unavailable"
+    signal, _, _ = build_trade_signal(
+        **inputs, fee_multiplier=1.0, fee_type="quadratic"
+    )
+    assert signal is not None
+    assert signal.quote_price_cents == 51
+    assert (
+        signal.count
+        * (
+            signal.quote_price_cents
+            + taker_fee_cents_per_contract(signal.quote_price_cents)
+        )
+        <= 106
+    )
+    assert signal.edge_cents == pytest.approx(70 - 51 - 2)
