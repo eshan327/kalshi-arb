@@ -44,6 +44,28 @@ def test_cf_history_preserves_subsecond_values_and_exact_second_fixes():
     ]
 
 
+def test_cf_history_hour_windows_deduplicate_boundary(monkeypatch):
+    import backtest
+
+    hour = 1_700_000_000 // 3600 * 3600
+    calls = 0
+
+    def history(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        seconds = (hour + 3599, hour + 3600) if calls == 1 else (
+            hour + 3600, hour + 3601
+        )
+        return [{"time": ts * 1000, "value": "100"} for ts in seconds]
+
+    monkeypatch.setattr(backtest, "get_cfbenchmarks_history", history)
+    monkeypatch.setattr(backtest.time, "sleep", lambda *_: None)
+    assert backtest.fetch_cf_range("BRTI", hour + 3599, hour + 3601) == [
+        {"ts": float(ts), "price": 100.0}
+        for ts in (hour + 3599, hour + 3600, hour + 3601)
+    ]
+
+
 def test_replayed_settlement_window_excludes_start_and_includes_current_fix():
     ticks = [{"ts": float(ts), "price": float(ts)} for ts in range(940, 1001)]
     state = _settlement_state(
@@ -129,6 +151,28 @@ def test_baseline_no_lookahead_and_market_comparison_at_same_horizon():
     )[0]
     assert stale.p_market is None
 
+    quoted = evaluate_market(
+        market,
+        spot_ticks=fixes,
+        fix_ticks=fixes,
+        **{**kwargs, "quotes": [
+            {"ts": row.eval_ts - 1, "yes_bid_cents": 40, "yes_ask_cents": 42},
+            {"ts": row.eval_ts + 1, "yes_bid_cents": 90, "yes_ask_cents": 92},
+        ]},
+    )[0]
+    assert (quoted.yes_bid_cents, quoted.yes_ask_cents, quoted.quote_age_seconds) == (40, 42, 1)
+    invalidated = evaluate_market(
+        market,
+        spot_ticks=fixes,
+        fix_ticks=fixes,
+        **{**kwargs, "quotes": [
+            {"ts": row.eval_ts - 1, "yes_bid_cents": 40, "yes_ask_cents": 42},
+            {"ts": row.eval_ts - 0.5, "yes_bid_cents": None, "yes_ask_cents": None},
+        ]},
+    )[0]
+    assert invalidated.yes_bid_cents is None
+    assert invalidated.quote_age_seconds is None
+
 
 def test_chronological_groups_and_paired_scoring():
     from dataclasses import replace
@@ -183,7 +227,7 @@ def test_saved_source_replays_offline_identically(monkeypatch, tmp_path):
             "strike_price": 100,
             "result": "yes",
         }
-        for close in [2000, 2900]
+        for close in [2000, 2900, 3800]
     ]
     (source / "source.json").write_text(
         json.dumps({"asset": "BTC", "markets": markets, "trades": {}})
@@ -192,7 +236,7 @@ def test_saved_source_replays_offline_identically(monkeypatch, tmp_path):
         writer = csv.DictWriter(f, fieldnames=["ts", "price"])
         writer.writeheader()
         writer.writerows(
-            {"ts": t, "price": 100 + (t % 2) * 0.02} for t in range(1500, 2901)
+            {"ts": t, "price": 100 + (t % 2) * 0.02} for t in range(1500, 3801)
         )
     monkeypatch.setattr(
         backtest,
@@ -201,12 +245,16 @@ def test_saved_source_replays_offline_identically(monkeypatch, tmp_path):
     )
     out = tmp_path / "out"
     result = backtest.run_backtest(
-        asset="BTC", horizons=(30,), input_dir=source, output_dir=out
+        asset="BTC", horizons=(30,), input_dir=source, output_dir=out,
+        vol_window_seconds=120,
+        end_close=datetime.fromtimestamp(3000, UTC).isoformat(),
     )
     again = tmp_path / "again"
     assert (
         backtest.run_backtest(
-            asset="BTC", horizons=(30,), input_dir=out, output_dir=again
+            asset="BTC", horizons=(30,), input_dir=out, output_dir=again,
+            vol_window_seconds=120,
+            end_close=datetime.fromtimestamp(3000, UTC).isoformat(),
         )
         == result
     )
@@ -215,6 +263,8 @@ def test_saved_source_replays_offline_identically(monkeypatch, tmp_path):
     ).read_text()
     assert result["train"]["baseline"]["observations"] == 1
     assert result["holdout"]["baseline"]["observations"] == 1
+    assert result["vol_window_seconds"] == 120
+    assert len(json.loads((out / "source.json").read_text())["markets"]) == 2
 
 
 def test_missing_final_fix_never_becomes_known_settlement_data():
@@ -273,6 +323,16 @@ def test_settled_market_history_merges_live_and_archive_tiers(monkeypatch):
     assert calls[0][2] == {"series_ticker": "KXBTC15M", "status": "settled"}
     assert calls[1][0] == "/historical/markets"
 
+    calls.clear()
+    kalshi_rest.get_settled_markets(
+        "KXBTC15M", min_close_ts=200, archival_cutoff_ts=100
+    )
+    assert calls == [
+        ("/markets", "markets", {
+            "series_ticker": "KXBTC15M", "status": "settled", "min_settled_ts": 199
+        })
+    ]
+
 
 def test_trades_merge_both_tiers_without_duplicate_fills(monkeypatch):
     calls = []
@@ -286,3 +346,36 @@ def test_trades_merge_both_tiers_without_duplicate_fills(monkeypatch):
     assert len(rows) == 3
     assert {p for p, _ in calls} == {"/historical/trades", "/markets/trades"}
     assert all(params["is_block_trade"] == "false" for _, params in calls)
+
+
+def test_trade_history_uses_its_own_cutoff(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        kalshi_rest,
+        "_public_pages",
+        lambda path, key, params: calls.append(path) or [],
+    )
+    kalshi_rest.get_market_trades(ticker="TEST", min_ts=1, max_ts=2, cutoff_ts=10)
+    assert calls == ["/historical/trades"]
+    calls.clear()
+    kalshi_rest.get_market_trades(ticker="TEST", min_ts=11, max_ts=12, cutoff_ts=10)
+    assert calls == ["/markets/trades"]
+
+
+def test_captured_book_replay_discards_sequence_gaps(tmp_path):
+    import json
+    from data.capture import load_quote_tapes
+
+    path = tmp_path / "feed.jsonl"
+    messages = [
+        {"type": "orderbook_snapshot", "seq": 1, "msg": {"market_ticker": "TEST", "yes_dollars_fp": [["0.40", "1.00"]], "no_dollars_fp": [["0.50", "1.00"]]}},
+        {"type": "orderbook_delta", "seq": 3, "msg": {"market_ticker": "TEST", "side": "yes", "price_dollars": "0.41", "delta_fp": "1.00"}},
+        {"type": "orderbook_delta", "seq": 4, "msg": {"market_ticker": "TEST", "side": "yes", "price_dollars": "0.42", "delta_fp": "1.00"}},
+        {"type": "orderbook_snapshot", "seq": 5, "msg": {"market_ticker": "TEST", "yes_dollars_fp": [["0.43", "1.00"]], "no_dollars_fp": [["0.50", "1.00"]]}},
+        {"type": "session_end"},
+    ]
+    path.write_text("".join(json.dumps({"session": "s1", "received_ns": (100 + i) * 1_000_000_000, "data": message}) + "\n" for i, message in enumerate(messages)))
+    quotes = load_quote_tapes(path)["TEST"]
+    assert [(q["ts"], q["yes_bid_cents"]) for q in quotes] == [
+        (100, 40), (101, None), (103, 43), (104, None)
+    ]

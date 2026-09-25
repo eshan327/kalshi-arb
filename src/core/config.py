@@ -17,47 +17,5 @@ if KALSHI_ENV == "prod":
 else:
     WS_BASE_URL = os.getenv("KALSHI_WS_BASE_URL", _DEFAULT_DEMO_WS)
 
-# Reflex app defaults
-WEB_HOST = "127.0.0.1"
-WEB_PORT = 3000
-
-# Dashboard/view defaults
-ORDERBOOK_VIEW_DEPTH = 6
-
 # Market selection defaults
 MARKET_ASSET_DEFAULT = os.getenv("KALSHI_MARKET_ASSET", "BTC").upper()
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return int(default)
-    try:
-        return int(raw)
-    except ValueError:
-        return int(default)
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return float(default)
-    try:
-        return float(raw)
-    except ValueError:
-        return float(default)
-
-
-# Execution starts stopped; the operator chooses Sim or Live in the dashboard.
-PAPER_STARTING_CASH_CENTS = max(
-    100, _env_int("KALSHI_PAPER_STARTING_CASH_CENTS", 100_000)
-)
-EXECUTION_LOOP_INTERVAL_SEC = max(
-    0.25, _env_float("KALSHI_EXECUTION_LOOP_INTERVAL_SEC", 1.0)
-)
-EXECUTION_EVENTS_PATH = os.getenv(
-    "KALSHI_EXECUTION_EVENTS_PATH", ".runtime/execution_events.jsonl"
-)
-EXECUTION_STATE_PATH = os.getenv(
-    "KALSHI_EXECUTION_STATE_PATH", ".runtime/trading_state.json"
-)

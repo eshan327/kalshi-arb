@@ -4,35 +4,25 @@ import asyncio
 import json
 import logging
 import random
-import threading
 import time
 from datetime import UTC, datetime
 
 from core.markets import get_active_market_profile, parse_iso8601_to_epoch
-from data import account_state
+from data.capture import FeedCapture
 from data.benchmark import (
     ingest_index,
     reset_tick_state,
     seed_history,
     set_index_connected,
 )
-from data.kalshi_rest import (
-    get_event,
-    get_open_markets,
-    get_recent_index_values,
-    get_series,
-    invalidate_metadata,
-)
+from data.kalshi_rest import get_open_markets, get_recent_index_values
 from data.kalshi_ws import command, connect, request_orderbook_snapshot
 from data.orderbook import OrderBook
-from data.updates import notify
 from pricing.live_pricing import reset_live_pricing_for_new_market
 
 logger = logging.getLogger(__name__)
 live_book: OrderBook | None = None
 _live_market_info: dict = {}
-_live_market_info_lock = threading.Lock()
-_market_results: dict[str, dict] = {}
 _stream_epoch = 0
 
 
@@ -41,176 +31,73 @@ def get_live_book():
 
 
 def get_live_market_info() -> dict:
-    with _live_market_info_lock:
-        return dict(_live_market_info)
-
-
-def get_market_result(ticker: str) -> dict | None:
-    with _live_market_info_lock:
-        value = _market_results.get(ticker)
-        return dict(value) if value else None
-
-
-def get_stream_epoch() -> int:
-    return _stream_epoch
+    return dict(_live_market_info)
 
 
 def _set_live_market_info(profile, market=None):
-    with _live_market_info_lock:
-        _live_market_info.clear()
-        _live_market_info.update(market or {})
-        _live_market_info.update(
-            active_asset=profile.asset,
-            active_asset_display=profile.display_name,
-            active_series=profile.kalshi_series_ticker,
-        )
-
-
-def get_live_orderbook_snapshot(depth: int = 10) -> dict:
-    book = live_book
-    if book is None or not book.initialized or book.needs_resync:
-        return dict(
-            initialized=False,
-            market_ticker=None,
-            expected_seq=None,
-            last_update_ts=None,
-            yes_bids=[],
-            yes_asks=[],
-            no_bids=[],
-            no_asks=[],
-        )
-    levels = book.get_orderbook_top_n(max(1, depth) * 4)
-    return dict(
-        initialized=True,
-        market_ticker=book.market_ticker,
-        expected_seq=book.expected_seq,
-        last_update_ts=book.last_verified_ts or book.last_update_ts,
-        **{
-            key: ([level for level in value if 1 <= level[0] <= 99] or value)[
-                : max(0, depth)
-            ]
-            for key, value in zip(
-                ("yes_bids", "yes_asks", "no_bids", "no_asks"), levels
-            )
-        },
+    _live_market_info.clear()
+    _live_market_info.update(market or {})
+    _live_market_info.update(
+        active_asset=profile.asset,
+        active_series=profile.kalshi_series_ticker,
     )
 
 
 def _discover(profile) -> dict:
-    market = get_live_market_info()
-    if not market.get("ticker"):
-        markets = get_open_markets(profile.kalshi_series_ticker)
-        now = time.time()
-        markets = [
-            m
-            for m in markets
-            if (parse_iso8601_to_epoch(m.get("close_time")) or 0) > now
-        ]
-        if not markets:
-            return {}
-        market = dict(
-            min(markets, key=lambda m: parse_iso8601_to_epoch(m["close_time"]))
-        )
-    series = get_series(profile.kalshi_series_ticker)
-    event = market.get("_event_fee_override")
-    if event is None:
-        event = get_event(market["event_ticker"])
-    market["series_fee_policy"] = {
-        "fee_type": series.get("fee_type"),
-        "fee_multiplier": series.get("fee_multiplier"),
-    }
-    market["fee_policy"] = _fees(series, event)
-    return market
-
-
-def _fees(series, event):
-    fee_type = event.get("fee_type_override") or series.get("fee_type")
-    multiplier = event.get("fee_multiplier_override")
-    multiplier = series.get("fee_multiplier") if multiplier is None else multiplier
-    ready = (
-        fee_type in {"quadratic", "quadratic_with_maker_fees"}
-        and isinstance(multiplier, (int, float))
-        and multiplier > 0
+    markets = get_open_markets(profile.kalshi_series_ticker)
+    now = time.time()
+    markets = [
+        market for market in markets
+        if (parse_iso8601_to_epoch(market.get("close_time")) or 0) > now
+    ]
+    return (
+        dict(min(markets, key=lambda m: parse_iso8601_to_epoch(m["close_time"])))
+        if markets
+        else {}
     )
-    return dict(fee_type=fee_type, fee_multiplier=multiplier, ready=ready)
 
 
-def _lifecycle(profile, kind, msg) -> bool:
+def _lifecycle(profile, msg) -> bool:
     ticker = str(msg.get("market_ticker", ""))
-    with _live_market_info_lock:
-        if kind == "event_fee_update":
-            if msg.get("event_ticker") == _live_market_info.get("event_ticker"):
-                _live_market_info["_event_fee_override"] = dict(msg)
-                _live_market_info["fee_policy"] = _fees(
-                    _live_market_info.get("series_fee_policy", {}), msg
-                )
-                invalidate_metadata()
-                return True
-            return False
-        if not ticker.startswith(profile.kalshi_series_ticker + "-"):
-            return False
+    if not ticker.startswith(profile.kalshi_series_ticker + "-"):
+        return False
+    if ticker == _live_market_info.get("ticker"):
+        _live_market_info.update(msg.get("additional_metadata") or {})
+        if "close_ts" in msg:
+            _live_market_info["close_time"] = datetime.fromtimestamp(
+                msg["close_ts"], UTC
+            ).isoformat()
         event = msg.get("event_type")
-        if event in {"determined", "settled"}:
-            if len(_market_results) >= 2000 and ticker not in _market_results:
-                _market_results.pop(next(iter(_market_results)))
-            _market_results[ticker] = {
-                **_market_results.get(ticker, {}),
-                **msg,
-                "status": "finalized" if event == "settled" else "determined",
-            }
-        if ticker == _live_market_info.get("ticker"):
-            _live_market_info.update(msg.get("additional_metadata") or {})
-            _live_market_info.update(
-                {
-                    k: v
-                    for k, v in msg.items()
-                    if k not in {"market_ticker", "event_type", "additional_metadata"}
-                }
-            )
-            if "close_ts" in msg:
-                _live_market_info["close_time"] = datetime.fromtimestamp(
-                    msg["close_ts"], UTC
-                ).isoformat()
-            if event in {"activated", "deactivated", "determined", "settled"}:
-                _live_market_info["status"] = {
-                    "activated": "active",
-                    "deactivated": "inactive",
-                    "settled": "finalized",
-                }.get(event, event)
-            reset_live_pricing_for_new_market()
-        # Discard any in-flight metadata read when newer active-market state arrives.
-        return ticker == _live_market_info.get("ticker") or not _live_market_info.get(
-            "ticker"
-        )
+        if event in {"activated", "deactivated", "determined", "settled"}:
+            _live_market_info["status"] = {
+                "activated": "active",
+                "deactivated": "inactive",
+                "settled": "finalized",
+            }.get(event, event)
+        reset_live_pricing_for_new_market()
+    return True
 
 
 async def _seed_index(profile) -> None:
     try:
         rows = await asyncio.to_thread(get_recent_index_values, profile.index_id)
         seed_history(rows)
-        notify()
     except Exception as exc:
         logger.warning("Official history unavailable; warming up from stream: %s", exc)
 
 
-async def _session(profile) -> None:
+async def _session(profile, capture_path: str | None = None) -> None:
     global live_book, _stream_epoch
     async with await connect() as ws:
         if live_book is not None:
             live_book.reset()
         live_book = None
         _stream_epoch += 1
-        account_state.connection(False)
         set_index_connected(False)
         subscriptions: dict[str, int] = {}
         pending: dict[int, tuple[str, float]] = {}
         sequences: dict[int, int] = {}
-        optional = {
-            "cfbenchmarks_value_5hz",
-            "fill",
-            "market_positions",
-            "user_orders",
-        }
+        optional = {"cfbenchmarks_value_5hz", "market_lifecycle_v2", "trade"}
 
         async def subscribe(channel, **params):
             cid = await command(ws, "subscribe", channels=[channel], **params)
@@ -219,17 +106,12 @@ async def _session(profile) -> None:
         await subscribe("cfbenchmarks_value", index_ids=[profile.index_id])
         if profile.high_frequency:
             await subscribe("cfbenchmarks_value_5hz", index_ids=[profile.index_id])
-        for channel in (
-            "market_lifecycle_v2",
-            "fill",
-            "market_positions",
-            "user_orders",
-        ):
-            await subscribe(channel)
+        await subscribe("market_lifecycle_v2")
+        capture = FeedCapture(capture_path, f"{time.time_ns()}-{_stream_epoch}")
         history_task = asyncio.create_task(_seed_index(profile))
         discovery = asyncio.create_task(asyncio.to_thread(_discover, profile))
         discover_again = False
-        next_discovery = time.monotonic() + 300
+        next_discovery = time.monotonic() + 30
         snapshot_deadline = None
         receive = asyncio.create_task(ws.recv())
         try:
@@ -242,7 +124,7 @@ async def _session(profile) -> None:
                     live_book = None
                     snapshot_deadline = None
                     _set_live_market_info(profile)
-                    for channel in ("orderbook_delta",):
+                    for channel in ("orderbook_delta", "trade"):
                         if channel in subscriptions:
                             await command(
                                 ws,
@@ -250,7 +132,6 @@ async def _session(profile) -> None:
                                 sids=[subscriptions.pop(channel)],
                             )
                     discover_again = True
-                    notify()
                 if discovery is not None and discovery.done():
                     try:
                         selected = discovery.result()
@@ -262,7 +143,7 @@ async def _session(profile) -> None:
                             ticker = selected["ticker"]
                             _set_live_market_info(profile, selected)
                             if live_book is None or live_book.market_ticker != ticker:
-                                for channel in ("orderbook_delta",):
+                                for channel in ("orderbook_delta", "trade"):
                                     if channel in subscriptions:
                                         await command(
                                             ws,
@@ -271,14 +152,15 @@ async def _session(profile) -> None:
                                         )
                                 live_book = OrderBook(ticker)
                                 reset_live_pricing_for_new_market()
+                                capture.record({"type": "market_metadata", "msg": selected})
                                 await subscribe(
                                     "orderbook_delta",
                                     market_tickers=[ticker],
                                     use_yes_price=True,
                                 )
+                                await subscribe("trade", market_tickers=[ticker])
                                 snapshot_deadline = time.monotonic() + 5
-                            next_discovery = time.monotonic() + 300
-                            notify()
+                            next_discovery = time.monotonic() + 30
                         else:
                             next_discovery = time.monotonic() + 5
                     except Exception as exc:
@@ -314,6 +196,8 @@ async def _session(profile) -> None:
                 kind, msg = data.get("type"), data.get("msg", {})
                 if not isinstance(msg, dict):
                     raise ValueError("Invalid WebSocket payload")
+                if kind in {"orderbook_snapshot", "orderbook_delta", "cfbenchmarks_value", "cfbenchmarks_value_5hz", "market_lifecycle_v2", "trade"}:
+                    capture.record(data)
                 if kind == "subscribed":
                     channel, sid = msg["channel"], msg["sid"]
                     subscriptions[channel] = sid
@@ -324,14 +208,8 @@ async def _session(profile) -> None:
                         for cid, entry in pending.items()
                         if entry[0] != channel
                     }
-                    if channel == "cfbenchmarks_value":
-                        set_index_connected(True)
-                    if all(
-                        c in subscriptions
-                        for c in ("fill", "market_positions", "user_orders")
-                    ):
-                        if channel in {"fill", "market_positions", "user_orders"}:
-                            account_state.connection(True)
+                    if channel in {"cfbenchmarks_value", "cfbenchmarks_value_5hz"}:
+                        await command(ws, "update_subscription", sid=sid, action="indexlist")
                     continue
                 if kind == "error":
                     channel, _ = pending.pop(data.get("id"), ("", 0))
@@ -351,7 +229,12 @@ async def _session(profile) -> None:
                     if expected is not None and seq != expected + 1:
                         raise ConnectionError("Stream sequence gap; reconciling")
                     sequences[sid] = seq
-                if kind in {"orderbook_snapshot", "orderbook_delta"}:
+                if kind in {"cfbenchmarks_value_indexlist", "cfbenchmarks_value_5hz_indexlist"}:
+                    if profile.index_id not in msg.get("index_ids", []):
+                        if kind == "cfbenchmarks_value_indexlist":
+                            raise ConnectionError(f"CF index {profile.index_id} unavailable")
+                        logger.warning("CF 5 Hz index %s unavailable", profile.index_id)
+                elif kind in {"orderbook_snapshot", "orderbook_delta"}:
                     book = live_book
                     if book is None or msg.get("market_ticker") != book.market_ticker:
                         continue
@@ -378,23 +261,13 @@ async def _session(profile) -> None:
                     # Snapshots are first by contract; recovery ignores deltas until snapshot.
                     elif snapshot_deadline is None:
                         raise ConnectionError("Delta without snapshot")
-                    notify()
                 elif kind in {"cfbenchmarks_value", "cfbenchmarks_value_5hz"}:
                     if ingest_index(kind, msg, profile.index_id):
-                        notify()
-                elif kind in {"market_lifecycle_v2", "event_fee_update"}:
-                    if _lifecycle(profile, kind, msg):
+                        if kind == "cfbenchmarks_value":
+                            set_index_connected(True)
+                elif kind == "market_lifecycle_v2":
+                    if _lifecycle(profile, msg):
                         discover_again = True
-                    notify()
-                elif kind in {"fill", "market_position", "user_order"}:
-                    account_state.ingest(kind, msg)
-                    if kind == "fill":
-                        from trading.runtime import _emit_event
-
-                        _emit_event("fill", "exchange_fill", fill=msg)
-                # An unchanged sequenced book remains valid while the session is alive.
-                if live_book and live_book.initialized and not live_book.needs_resync:
-                    live_book.last_verified_ts = time.time()
         finally:
             receive.cancel()
             history_task.cancel()
@@ -406,16 +279,17 @@ async def _session(profile) -> None:
                 *([discovery] if discovery else []),
                 return_exceptions=True,
             )
+            capture.close()
 
 
-async def run_market_streamer() -> None:
-    profile = get_active_market_profile()
+async def run_market_streamer(capture_path: str | None = None, profile=None) -> None:
+    profile = profile or get_active_market_profile()
     reset_tick_state(profile.asset)
     delay = 0.5
     while True:
         try:
             _set_live_market_info(profile)
-            await _session(profile)
+            await _session(profile, capture_path)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -424,7 +298,5 @@ async def run_market_streamer() -> None:
             if live_book:
                 live_book.reset()
             set_index_connected(False)
-            account_state.connection(False)
-            notify()
         await asyncio.sleep(delay * random.uniform(0.8, 1.2))
         delay = min(8.0, delay * 2)

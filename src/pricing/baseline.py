@@ -28,7 +28,7 @@ def compute_pricing_snapshot(
 ) -> dict[str, Any]:
     """Compute the live/replay pricing snapshot from information available at now_ts.
 
-    now_ts defaults to wall-clock time for live trading. Historical research must
+    now_ts defaults to wall-clock time for feed monitoring. Historical research must
     pass it explicitly so the production pricing logic can be replayed without
     monkeypatching time or maintaining a second model implementation.
     """

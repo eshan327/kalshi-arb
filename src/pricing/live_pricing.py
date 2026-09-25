@@ -1,4 +1,4 @@
-"""Shared pricing snapshot for trading and the dashboard."""
+"""Read-only pricing snapshot from the live CF feed."""
 
 from __future__ import annotations
 
@@ -43,11 +43,11 @@ def reset_live_pricing_for_new_market() -> None:
 
 
 def compute_live_pricing_snapshot(
-    *, strike, market_ticker, close_time_iso, settlement_decimals=None
+    *, strike, market_ticker, close_time_iso, settlement_decimals=None, profile=None
 ):
     return dict(
         _compute_cached_pricing_snapshot(
-            get_active_market_profile(),
+            profile or get_active_market_profile(),
             strike,
             market_ticker,
             close_time_iso,

@@ -78,13 +78,14 @@ def extract_suggested_strike(market_info: dict) -> float | None:
     """Read structured exchange terms; missing terms must not become guessed strikes."""
     if not market_info:
         return None
+    if market_info.get("strike_type") not in (None, "greater", "greater_or_equal"):
+        return None
 
     direct_keys = [
         "strike_price",
         "strike",
         "target_price",
         "floor_strike",
-        "cap_strike",
     ]
     for key in direct_keys:
         value = market_info.get(key)

@@ -1,13 +1,11 @@
 [project]
 name = "kalshi-arb"
 version = "0.1.0"
-description = "Settlement-aware Kalshi baseline, historical research, and guarded execution"
+description = "Kalshi crypto market data, settlement pricing, and historical research"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "cryptography>=46.0.5",
-    "pydantic>=2.12.5",
-    "reflex>=0.9.8",
     "requests>=2.32.5",
     "websockets>=16.0",
 ]

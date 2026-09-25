@@ -182,6 +182,8 @@ def test_asian_moments_match_discrete_covariance_and_zero_volatility():
 
 def test_strike_parser_uses_structured_exchange_terms() -> None:
     assert extract_suggested_strike({"floor_strike": "123456.78"}) == 123_456.78
+    assert extract_suggested_strike({"strike_type": "greater_or_equal", "floor_strike": 100}) == 100
+    assert extract_suggested_strike({"strike_type": "less", "cap_strike": 100}) is None
     assert extract_suggested_strike({"title": "Bitcoin on Sep 8, 2026"}) is None
     assert extract_settlement_decimals({"custom_strike": {"round_digits": "7"}}, 2) == 7
 

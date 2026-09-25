@@ -1,7 +1,6 @@
 import heapq
 import logging
 import math
-import time
 from threading import RLock
 
 logger = logging.getLogger(__name__)
@@ -24,8 +23,6 @@ class OrderBook:
         self.expected_seq = None
         self.initialized = False
         self.needs_resync = False
-        self.last_update_ts = None
-        self.last_verified_ts = None
         self._lock = RLock()
 
     def _normalize_qty(self, qty_value):
@@ -96,7 +93,6 @@ class OrderBook:
             self.expected_seq = seq + 1 if isinstance(seq, int) else None
             self.initialized = True
             self.needs_resync = self._is_crossed_unlocked()
-            self.last_update_ts = time.time()
 
     def apply_delta(self, msg):
         """
@@ -128,7 +124,6 @@ class OrderBook:
             else:
                 book[price] = new_qty
             self.needs_resync = self.needs_resync or self._is_crossed_unlocked()
-            self.last_update_ts = time.time()
 
     def apply_delta_with_seq(self, seq, msg):
         """
@@ -165,8 +160,6 @@ class OrderBook:
             self.expected_seq = None
             self.initialized = False
             self.needs_resync = False
-            self.last_update_ts = None
-            self.last_verified_ts = None
 
     def get_orderbook_top_n(self, depth):
         """Returns top-N slices of the current orderbook in cents for low-latency read paths."""
