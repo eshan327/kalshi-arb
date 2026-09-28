@@ -1,9 +1,9 @@
-# Kalshi 15 minute crypto research
+# Kalshi market research
 
-This project collects Kalshi order books, public trades, and CF Benchmarks prices,
-then evaluates a settlement-aware probability reference against historical market
-outcomes. A separate replay tests candidate taker entries against recorded book
-depth. It contains no order entry or account API.
+Tools for studying Kalshi 15-minute markets and Kalshi Perps. The repo records
+live order books, exports public history, evaluates a crypto settlement-price
+reference, and replays externally generated taker signals. Supported markets
+include crypto, metals, WTI oil, and natural gas.
 
 ## Setup
 
@@ -14,190 +14,185 @@ uv sync --group dev
 cp .env.example .env
 ```
 
-Set the production API key ID and local RSA private-key path in `.env`.
-The historical CF passthrough needs an entitled production key. The recorder
-also supports demo credentials when `KALSHI_ENV=demo`; the historical export
-requires production. WebSocket connections are authenticated even though the
-recorder reads public market data.
+Set `KALSHI_ENV=prod`, your API key ID, and the local RSA or Ed25519 private-key
+path in `.env`. Kalshi requires authentication for WebSocket connections. The CF
+Benchmarks historical feed also requires an entitled key. Public REST history
+can be fetched without credentials.
 
-## Record a live feed
+## Record order books
+
+Record one 15-minute series:
 
 ```bash
-uv run --env-file .env src/main.py BTC \
-  --capture-path .runtime/market_data.jsonl
+uv run --env-file .env src/main.py GOLD \
+  --capture-path .runtime/gold.jsonl
 ```
 
-The command prints a JSON status line every five seconds and appends a JSONL
-capture until interrupted. Each line records the local receipt time, session,
-and raw Kalshi message. It captures sequenced book snapshots and deltas, public
-trades, market lifecycle updates, CF 1 Hz fixes, and CF 5 Hz values when
-available. Reconnects open a new session. The process cannot submit orders.
-Use `--status-seconds 1` for more frequent console status.
+The same command accepts the assets in [src/core/markets.py](src/core/markets.py).
+Crypto captures include CF Benchmarks prices where available. Metals and energy
+captures contain Kalshi books and trades; their settlement source is Pyth.
 
-The asset argument accepts the symbols in `src/core/markets.py`.
-Only BTC, ETH, SOL, XRP, and DOGE use the 5 Hz CF feed. Every asset uses the
-1 Hz CF feed for volatility and the exchange's final minute average.
+Discover and record a Perps ticker:
 
-## Historical study
+```bash
+uv run --env-file .env src/perps.py --list-markets
+uv run --env-file .env src/perps.py KXGOLDPERP \
+  --capture-path .runtime/gold-perp.jsonl
+```
 
-Use a production key with access to CF Benchmarks history. Export recent settled
-markets, non-block public trades, and CF ticks:
+Both recorders append raw WebSocket messages with local receipt timestamps and
+session markers. Reconnects start new sessions. Keep the recording clock in sync
+and start capture before the study period. Use a separate file for each recorder.
+
+## Export historical data
+
+Export settled 15-minute markets by close time, including terms, outcomes,
+public trades, and one-minute candles:
+
+```bash
+uv run --env-file .env src/historical_data.py 15m GOLD \
+  --start 2026-09-28T04:45:00Z --end 2026-09-28T04:46:00Z \
+  --output-dir output/gold-15m
+```
+
+`--start` is inclusive and `--end` is exclusive. `source.json` contains the
+market universe; `trades.jsonl` and `candles.jsonl` contain the time series.
+The exporter selects Kalshi's live or archived endpoint using its current
+historical cutoff. `summary.json` counts missing minute candles.
+
+Export Perps candles, public trades, funding rates, and market metadata:
+
+```bash
+uv run --env-file .env src/historical_data.py perps KXGOLDPERP \
+  --start 2026-09-28T04:30:00Z --end 2026-09-28T04:46:00Z \
+  --output-dir output/gold-perp-history
+```
+
+The Perps manifest counts missing minute candles. Missing candles are preserved
+as gaps. Market objects in both exports are snapshots fetched after the study
+period. Use their terms and outcomes as metadata and labels, not their current
+prices, volume, or open interest as historical features.
+
+## Replay taker signals
+
+Signals are CSV files produced by your strategy. Use information received by
+`decision_ts`; the replay does not generate a strategy.
+
+For a 15-minute market, use one entry per market:
+
+```csv
+market_ticker,decision_ts,side,contracts,limit_price_cents
+KXGOLD15M-26SEP280045-45,1790570640.25,yes,10,46
+```
+
+```bash
+uv run src/taker_backtest.py \
+  --input-dir output/gold-15m --capture-path .runtime/gold.jsonl \
+  --signals output/gold-signals.csv --output-dir output/gold-replay \
+  --latency-ms 100 --max-book-age-ms 2000 \
+  --depth-fraction 0.5 --fee-multiplier 1 --balance-precision 0.0001
+```
+
+This replay walks captured asks at simulated order arrival, allows partial
+fills, estimates taker fees, and holds filled contracts to settlement. Check
+the [fee schedule](https://kalshi.com/docs/kalshi-fee-schedule.pdf) for the
+series and dates being tested. Direct-member balance precision is `$0.0001`;
+use `--balance-precision 0.01` for an FCM account.
+
+For Perps, provide entry and exit decisions with limits in dollars per contract:
+
+```csv
+ticker,entry_ts,exit_ts,side,contracts,entry_limit_dollars,exit_limit_dollars
+KXGOLDPERP,1790570400.25,1790570460.25,long,1,4.50,4.00
+```
+
+```bash
+uv run src/perps_backtest.py \
+  --history-dir output/gold-perp-history \
+  --capture-path .runtime/gold-perp.jsonl \
+  --signals output/perps-signals.csv --output-dir output/perps-replay \
+  --taker-fee-rate 0.001 --latency-ms 100 \
+  --max-book-age-ms 2000 --depth-fraction 0.5
+```
+
+Perps replay requires full-size entry and exit fills. It reports failed exits
+as open positions and applies published funding rates at simulated execution
+times. Set `--taker-fee-rate` to the applicable account rate for the period.
+
+Both replays need matching book captures. Kalshi's historical trades and candles
+do not reconstruct executable depth. Displayed depth may disappear before an
+order reaches the exchange. The Perps replay does not simulate margin or
+liquidation. Prediction captures made before the native-bid format marker need
+to be recorded again.
+
+## Run a mixed study
+
+Your signal code can use either product's history to produce actions in both
+signal files. A study runs any number of 15-minute or Perps legs with one
+holdout boundary. Save this as `study.json` beside the paths it references:
+
+```json
+{
+  "holdout_start": "2026-09-28T04:45:00Z",
+  "latency_ms": 100,
+  "max_book_age_ms": 2000,
+  "depth_fraction": "0.5",
+  "legs": [
+    {
+      "name": "gold15m", "product": "15m",
+      "history_dir": "output/gold-15m", "capture_path": ".runtime/gold.jsonl",
+      "signals_path": "output/gold-signals.csv", "fee_multiplier": "1"
+    },
+    {
+      "name": "goldperp", "product": "perps",
+      "history_dir": "output/gold-perp-history",
+      "capture_path": ".runtime/gold-perp.jsonl",
+      "signals_path": "output/perps-signals.csv", "taker_fee_rate": "0.001"
+    }
+  ]
+}
+```
+
+```bash
+uv run src/strategy_backtest.py --config study.json --output-dir output/study
+```
+
+Each leg keeps its detailed replay files. `results.csv` and `summary.json`
+combine scored PnL and show unscored or open positions. The train split ends
+before the boundary; holdout decisions start at or after it. Trades spanning
+the boundary appear in `crossing`. Legs replay independently, with no shared
+capital or liquidation model.
+
+## Evaluate the crypto price reference
+
+The CF Benchmarks model estimates the probability of a 15-minute crypto market
+settling Yes. It requires historical CF access:
 
 ```bash
 uv run --env-file .env src/backtest.py BTC \
   --max-markets 100 --output-dir output/btc-100
-```
-
-For a fixed sample, bound market close times with `--start-close` (inclusive)
-and `--end-close` (exclusive), for example
-`--start-close 2026-09-01T00:00:00Z --end-close 2026-09-08T00:00:00Z`.
-`--horizons 300,120,60,30` changes the evaluation times, and
-`--vol-window-seconds 120` changes the reference volatility lookback.
-`--max-markets 0` removes the count cap. The selected universe and raw CF
-ticks are saved in `source.json` and `cf_ticks.csv` for offline reruns.
-
-The command writes:
-
-| File | Contents |
-| --- | --- |
-| `source.json` | Market terms, final outcomes, public trades, Kalshi's current historical cutoffs, and any captured quotes |
-| `cf_ticks.csv` | Raw published CF timestamps and prices, including subsecond ticks |
-| `observations.csv` | A probability and market context at each evaluation horizon, with a train or holdout label |
-| `summary.json` | Brier score and log loss for the Asian reference and comparable public trades or captured quote midpoints |
-
-The final 20% of close-time groups are held out. Every horizon for one close
-time stays in the same split. Missing CF seconds or final minute fixes reject
-the observation; the pipeline does not interpolate them. The exchange's final
-result supplies the label. Trade prices are stale-sensitive probability proxies,
-not prices you could necessarily trade at. Historical CF timestamps are source
-times, not local receipt times, so these rows support forecast research but
-cannot establish executable performance.
-
-Replay the saved experiment without an API key or network calls:
-
-```bash
 uv run src/backtest.py BTC \
   --input-dir output/btc-100 --output-dir output/btc-100-replay
 ```
 
-An offline rerun can change horizons, volatility window, or close-time bounds;
-it uses only saved data. If the new window reaches before the saved CF ticks,
-the missing observations are rejected. Fetch a wider source period for that
-study. The summary records the choices used for each run.
+The export saves market terms, public trades, CF ticks, observations, and
+train/holdout scores. `--start-close` and `--end-close` bound the sample;
+`--horizons` and `--vol-window-seconds` set evaluation times and volatility
+lookback. Outcomes unavailable before the first holdout observation go into
+`crossing`. Historical CF timestamps are publication times, so use recorded feed
+receipt times for execution studies. The current probability model covers CF
+crypto markets; Pyth-settled markets need their own model.
 
-If the CF history endpoint returns an authorization error, check that the key
-has access to the passthrough. Its history can lag the live feed; the exporter
-waits 20 minutes after market close and paces hour reads below the basic read
-budget. A large date span can take time and produce a large `cf_ticks.csv`.
+## Other commands and references
 
-## Use captured quotes
+`src/perps.py --account` reads Perps account eligibility, balances, positions,
+and risk. [Order integration](docs/kalshi/orders.md) covers the explicit REST
+order client. Research commands only read data.
 
-Kalshi's historical endpoints provide archived markets, trades, and candles,
-but no sequenced order-book archive. Start the recorder before the period you
-want to study. It invalidates book state across reconnects and sequence gaps;
-replay waits for another snapshot. Keep the recording host's clock synchronized
-because quote pairing uses local receipt times. The capture can grow quickly.
-To pair its quotes with historical forecasts:
+Run checks with `uv run --group dev pytest -q`. `output/` and `.runtime/` are
+ignored local data directories.
 
-```bash
-uv run --env-file .env src/backtest.py BTC \
-  --max-markets 100 --capture-path .runtime/market_data.jsonl \
-  --output-dir output/btc-captured
-```
-
-Only quotes received before each evaluation time and no more than two seconds
-old are paired. The exporter saves those quote rows in `source.json`, so an
-offline replay does not need the original capture file. The summary compares
-forecast accuracy with the captured quote midpoint on exactly the same rows.
-This forecast study does not infer fills or profit.
-
-## Test candidate taker entries
-
-Create a CSV with one buy decision per settled market. For example:
-
-```csv
-market_ticker,decision_ts,side,contracts,limit_price_cents
-KXBTC15M-EXAMPLE,1780000000.250,yes,10,46
-```
-
-`decision_ts` is Unix time in seconds on the recorder's clock. Generate it and
-the decision from information actually received by that time. The historical
-CF export records publication times, not when your program received values;
-signals formed from it alone cannot establish executable returns. Fix the
-signal and parameters before evaluating a later period.
-
-Run the order book replay with the corresponding historical export and raw
-capture:
-
-```bash
-uv run src/taker_backtest.py \
-  --input-dir output/btc-captured \
-  --capture-path .runtime/market_data.jsonl \
-  --signals output/signals.csv \
-  --output-dir output/taker-study \
-  --latency-ms 100 --max-book-age-ms 2000 \
-  --depth-fraction 0.5 --fee-multiplier 1 \
-  --balance-precision 0.01
-```
-
-It writes `fills.csv` with the depth used, partial fills, fees, settlement
-payout, and net P&L for each decision; `summary.json` reports train and
-holdout totals. Each order acts like a buy Yes or No IOC held to settlement:
-the replay walks displayed asks up to the price limit at simulated arrival,
-then cancels any unfilled quantity. It rejects stale books, sequence gaps,
-and entries after market close. `--depth-fraction` discounts displayed
-quantity for a sensitivity run. `--latency-ms` and `--max-book-age-ms` are
-research assumptions; measure them before trusting results.
-
-The fee estimate uses Kalshi's current general taker formula,
-`0.07 × multiplier × Σ contracts_at_price × price × (1 − price)`, with price
-in dollars. It rounds the model fee to a microdollar, then aligns cost plus
-fee to the selected balance precision. Use `0.01` for a non-direct member or
-`0.0001` for a direct member. Check the [current fee schedule](https://kalshi.com/docs/kalshi-fee-schedule.pdf)
-for the series and period studied, and set `--fee-multiplier` accordingly.
-Kalshi's [fee rounding rules](https://docs.kalshi.com/getting_started/fee_rounding)
-operate per fill with an order accumulator; aggregated public depth cannot
-reproduce the individual matches, so this remains an estimate. Quoted depth
-is an upper bound on accessible liquidity, not a
-guaranteed fill: other orders and network delay can change it before matching.
-The replay models one entry per market, settlement exit, and no capital or
-portfolio constraints.
-
-## Pricing and implementation
-
-The contract resolves Yes when Kalshi's rounded average of 60 CF Benchmarks
-fixes in `(close - 60s, close]` is at least the displayed target. The target
-may be the rounded average from the prior quarter-hour boundary. The reference
-pricer uses a zero-drift GBM and matches the first two moments of the discrete
-arithmetic average to a lognormal law. Inside the final minute it conditions
-on the server's known fix count and average. It uses the published rounding
-digits to move the effective comparison threshold by half a rounding unit.
-The 300 second annualized volatility is a fixed reference convention, not a
-fitted forecast. This model is structurally appropriate for the contract's
-average payoff, but its diffusion and volatility assumptions have not been
-shown to produce an edge after spreads, fees, and latency.
-
-`src/core/` holds contract terms and API signing. `src/data/` holds public REST
-reads, authenticated CF reads, WebSocket normalization, the order book, and
-capture. `src/pricing/` holds the reference math. `src/backtest.py` builds
-forecast datasets; `src/taker_backtest.py` tests supplied entry decisions;
-`src/main.py` runs the read-only recorder. There is no selected signal or
-fitted trading rule in this repository.
-
-## Checks and local data
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --group dev pytest -q
-```
-
-`output/` is ignored and contains disposable research exports. `.runtime/`
-holds local feed captures. Older trading-state and execution-log files, if
-present from previous versions, are not read by this code.
-
-API references: [Historical data and cutoffs](https://docs.kalshi.com/getting_started/historical_data),
-[CF REST history](https://docs.kalshi.com/cfbenchmarks/rest-passthrough),
-[CF 1 Hz feed and final minute average](https://docs.kalshi.com/websockets/cfbenchmarks-value),
-[CF 5 Hz feed](https://docs.kalshi.com/websockets/cfbenchmarks-value-5hz),
-[order book updates](https://docs.kalshi.com/websockets/orderbook-updates),
-[public trades](https://docs.kalshi.com/websockets/public-trades), and
-[fixed point prices](https://docs.kalshi.com/getting_started/fixed_point_migration).
+Kalshi references: [historical data](https://docs.kalshi.com/getting_started/historical_data),
+[prediction order books](https://docs.kalshi.com/websockets/orderbook-updates),
+[Perps API](https://docs.kalshi.com/margin), and
+[API notes](docs/kalshi/README.md).

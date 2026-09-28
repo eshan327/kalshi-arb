@@ -1,4 +1,3 @@
-import heapq
 import logging
 import math
 from threading import RLock
@@ -46,7 +45,7 @@ class OrderBook:
             raise ValueError("Price out of range")
         return round(cents, 4)
 
-    def _load_levels(self, levels, destination, *, invert_price=False):
+    def _load_levels(self, levels, destination):
         """Loads [price, qty] levels into a destination side dict."""
         destination.clear()
         for level in levels:
@@ -59,27 +58,13 @@ class OrderBook:
                 continue
             if price_cents is None:
                 continue
-            if invert_price:
-                price_cents = round(100.0 - price_cents, 4)
             destination[price_cents] = qty
 
     def _is_crossed_unlocked(self):
         return bool(self.yes and self.no and max(self.yes) + max(self.no) >= 100.0)
 
-    def _top_n_levels(self, side_book, depth):
-        """Returns top-N descending bid levels from an internal side map."""
-        if depth <= 0 or not side_book:
-            return []
-
-        # nlargest avoids sorting the full book.
-        top_items = heapq.nlargest(depth, side_book.items(), key=lambda item: item[0])
-        return [
-            (float(price_cents), self._normalize_qty(qty))
-            for price_cents, qty in top_items
-        ]
-
     def load_ws_snapshot(self, snapshot, seq):
-        """Load a unified-YES-price WebSocket snapshot at its exact sequence."""
+        """Load YES and NO bids at their own prices and the exact sequence."""
         with self._lock:
             self._load_levels(
                 snapshot.get("yes_dollars_fp", []),
@@ -88,7 +73,6 @@ class OrderBook:
             self._load_levels(
                 snapshot.get("no_dollars_fp", []),
                 self.no,
-                invert_price=True,
             )
             self.expected_seq = seq + 1 if isinstance(seq, int) else None
             self.initialized = True
@@ -98,7 +82,7 @@ class OrderBook:
         """
         Applies a single WS orderbook_delta message.
         msg keys: price_dollars, delta_fp, side, ts. WebSocket prices use the
-        unified YES scale and are converted to the internal YES/NO leg scales.
+        price of the indicated YES or NO bid.
         delta_fp is the CHANGE in quantity (positive = add, negative = remove).
         """
         with self._lock:
@@ -113,13 +97,15 @@ class OrderBook:
                 book = self.yes
             elif side_str == "no":
                 book = self.no
-                price = round(100.0 - price, 4)
             else:
                 return
 
             new_qty = self._normalize_qty(book.get(price, 0.0) + delta)
 
-            if new_qty <= 0:
+            if new_qty < 0:
+                self.needs_resync = True
+                return
+            if new_qty == 0:
                 book.pop(price, None)
             else:
                 book[price] = new_qty
@@ -161,25 +147,16 @@ class OrderBook:
             self.initialized = False
             self.needs_resync = False
 
-    def get_orderbook_top_n(self, depth):
-        """Returns top-N slices of the current orderbook in cents for low-latency read paths."""
-        with self._lock:
-            depth = max(0, int(depth))
-            if self.needs_resync or self._is_crossed_unlocked():
-                return [], [], [], []
-            yes_bids = self._top_n_levels(self.yes, depth)
-            no_bids = self._top_n_levels(self.no, depth)
-
-            yes_asks = sorted([(round(100.0 - p, 4), q) for p, q in no_bids])
-            no_asks = sorted([(round(100.0 - p, 4), q) for p, q in yes_bids])
-            return yes_bids, yes_asks, no_bids, no_asks
-
     def get_best_prices(self):
         """Returns (yes_best_bid, yes_best_ask, no_best_bid, no_best_ask) in cents."""
-        yes_bids, yes_asks, no_bids, no_asks = self.get_orderbook_top_n(1)
-        return (
-            yes_bids[0][0] if yes_bids else None,
-            yes_asks[0][0] if yes_asks else None,
-            no_bids[0][0] if no_bids else None,
-            no_asks[0][0] if no_asks else None,
-        )
+        with self._lock:
+            if self.needs_resync or self._is_crossed_unlocked():
+                return None, None, None, None
+            yes_bid = max(self.yes, default=None)
+            no_bid = max(self.no, default=None)
+            return (
+                yes_bid,
+                round(100.0 - no_bid, 4) if no_bid is not None else None,
+                no_bid,
+                round(100.0 - yes_bid, 4) if yes_bid is not None else None,
+            )

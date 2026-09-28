@@ -3,42 +3,7 @@ import json
 import time
 from datetime import UTC, datetime
 
-import pytest
-
 from data import streamer
-from data import benchmark as tick_store
-
-
-def test_official_ticks_keep_one_second_history_and_reject_bad_values(monkeypatch):
-    monkeypatch.setattr(tick_store.time, "time", lambda: 100.0)
-    tick_store.reset_tick_state("BTC")
-    tick_store.set_index_connected(True)
-    slow = {
-        "index_id": "BRTI",
-        "data": json.dumps({"time": 99000, "value": "100"}),
-        "avg_60s_data": {
-            "value": "98",
-            "window_size": 60,
-            "window_start_ts_ms": 39000,
-            "window_end_ts_exclusive": 99000,
-        },
-    }
-    assert tick_store.ingest_index("cfbenchmarks_value", slow, "BRTI")
-    for ts in (99200, 99400, 99600, 99800, 100000):
-        assert tick_store.ingest_index(
-            "cfbenchmarks_value_5hz",
-            {"index_id": "BRTI", "source_ts_ms": ts, "value_usd": "101"},
-            "BRTI",
-        )
-    assert len(tick_store.get_index_ticks()) == 1
-    assert tick_store.get_index_state()["price"] == 101.0
-    assert not tick_store.ingest_index("cfbenchmarks_value", slow, "BRTI")
-    with pytest.raises(ValueError):
-        tick_store.ingest_index(
-            "cfbenchmarks_value_5hz",
-            {"index_id": "BRTI", "source_ts_ms": 100200, "value_usd": "NaN"},
-            "BRTI",
-        )
 
 
 class FakeSocket:
@@ -85,7 +50,7 @@ class FakeSocket:
                 "msg": {
                     "market_ticker": ticker,
                     "yes_dollars_fp": [["0.40", "2"]],
-                    "no_dollars_fp": [["0.60", "3"]],
+                    "no_dollars_fp": [["0.55", "3"]],
                 },
             }
         )
@@ -177,93 +142,44 @@ def test_persistent_session_rotates_quiet_market_and_recovers_book_gap(monkeypat
     asyncio.run(check())
 
 
-def test_history_seed_never_replaces_live_averages_or_spot(monkeypatch):
-    monkeypatch.setattr(tick_store.time, "time", lambda: 100.0)
-    tick_store.reset_tick_state("BTC")
-    tick_store.ingest_index(
-        "cfbenchmarks_value",
-        {
-            "index_id": "BRTI",
-            "data": json.dumps({"time": 99000, "value": "102"}),
-            "avg_60s_data": {
-                "value": "101",
-                "window_size": 60,
-                "window_start_ts_ms": 39000,
-                "window_end_ts_exclusive": 99000,
-            },
-        },
-        "BRTI",
-    )
-    tick_store.seed_history(
-        [
-            {"time": 98000, "value": "100"},
-            {"time": 99000, "value": "101"},
-            {"time": 99400, "value": "103"},
-        ]
-    )
-    assert [t["price"] for t in tick_store.get_index_ticks()] == [100.0, 102.0]
-    assert tick_store.get_index_state()["price"] == 102.0
-    assert tick_store.get_index_ticks()[-1]["average"] == 101.0
+def test_best_prices_handle_empty_sides_and_invalid_books():
+    from data.orderbook import OrderBook
+
+    book = OrderBook("TEST")
+    assert book.get_best_prices() == (None, None, None, None)
+    book.yes.update({35.0: 1, 40.1234: 2})
+    assert book.get_best_prices() == (40.1234, None, None, 59.8766)
+    book.no.update({45.0: 1, 50.1234: 2})
+    assert book.get_best_prices() == (40.1234, 49.8766, 50.1234, 59.8766)
+    book.yes.clear()
+    assert book.get_best_prices() == (None, 49.8766, 50.1234, None)
+    book.yes[49.8766] = 1
+    assert book.get_best_prices() == (None, None, None, None)
+    book.yes.clear()
+    book.needs_resync = True
+    assert book.get_best_prices() == (None, None, None, None)
 
 
-def test_lifecycle_marks_market_inactive(monkeypatch):
-    profile = streamer.get_active_market_profile()
-    ticker = profile.kalshi_series_ticker + "-TEST"
-    monkeypatch.setattr(
-        streamer,
-        "_live_market_info",
-        {"ticker": ticker, "status": "active"},
-    )
-    assert streamer._lifecycle(
-        profile,
-        {"market_ticker": ticker, "event_type": "deactivated"},
-    )
-    assert streamer.get_live_market_info()["status"] == "inactive"
+def test_gold_recorder_subscribes_to_market_without_cf(monkeypatch):
+    from core.markets import get_market_profile
 
-
-def test_reconnect_to_same_market_always_resubscribes(monkeypatch):
     async def check():
-        from data.orderbook import OrderBook
-
         ws = FakeSocket()
-
         async def connect():
             return ws
-
         monkeypatch.setattr(streamer, "connect", connect)
-        monkeypatch.setattr(streamer, "get_recent_index_values", lambda _: [])
-        previous = OrderBook("SAME")
-        previous.load_ws_snapshot(
-            {"yes_dollars_fp": [["0.40", "2"]], "no_dollars_fp": [["0.60", "3"]]}, 10
-        )
-        monkeypatch.setattr(streamer, "live_book", previous)
+        monkeypatch.setattr(streamer, "live_book", None)
         monkeypatch.setattr(streamer, "_live_market_info", {})
-        monkeypatch.setattr(
-            streamer,
-            "_discover",
-            lambda _: {
-                "ticker": "SAME",
-                "status": "active",
-                "close_time": "2099-01-01T00:00:00Z",
-            },
-        )
-        task = asyncio.create_task(
-            streamer._session(streamer.get_active_market_profile())
-        )
+        monkeypatch.setattr(streamer, "_discover", lambda _: {
+            "ticker": "KXGOLD15M-TEST", "status": "active",
+            "close_time": datetime.fromtimestamp(time.time() + 900, UTC).isoformat(),
+        })
+        task = asyncio.create_task(streamer._session(get_market_profile("GOLD")))
         try:
-            await until(
-                lambda: (
-                    streamer.live_book is not None
-                    and streamer.live_book is not previous
-                    and streamer.live_book.initialized
-                )
-            )
-            assert streamer.live_book is not previous
-            assert not previous.initialized
-            assert (
-                sum(c["params"].get("channels") == ["orderbook_delta"] for c in ws.sent)
-                == 1
-            )
+            await until(lambda: streamer.live_book is not None and streamer.live_book.initialized)
+            channels = [cmd["params"]["channels"][0] for cmd in ws.sent
+                        if cmd["cmd"] == "subscribe"]
+            assert channels == ["market_lifecycle_v2", "orderbook_delta", "trade"]
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

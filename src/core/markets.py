@@ -39,6 +39,13 @@ MARKET_PROFILES = {
         ("HYPE", "Hyperliquid", "HYPEUSD_RTI", 4, False),
         ("TON", "Toncoin", "TONUSD_RTI", 4, False),
         ("ZEC", "Zcash", "ZECUSD_RTI", 4, False),
+        ("GOLD", "Gold", "", 2, False),
+        ("SILVER", "Silver", "", 3, False),
+        ("COPPER", "Copper", "", 5, False),
+        ("PLATINUM", "Platinum", "", 3, False),
+        ("PALLADIUM", "Palladium", "", 3, False),
+        ("WTI", "WTI Oil", "", 2, False),
+        ("NATGAS", "Natural Gas", "", 5, False),
     )
 }
 _ASSET_ALIASES = {p.display_name.upper(): asset for asset, p in MARKET_PROFILES.items()}
@@ -115,6 +122,7 @@ def parse_iso8601_to_epoch(value: str | None) -> float | None:
         return None
 
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.timestamp() if parsed.tzinfo is not None else None
     except ValueError:
         return None

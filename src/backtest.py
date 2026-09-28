@@ -41,6 +41,7 @@ CF_HISTORY_DATA_LAG_BUFFER_SEC = 20 * 60
 class ModelObservation:
     market_ticker: str
     close_ts: float
+    outcome_ts: float
     eval_ts: float
     nominal_horizon_seconds: int
     seconds_to_expiry: float
@@ -323,9 +324,12 @@ def evaluate_market(
     if not horizons or any(not isinstance(h, int) or h <= 0 for h in horizons):
         raise ValueError("Horizons must be positive whole seconds")
     profile = get_market_profile(asset)
+    if not profile.index_id:
+        raise ValueError("Pyth-settled metals require a separate price model; use historical_data.py for market history")
     ticker = str(market.get("ticker") or "")
     strike = extract_suggested_strike(market)
     close = parse_iso8601_to_epoch(market.get("close_time"))
+    outcome_ts = parse_iso8601_to_epoch(market.get("settlement_ts")) or close
     opened = parse_iso8601_to_epoch(market.get("open_time"))
     outcome = str(market.get("result") or "").lower()
     if not ticker or strike is None or close is None or outcome not in {"yes", "no"}:
@@ -384,6 +388,7 @@ def evaluate_market(
             ModelObservation(
                 market_ticker=ticker,
                 close_ts=close,
+                outcome_ts=outcome_ts,
                 eval_ts=now,
                 nominal_horizon_seconds=horizon,
                 seconds_to_expiry=close - now,
@@ -435,7 +440,7 @@ def score_predictions(probabilities: list[float], outcomes: list[int]) -> dict:
 
 
 def chronological_split(rows: list[ModelObservation], holdout_fraction: float = 0.2):
-    """Split whole close-time groups; all horizons of a market stay together."""
+    """Keep training labels available before the first holdout observation."""
     if not 0 < holdout_fraction < 1:
         raise ValueError("Holdout fraction must be between zero and one")
     closes = sorted({row.close_ts for row in rows})
@@ -445,9 +450,11 @@ def chronological_split(rows: list[ModelObservation], holdout_fraction: float = 
         max(1, min(len(closes) - 1, int(len(closes) * (1 - holdout_fraction))))
     ]
     ordered = sorted(rows, key=lambda row: (row.eval_ts, row.market_ticker))
-    return [row for row in ordered if row.close_ts < boundary], [
-        row for row in ordered if row.close_ts >= boundary
-    ]
+    holdout = [row for row in ordered if row.close_ts >= boundary]
+    first_holdout_decision = min(row.eval_ts for row in holdout)
+    train = [row for row in ordered if row.close_ts < boundary and row.outcome_ts < first_holdout_decision]
+    crossing = [row for row in ordered if row.close_ts < boundary and row.outcome_ts >= first_holdout_decision]
+    return train, holdout, crossing
 
 
 def summarize(rows: list[ModelObservation]) -> dict:
@@ -499,6 +506,8 @@ def run_backtest(
 ) -> dict:
     """Save source data once; --input-dir replays the same experiment without API reads."""
     profile = get_market_profile(asset)
+    if not profile.index_id:
+        raise ValueError("Pyth-settled metals have no CF baseline; export with historical_data.py")
     if not horizons or any(not isinstance(h, int) or h <= 0 for h in horizons):
         raise ValueError("Positive horizons required")
     if not 0 < holdout_fraction < 1 or max_markets < 0:
@@ -525,6 +534,8 @@ def run_backtest(
         if capture_path is not None:
             raise ValueError("Offline replay uses quotes already saved in source.json")
         source = json.loads((input_dir / "source.json").read_text())
+        if source.get("kind") == "market-only":
+            raise ValueError("Market-only export has no CF ticks; use taker_backtest.py")
         if source["asset"] != profile.asset:
             raise ValueError("Source asset does not match requested asset")
         markets = [market for market in source["markets"] if in_period(market)]
@@ -628,11 +639,11 @@ def run_backtest(
         )
     if not rows:
         raise ValueError(f"No valid baseline observations: {failures}")
-    train, holdout = chronological_split(rows, holdout_fraction)
+    train, holdout, crossing = chronological_split(rows, holdout_fraction)
     with (output_dir / "observations.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=[*asdict(rows[0]), "split"])
         writer.writeheader()
-        for name, bucket in (("train", train), ("holdout", holdout)):
+        for name, bucket in (("train", train), ("holdout", holdout), ("crossing", crossing)):
             writer.writerows({**asdict(row), "split": name} for row in bucket)
     summary = {
         "baseline": "settlement-asian-v1",
@@ -647,6 +658,7 @@ def run_backtest(
         "rejections": failures,
         "train": summarize(train),
         "holdout": summarize(holdout),
+        "crossing": summarize(crossing),
         "note": "Trade prices are proxies. Captured quotes use local receipt times and sequence-checked snapshots/deltas, but do not prove available fills or profitability. No orders are simulated.",
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

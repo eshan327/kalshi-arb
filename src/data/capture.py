@@ -17,7 +17,7 @@ class FeedCapture:
             target = Path(path)
             target.parent.mkdir(parents=True, exist_ok=True)
             self.handle = target.open("a", encoding="utf-8", buffering=1)
-            self.record({"type": "session_start"})
+            self.record({"type": "session_start", "book_price_mode": "native_bids"})
 
     def record(self, message: dict) -> None:
         if self.handle is not None:
@@ -60,6 +60,8 @@ class BookReplay:
             self.session = row["session"]
         data = row["data"]
         kind, msg = data.get("type"), data.get("msg") or {}
+        if kind == "session_start" and data.get("book_price_mode") != "native_bids":
+            raise ValueError("Prediction capture uses an older book price mode; record a new capture")
         if kind == "session_end":
             changed.update(self.books)
             self.books.clear()
@@ -95,17 +97,28 @@ class BookReplay:
         return changed
 
 
+def iter_capture(path: Path):
+    """Read a capture in local receipt order."""
+    previous = -1
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            received_ns = row["received_ns"]
+            if type(received_ns) is not int or received_ns < previous:
+                raise ValueError("Capture receipt times must be monotonic nanoseconds")
+            previous = received_ns
+            yield row
+
+
 def load_quote_tapes(path: Path) -> dict[str, list[dict]]:
     """Replay only continuous snapshot/delta segments; use local receipt time."""
     tapes: dict[str, list[dict]] = {}
     replay = BookReplay()
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            row = json.loads(line)
-            for ticker in replay.ingest(row):
-                book = replay.books.get(ticker)
-                bid, ask, _, _ = book.get_best_prices() if book else (None,) * 4
-                tapes.setdefault(ticker, []).append(
-                    {"ts": row["received_ns"] / 1e9, "yes_bid_cents": bid, "yes_ask_cents": ask}
-                )
+    for row in iter_capture(path):
+        for ticker in replay.ingest(row):
+            book = replay.books.get(ticker)
+            bid, ask, _, _ = book.get_best_prices() if book else (None,) * 4
+            tapes.setdefault(ticker, []).append(
+                {"ts": row["received_ns"] / 1e9, "yes_bid_cents": bid, "yes_ask_cents": ask}
+            )
     return tapes

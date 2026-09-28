@@ -18,8 +18,10 @@ _public_last_request_monotonic = 0.0
 _public_session = requests.Session()
 
 
-def _get_json(url: str) -> dict[str, Any]:
-    """GET public Kalshi data with conservative pacing and 429 retry handling."""
+def _get_json(
+    url: str, *, authenticated: bool = False, params: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """GET Kalshi data with conservative pacing and freshly signed 429 retries."""
     global _public_last_request_monotonic
     for attempt in range(PUBLIC_MAX_RETRIES + 1):
         with _public_lock:
@@ -27,7 +29,11 @@ def _get_json(url: str) -> dict[str, Any]:
             wait = PUBLIC_MIN_INTERVAL_SEC - (now - _public_last_request_monotonic)
             if wait > 0:
                 time.sleep(wait)
-            response = _public_session.get(url, timeout=HTTP_TIMEOUT_SEC)
+            # ponytail: shared read pacing; split by exchange if throughput matters.
+            headers = get_api_auth_headers("GET", urlparse(url).path) if authenticated else {}
+            response = _public_session.get(
+                url, params=params, headers=headers, timeout=HTTP_TIMEOUT_SEC
+            )
             _public_last_request_monotonic = time.monotonic()
 
         if response.status_code != 429:
@@ -50,27 +56,19 @@ def _get_json(url: str) -> dict[str, Any]:
 
 
 def _signed_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
-    """Authenticated read-only request; there is no order-capable client here."""
-    sign_path = f"{urlparse(API_BASE_URL).path.rstrip('/')}{path}"
-    response = _public_session.get(
-        f"{API_BASE_URL}{path}",
-        params=params,
-        headers=get_api_auth_headers("GET", sign_path),
-        timeout=HTTP_TIMEOUT_SEC,
-    )
-    response.raise_for_status()
-    return response.json()
+    """Authenticated read-only request."""
+    return _get_json(f"{API_BASE_URL}{path}", authenticated=True, params=params)
 
 
-def _public_pages(path: str, key: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+def _pages(path: str, key: str, params: dict[str, Any], fetch) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    cursor: str | None = None
+    cursor: str | None = params.get("cursor")
     seen: set[str] = set()
     while True:
-        query = {**params, "limit": 1000}
+        query = {"limit": 1000, **params}
         if cursor:
             query["cursor"] = cursor
-        payload = _get_json(f"{API_BASE_URL}{path}?{urlencode(query)}")
+        payload = fetch(path, query)
         page = payload[key]
         if not isinstance(page, list):
             raise ValueError(f"Invalid {key} response")
@@ -82,6 +80,13 @@ def _public_pages(path: str, key: str, params: dict[str, Any]) -> list[dict[str,
             raise RuntimeError(f"Repeated pagination cursor for {path}")
         seen.add(next_cursor)
         cursor = next_cursor
+
+
+def _public_pages(path: str, key: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    return _pages(
+        path, key, params,
+        lambda route, query: _get_json(f"{API_BASE_URL}{route}?{urlencode(query)}"),
+    )
 
 
 def get_open_markets(series_ticker: str) -> list[dict[str, Any]]:
@@ -130,6 +135,20 @@ def get_settled_markets(
 def get_historical_cutoff() -> dict[str, str]:
     """Each archived data type has its own moving cutoff."""
     return _get_json(f"{API_BASE_URL}/historical/cutoff")
+
+
+def get_market_candlesticks(
+    series_ticker: str, ticker: str, *, start_ts: int, end_ts: int, archived: bool
+) -> list[dict[str, Any]]:
+    """Read actual one-minute market candles from the matching live/archive tier."""
+    path = (f"/historical/markets/{ticker}/candlesticks" if archived
+            else f"/series/{series_ticker}/markets/{ticker}/candlesticks")
+    payload = _get_json(f"{API_BASE_URL}{path}", params={
+        "start_ts": start_ts, "end_ts": end_ts, "period_interval": 1,
+    })
+    if payload.get("ticker") != ticker or not isinstance(payload.get("candlesticks"), list):
+        raise ValueError(f"Invalid candlesticks for {ticker}")
+    return payload["candlesticks"]
 
 
 def get_recent_index_values(index_id: str) -> list[dict]:
@@ -187,5 +206,7 @@ def get_market_trades(
         paths = ("/markets/trades",)
     for path in paths:
         for trade in _public_pages(path, "trades", params):
+            if trade["trade_id"] in merged and merged[trade["trade_id"]] != trade:
+                raise ValueError(f"Conflicting public trade {trade['trade_id']}")
             merged[trade["trade_id"]] = trade
     return list(merged.values())

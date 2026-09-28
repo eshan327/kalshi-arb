@@ -18,7 +18,6 @@ from data.benchmark import (
 from data.kalshi_rest import get_open_markets, get_recent_index_values
 from data.kalshi_ws import command, connect, request_orderbook_snapshot
 from data.orderbook import OrderBook
-from pricing.live_pricing import reset_live_pricing_for_new_market
 
 logger = logging.getLogger(__name__)
 live_book: OrderBook | None = None
@@ -74,7 +73,6 @@ def _lifecycle(profile, msg) -> bool:
                 "deactivated": "inactive",
                 "settled": "finalized",
             }.get(event, event)
-        reset_live_pricing_for_new_market()
     return True
 
 
@@ -103,12 +101,13 @@ async def _session(profile, capture_path: str | None = None) -> None:
             cid = await command(ws, "subscribe", channels=[channel], **params)
             pending[cid] = channel, time.monotonic() + 5
 
-        await subscribe("cfbenchmarks_value", index_ids=[profile.index_id])
+        if profile.index_id:
+            await subscribe("cfbenchmarks_value", index_ids=[profile.index_id])
         if profile.high_frequency:
             await subscribe("cfbenchmarks_value_5hz", index_ids=[profile.index_id])
         await subscribe("market_lifecycle_v2")
         capture = FeedCapture(capture_path, f"{time.time_ns()}-{_stream_epoch}")
-        history_task = asyncio.create_task(_seed_index(profile))
+        history_task = asyncio.create_task(_seed_index(profile)) if profile.index_id else None
         discovery = asyncio.create_task(asyncio.to_thread(_discover, profile))
         discover_again = False
         next_discovery = time.monotonic() + 30
@@ -151,12 +150,10 @@ async def _session(profile, capture_path: str | None = None) -> None:
                                             sids=[subscriptions.pop(channel)],
                                         )
                                 live_book = OrderBook(ticker)
-                                reset_live_pricing_for_new_market()
                                 capture.record({"type": "market_metadata", "msg": selected})
                                 await subscribe(
                                     "orderbook_delta",
                                     market_tickers=[ticker],
-                                    use_yes_price=True,
                                 )
                                 await subscribe("trade", market_tickers=[ticker])
                                 snapshot_deadline = time.monotonic() + 5
@@ -270,12 +267,13 @@ async def _session(profile, capture_path: str | None = None) -> None:
                         discover_again = True
         finally:
             receive.cancel()
-            history_task.cancel()
+            if history_task:
+                history_task.cancel()
             if discovery is not None:
                 discovery.cancel()
             await asyncio.gather(
                 receive,
-                history_task,
+                *([history_task] if history_task else []),
                 *([discovery] if discovery else []),
                 return_exceptions=True,
             )

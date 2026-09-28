@@ -1,5 +1,6 @@
 import json
 from itertools import count
+from urllib.parse import urlparse
 
 import websockets
 
@@ -15,10 +16,10 @@ async def command(ws, cmd: str, **params) -> int:
     return command_id
 
 
-async def connect():
+async def connect(*, url: str = WS_BASE_URL):
     return await websockets.connect(
-        WS_BASE_URL,
-        additional_headers=get_ws_auth_headers(),
+        url,
+        additional_headers=get_ws_auth_headers(urlparse(url).path),
         ping_interval=10,
         ping_timeout=10,
         open_timeout=10,

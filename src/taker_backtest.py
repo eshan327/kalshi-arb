@@ -11,7 +11,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from pathlib import Path
 
 from core.markets import parse_iso8601_to_epoch
-from data.capture import BookReplay
+from data.capture import BookReplay, iter_capture
 
 MICRODOLLAR = Decimal("0.000001")
 CONTRACT_STEP = Decimal("0.01")
@@ -98,18 +98,6 @@ def walk_asks(book, side: str, count: Decimal, limit: Decimal, depth_fraction: D
     return filled, cost, fee_basis, levels
 
 
-def _capture_rows(path: Path):
-    last_ns = 0
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            row = json.loads(line)
-            received_ns = row["received_ns"]
-            if not isinstance(received_ns, int) or received_ns < last_ns:
-                raise ValueError("Capture receipt times must be monotonic nanoseconds")
-            last_ns = received_ns
-            yield row
-
-
 def _summary(rows: list[dict]) -> dict:
     filled = [row for row in rows if Decimal(row["filled_contracts"]) > 0]
     requested = sum((Decimal(row["contracts"]) for row in rows), Decimal(0))
@@ -132,8 +120,9 @@ def run_backtest(
     output_dir: Path, latency_ms: int = 100, max_book_age_ms: int = 2000,
     depth_fraction: Decimal = Decimal("1"),
     fee_multiplier: Decimal = Decimal("1"),
-    balance_precision: Decimal = Decimal("0.01"),
+    balance_precision: Decimal = Decimal("0.0001"),
     holdout_fraction: float = 0.2,
+    holdout_start: float | None = None,
 ) -> dict:
     if (
         latency_ms < 0
@@ -144,6 +133,7 @@ def run_backtest(
         or fee_multiplier < 0
         or balance_precision not in {Decimal("0.01"), Decimal("0.0001")}
         or not 0 < holdout_fraction < 1
+        or (holdout_start is not None and (not math.isfinite(holdout_start) or holdout_start <= 0))
     ):
         raise ValueError(
             "Invalid latency, book age, depth fraction, fee multiplier, or holdout fraction"
@@ -159,13 +149,13 @@ def run_backtest(
     if None in closes or not closes:
         raise ValueError("Market close time is missing")
     closes = sorted(closes)
-    boundary = (
+    boundary = holdout_start if holdout_start is not None else (
         closes[max(1, min(len(closes) - 1, int(len(closes) * (1 - holdout_fraction))))]
         if len(closes) > 1 else float("inf")
     )
 
     replay = BookReplay()
-    rows = _capture_rows(capture_path)
+    rows = iter_capture(capture_path)
     upcoming = next(rows, None)
     results = []
     for signal in signals:
@@ -176,6 +166,7 @@ def run_backtest(
         ticker = signal["market_ticker"]
         market = markets[ticker]
         close_ts = parse_iso8601_to_epoch(market["close_time"])
+        outcome_ts = parse_iso8601_to_epoch(market.get("settlement_ts")) or close_ts
         open_ts = parse_iso8601_to_epoch(market.get("open_time"))
         book = replay.books.get(ticker)
         book_ns = replay.updated_ns.get(ticker)
@@ -221,7 +212,9 @@ def run_backtest(
             },
             "arrival_ts": arrival_ns / 1e9,
             "close_ts": close_ts,
-            "split": "train" if close_ts < boundary else "holdout",
+            "outcome_ts": outcome_ts,
+            "split": ("train" if outcome_ts < boundary else
+                      "holdout" if signal["decision_ts"] >= boundary else "crossing"),
             "result": market["result"],
             "book_age_ms": age_ms,
             "status": status,
@@ -253,6 +246,7 @@ def run_backtest(
         "all": _summary(results),
         "train": _summary([row for row in results if row["split"] == "train"]),
         "holdout": _summary([row for row in results if row["split"] == "holdout"]),
+        "crossing": _summary([row for row in results if row["split"] == "crossing"]),
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
@@ -268,7 +262,7 @@ def main() -> None:
     parser.add_argument("--max-book-age-ms", type=int, default=2000)
     parser.add_argument("--depth-fraction", type=Decimal, default=Decimal("1"))
     parser.add_argument("--fee-multiplier", type=Decimal, default=Decimal("1"))
-    parser.add_argument("--balance-precision", type=Decimal, default=Decimal("0.01"))
+    parser.add_argument("--balance-precision", type=Decimal, default=Decimal("0.0001"))
     parser.add_argument("--holdout-fraction", type=float, default=0.2)
     args = parser.parse_args()
     print(json.dumps(run_backtest(

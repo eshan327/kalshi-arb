@@ -48,18 +48,20 @@ def main() -> None:
             market = get_live_market_info()
             book = get_live_book()
             strike = extract_suggested_strike(market)
-            try:
-                pricing = compute_live_pricing_snapshot(
-                    profile=profile,
-                    strike=strike,
-                    market_ticker=market.get("ticker"),
-                    close_time_iso=market.get("close_time"),
-                    settlement_decimals=extract_settlement_decimals(
-                        market, profile.settlement_decimals_fallback
-                    ),
-                )
-            except Exception as exc:
-                pricing = {"ready": False, "reason": f"pricing error: {exc}"}
+            pricing = {"ready": False, "reason": "Pyth settlement model unavailable"}
+            if profile.index_id:
+                try:
+                    pricing = compute_live_pricing_snapshot(
+                        profile=profile,
+                        strike=strike,
+                        market_ticker=market.get("ticker"),
+                        close_time_iso=market.get("close_time"),
+                        settlement_decimals=extract_settlement_decimals(
+                            market, profile.settlement_decimals_fallback
+                        ),
+                    )
+                except Exception as exc:
+                    pricing = {"ready": False, "reason": f"pricing error: {exc}"}
             bid, ask = (None, None)
             if book is not None and book.initialized and not book.needs_resync:
                 bid, ask, _, _ = book.get_best_prices()

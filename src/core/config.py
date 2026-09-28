@@ -19,3 +19,14 @@ else:
 
 # Market selection defaults
 MARKET_ASSET_DEFAULT = os.getenv("KALSHI_MARKET_ASSET", "BTC").upper()
+
+# Perps REST shares the Trade API host; Perps WebSocket uses its own host.
+PERPS_API_BASE_URL = os.getenv(
+    "KALSHI_PERPS_API_BASE_URL", f"{API_BASE_URL.rstrip('/')}/margin"
+).rstrip("/")
+PERPS_WS_BASE_URL = os.getenv(
+    "KALSHI_PERPS_WS_BASE_URL",
+    "wss://external-api-margin-ws.kalshi.com/trade-api/ws/v2/margin"
+    if KALSHI_ENV == "prod"
+    else "wss://external-api-margin-ws.demo.kalshi.co/trade-api/ws/v2/margin",
+)

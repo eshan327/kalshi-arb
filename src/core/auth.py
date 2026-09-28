@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
 
 from core.config import KALSHI_ENV
 
@@ -65,22 +65,24 @@ def get_api_auth_headers(method: str, path: str) -> dict[str, str]:
     private_key = serialization.load_pem_private_key(
         private_key_pem.encode("utf-8"), password=None
     )
-    if not isinstance(private_key, rsa.RSAPrivateKey):
-        raise TypeError("Expected RSA private key for Kalshi API signing.")
-
     timestamp = str(int(time.time() * 1000))
     method = str(method).upper().strip()
     sign_path = str(path).split("?", 1)[0]
     message = f"{timestamp}{method}{sign_path}".encode("utf-8")
 
-    signature = private_key.sign(
-        message,
-        padding.PSS(
-            mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.DIGEST_LENGTH,
-        ),
-        hashes.SHA256(),
-    )
+    if isinstance(private_key, ed25519.Ed25519PrivateKey):
+        signature = private_key.sign(message)
+    elif isinstance(private_key, rsa.RSAPrivateKey):
+        signature = private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+    else:
+        raise TypeError("Expected RSA or Ed25519 private key for Kalshi API signing.")
 
     return {
         "KALSHI-ACCESS-KEY": key_id,
@@ -89,5 +91,5 @@ def get_api_auth_headers(method: str, path: str) -> dict[str, str]:
     }
 
 
-def get_ws_auth_headers() -> dict[str, str]:
-    return get_api_auth_headers("GET", "/trade-api/ws/v2")
+def get_ws_auth_headers(path: str = "/trade-api/ws/v2") -> dict[str, str]:
+    return get_api_auth_headers("GET", path)
