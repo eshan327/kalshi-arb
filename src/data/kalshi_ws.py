@@ -17,13 +17,17 @@ async def command(ws, cmd: str, **params) -> int:
 
 
 async def connect(*, url: str = WS_BASE_URL):
-    return await websockets.connect(
-        url,
-        additional_headers=get_ws_auth_headers(urlparse(url).path),
-        ping_interval=10,
-        ping_timeout=10,
-        open_timeout=10,
-    )
+    headers = get_ws_auth_headers(urlparse(url).path)
+    try:
+        return await websockets.connect(
+            url,
+            additional_headers=headers,
+            ping_interval=10,
+            ping_timeout=10,
+            open_timeout=10,
+        )
+    except OSError as exc:
+        raise ConnectionError(f"WebSocket connection failed: {exc}") from exc
 
 
 async def request_orderbook_snapshot(ws, market_ticker: str, sid: int) -> None:

@@ -77,5 +77,26 @@ def test_stream_snapshot_sequence_gap_and_capture_cleanup(monkeypatch, tmp_path)
     assert sent[1]["params"]["send_initial_snapshot"] is True
     capture = [json.loads(line) for line in path.read_text().splitlines()]
     assert capture[0]["data"]["type"] == "session_start"
+    assert capture[0]["data"]["endpoint"] == perps.PERPS_WS_BASE_URL
+    assert capture[0]["data"]["environment"] in {"demo", "prod"}
     assert capture[-1]["data"]["type"] == "session_end"
     assert len({row["session"] for row in capture}) == 1
+
+
+
+def test_network_setup_errors_are_retryable_but_missing_credentials_are_fatal(monkeypatch):
+    monkeypatch.setattr(kalshi_ws, "get_ws_auth_headers", lambda _: {})
+
+    async def unavailable(*args, **kwargs):
+        raise OSError("DNS lookup failed")
+
+    monkeypatch.setattr(kalshi_ws.websockets, "connect", unavailable)
+    with pytest.raises(ConnectionError, match="DNS lookup failed"):
+        asyncio.run(kalshi_ws.connect())
+
+    def missing_key(_):
+        raise FileNotFoundError("private key missing")
+
+    monkeypatch.setattr(kalshi_ws, "get_ws_auth_headers", missing_key)
+    with pytest.raises(FileNotFoundError, match="private key missing"):
+        asyncio.run(kalshi_ws.connect())

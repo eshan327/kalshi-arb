@@ -56,7 +56,7 @@ def get_perps_pages(path: str, key: str, **params) -> list[dict]:
 
 async def _session(ticker: str, capture_path: str | None):
     async with await connect(url=PERPS_WS_BASE_URL) as ws:
-        capture = FeedCapture(capture_path, f"perps-{time.time_ns()}")
+        capture = FeedCapture(capture_path, f"perps-{time.time_ns()}", endpoint=PERPS_WS_BASE_URL)
         try:
             pending = set(_PUBLIC_CHANNELS)
             for channel in _PUBLIC_CHANNELS:

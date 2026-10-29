@@ -21,10 +21,10 @@ def realized_vol_from_price_points(
     if (
         not math.isfinite(now_ts)
         or not math.isfinite(window_seconds)
-        or window_seconds < 2
+        or window_seconds < 3
     ):
         raise ValueError(
-            "Finite clock and a volatility window of at least two seconds required"
+            "Finite clock and a volatility window of at least three seconds required"
         )
     first, last = math.ceil(now_ts - window_seconds), math.floor(now_ts)
     values = {}

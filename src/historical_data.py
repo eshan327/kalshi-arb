@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from core.config import KALSHI_ENV
+from core.config import KALSHI_ENV, PERPS_WS_BASE_URL, WS_BASE_URL
 from core.markets import get_market_profile, parse_iso8601_to_epoch
 from data.kalshi_perps import get_perps, get_perps_pages
 from data.kalshi_rest import (
@@ -108,6 +108,7 @@ def export_15m(asset: str, start: str, end: str, output_dir: Path) -> dict:
         "series_ticker": profile.kalshi_series_ticker,
         "start_close": start, "end_close": end,
         "retrieved_at": datetime.now(UTC).isoformat(), "environment": KALSHI_ENV,
+        "ws_endpoint": WS_BASE_URL,
         "settlement_source": "Pyth 1-minute close" if not profile.index_id else "CF Benchmarks 60-second average",
         "historical_cutoff": cutoffs, "markets": markets,
         "trades_file": "trades.jsonl", "candles_file": "candles.jsonl",
@@ -204,7 +205,7 @@ def export_perps(ticker: str, start: str, end: str, output_dir: Path) -> dict:
             for row in rows:
                 handle.write(json.dumps(row, separators=(",", ":")) + "\n")
     manifest = {"ticker": ticker, "start": start, "end": end,
-                "environment": KALSHI_ENV,
+                "environment": KALSHI_ENV, "ws_endpoint": PERPS_WS_BASE_URL,
                 "retrieved_at": datetime.now(UTC).isoformat(), "market": market,
                 "candles": len(candles), "trades": len(trades),
                 "funding_events": len(funding), "missing_minute_candles": len(expected - observed),

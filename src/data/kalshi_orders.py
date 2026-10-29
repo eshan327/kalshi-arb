@@ -60,7 +60,7 @@ class OrderClient:
 
     Constructing this client and building payloads perform no I/O. Create/amend
     require current market metadata and caller-generated client IDs. Recorders
-    and backtests never instantiate this client.
+    never instantiate this client; backtests only validate terms offline.
     """
 
     def __init__(self, product: str):
@@ -81,7 +81,8 @@ class OrderClient:
             fields["exchange_index"] = _integer(exchange_index, "exchange_index", -1)
         return fields
 
-    def _terms(self, market: dict, side: str, count, price) -> dict:
+    def validate_terms(self, market: dict, side: str, count, price) -> dict:
+        """Validate market price/quantity rules without loading credentials or sending orders."""
         ticker = _text(market.get("ticker"), "market ticker")
         if side not in {"bid", "ask"}:
             raise ValueError("side must be bid or ask; Predictions prices always use the Yes scale")
@@ -121,7 +122,7 @@ class OrderClient:
         order_group_id: str | None = None,
     ) -> dict:
         """Build a validated payload without networking or silently snapping prices."""
-        body = self._terms(market, side, count, price)
+        body = self.validate_terms(market, side, count, price)
         _text(client_order_id, "client_order_id")
         if time_in_force not in {"good_till_canceled", "immediate_or_cancel", "fill_or_kill"}:
             raise ValueError("Invalid time_in_force")
@@ -210,7 +211,7 @@ class OrderClient:
         subaccount: int | None = None, exchange_index: int | None = None,
     ) -> dict:
         """count is already-filled quantity plus desired remaining quantity, not remaining alone."""
-        body = self._terms(market, side, count, price)
+        body = self.validate_terms(market, side, count, price)
         routing = self._routing(subaccount=subaccount, exchange_index=exchange_index)
         if self.product == "predictions":
             shard = exchange_index if exchange_index is not None else market.get("exchange_index")

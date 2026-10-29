@@ -8,6 +8,8 @@ import pytest
 import historical_data
 from perps_backtest import Book, _missing_funding, run_backtest
 
+ENDPOINT = "wss://external-api-margin-ws.kalshi.com/trade-api/ws/v2/margin"
+
 
 def iso(ts):
     return datetime.fromtimestamp(ts, UTC).isoformat()
@@ -33,6 +35,7 @@ def test_gold_history_exports_market_terms_without_cf(monkeypatch, tmp_path):
     source = json.loads((out / "source.json").read_text())
     assert source["settlement_source"] == "Pyth 1-minute close"
     assert source["kind"] == "market-only"
+    assert source["ws_endpoint"] == historical_data.WS_BASE_URL
     assert [json.loads(line)["trade"] for line in (out / source["trades_file"]).read_text().splitlines()] == [trade, later_trade]
     assert json.loads((out / source["candles_file"]).read_text())["candle"] == candle
 
@@ -53,6 +56,7 @@ def test_perps_export_deduplicates_boundaries_and_reports_gaps(monkeypatch, tmp_
     monkeypatch.setattr(historical_data, "get_perps_pages", lambda *a, **k: trades)
     out = tmp_path / "perps"
     result = historical_data.export_perps("KXGOLDPERP", iso(1020), iso(1140), out)
+    assert json.loads((out / "manifest.json").read_text())["ws_endpoint"] == historical_data.PERPS_WS_BASE_URL
     assert result["candles"] == 1
     assert result["missing_minute_candles"] == 1
     assert json.loads((out / "candles.jsonl").read_text())["end_period_ts"] == 1080
@@ -64,7 +68,9 @@ def test_perps_replay_uses_arrival_book_and_funding(tmp_path):
     history.mkdir()
     (history / "manifest.json").write_text(json.dumps({
         "ticker": "KXBTCPERP", "start": iso(1000), "end": iso(2000),
-        "environment": "prod", "market": {"asset_class": "Crypto", "tick_size": "0.0001"}}))
+        "environment": "prod", "ws_endpoint": ENDPOINT,
+        "market": {"ticker": "KXBTCPERP", "asset_class": "Crypto", "tick_size": "0.0001",
+                   "fractional_trading_enabled": True}}))
     (history / "funding_rates.jsonl").write_text(json.dumps({
         "market_ticker": "KXBTCPERP", "funding_time": iso(1250),
         "funding_rate": "0.01", "mark_price": "100"}) + "\n")
@@ -72,12 +78,15 @@ def test_perps_replay_uses_arrival_book_and_funding(tmp_path):
     def row(ts, kind, seq=None, **msg):
         if kind.startswith("orderbook"):
             msg["market_ticker"] = "KXBTCPERP"
-        return {"received_ns": round(ts * 1e9), "session": "s1",
-                "data": {"type": kind, "sid": 1, "seq": seq, "msg": msg}}
+        data = {"type": kind, "sid": 1, "seq": seq, "msg": msg}
+        if kind == "session_start":
+            data.update(environment="prod", endpoint=ENDPOINT)
+        return {"received_ns": round(ts * 1e9), "session": "s1", "data": data}
     capture.write_text("".join(json.dumps(item) + "\n" for item in [
         row(1090, "session_start"),
         row(1100.1, "orderbook_snapshot", 1, bid=[["99", "2"]], ask=[["100", "2"]]),
         row(1200, "orderbook_delta", 2, side="ask", price="100", delta="-1"),
+        row(1600, "session_end"),
     ]))
     signals = tmp_path / "signals.csv"
     with signals.open("w", newline="") as handle:
@@ -120,7 +129,7 @@ def test_perps_replay_uses_arrival_book_and_funding(tmp_path):
         taker_fee_rate=Decimal("0.001"))
     assert blocked["open_positions_at_signal_exit"] == 1
     assert list(csv.DictReader((tmp_path / "blocked" / "round_trips.csv").open()))[1]["status"] == "blocked_by_open_position"
-    book = Book("KXBTCPERP")
+    book = Book("KXBTCPERP", Decimal("0.01"))
     book.ingest(row(1100, "orderbook_snapshot", 1, bid=[["99", "2"]], ask=[["100", "2"]]))
     book.ingest(row(1100.5, "orderbook_snapshot", 1, bid=[["1", "2"]], ask=[["2", "2"]]))
     assert max(book.bids) == Decimal("99")

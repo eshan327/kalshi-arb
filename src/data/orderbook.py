@@ -19,6 +19,8 @@ class OrderBook:
         self.market_ticker = market_ticker
         self.yes = {}  # {price_cents: quantity}
         self.no = {}
+        self.sid = None
+        self._retired_sids = set()
         self.expected_seq = None
         self.initialized = False
         self.needs_resync = False
@@ -63,9 +65,15 @@ class OrderBook:
     def _is_crossed_unlocked(self):
         return bool(self.yes and self.no and max(self.yes) + max(self.no) >= 100.0)
 
-    def load_ws_snapshot(self, snapshot, seq):
-        """Load YES and NO bids at their own prices and the exact sequence."""
+    def load_ws_snapshot(self, snapshot, seq, sid):
+        """Load a fresh snapshot; sequences restart only for a new subscription."""
         with self._lock:
+            if type(sid) is not int or type(seq) is not int:
+                raise ValueError("Snapshot needs an integer subscription and sequence")
+            if sid in self._retired_sids:
+                return False
+            if sid == self.sid and self.expected_seq is not None and seq < self.expected_seq:
+                return False
             self._load_levels(
                 snapshot.get("yes_dollars_fp", []),
                 self.yes,
@@ -74,9 +82,13 @@ class OrderBook:
                 snapshot.get("no_dollars_fp", []),
                 self.no,
             )
-            self.expected_seq = seq + 1 if isinstance(seq, int) else None
+            if self.sid is not None and sid != self.sid:
+                self._retired_sids.add(self.sid)
+            self.sid = sid
+            self.expected_seq = seq + 1
             self.initialized = True
             self.needs_resync = self._is_crossed_unlocked()
+            return True
 
     def apply_delta(self, msg):
         """
@@ -111,16 +123,18 @@ class OrderBook:
                 book[price] = new_qty
             self.needs_resync = self.needs_resync or self._is_crossed_unlocked()
 
-    def apply_delta_with_seq(self, seq, msg):
+    def apply_delta_with_seq(self, seq, msg, sid):
         """
         Applies a delta only when sequence is in-order.
         Returns True when applied, False when stale/invalid/gap.
         """
         with self._lock:
-            if not isinstance(seq, int):
+            if type(sid) is not int or type(seq) is not int:
                 self.needs_resync = True
                 return False
 
+            if sid != self.sid:
+                return False
             if self.expected_seq is None:
                 self.expected_seq = seq
 
@@ -131,6 +145,8 @@ class OrderBook:
                 logger.warning(
                     "Seq gap detected: expected %s, got %s", self.expected_seq, seq
                 )
+                # Recovery snapshots must cover the message that exposed the gap.
+                self.expected_seq = seq
                 self.needs_resync = True
                 return False
 
@@ -143,6 +159,8 @@ class OrderBook:
         with self._lock:
             self.yes.clear()
             self.no.clear()
+            self.sid = None
+            self._retired_sids.clear()
             self.expected_seq = None
             self.initialized = False
             self.needs_resync = False

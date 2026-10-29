@@ -1,8 +1,9 @@
 # Order integration — reviewed 2026-09-27
 
 `data.kalshi_orders.OrderClient("predictions" | "perps")` provides explicit
-single-order REST calls. Constructing it or calling `build_order` performs no
-networking. `create_order`, `amend_order`, `decrease_order`, and `cancel_order`
+single-order REST calls. Constructing it, calling `validate_terms`, or calling
+`build_order` performs no networking. Backtests reuse `validate_terms` for market
+price and quantity rules without submitting orders. `create_order`, `amend_order`, `decrease_order`, and `cancel_order`
 submit a signed write when called. The feed CLIs and backtests never call them.
 
 ## Current API routes

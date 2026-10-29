@@ -12,6 +12,7 @@ from pathlib import Path
 
 from core.markets import parse_iso8601_to_epoch
 from data.capture import BookReplay, iter_capture
+from data.kalshi_orders import OrderClient
 
 MICRODOLLAR = Decimal("0.000001")
 CONTRACT_STEP = Decimal("0.01")
@@ -30,6 +31,7 @@ def _decimal(value: str, name: str, *, minimum: Decimal = Decimal("0")) -> Decim
 
 def load_signals(path: Path, markets: dict[str, dict]) -> list[dict]:
     signals, seen = [], set()
+    client = OrderClient("predictions")
     with path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         required = {
@@ -61,6 +63,8 @@ def load_signals(path: Path, markets: dict[str, dict]) -> list[dict]:
                 raise ValueError(
                     f"Line {number}: count or limit exceeds Kalshi fixed-point precision"
                 )
+            yes_limit = limit / 100 if side == "yes" else 1 - limit / 100
+            client.validate_terms(markets[ticker], "bid" if side == "yes" else "ask", count, yes_limit)
             signals.append({
                 "market_ticker": ticker,
                 "decision_ts": decision_ts,
@@ -139,6 +143,8 @@ def run_backtest(
             "Invalid latency, book age, depth fraction, fee multiplier, or holdout fraction"
         )
     source = json.loads((input_dir / "source.json").read_text())
+    if source.get("environment") != "prod" or not source.get("ws_endpoint"):
+        raise ValueError("Replay needs a production export with ws_endpoint; export history again")
     markets = {
         market["ticker"]: market
         for market in source["markets"]
@@ -155,7 +161,7 @@ def run_backtest(
     )
 
     replay = BookReplay()
-    rows = iter_capture(capture_path)
+    rows = iter_capture(capture_path, environment=source["environment"], endpoint=source["ws_endpoint"])
     upcoming = next(rows, None)
     results = []
     for signal in signals:
@@ -178,7 +184,7 @@ def run_backtest(
             or arrival_ns >= round(close_ts * 1e9)
         ):
             status = "outside_market_hours"
-        elif book is None:
+        elif book is None or not book.initialized or book.needs_resync:
             status = "no_continuous_book"
         elif age_ms is None or age_ms > max_book_age_ms:
             status = "stale_book"
@@ -228,7 +234,7 @@ def run_backtest(
         }
         results.append(result)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=False)
     with (output_dir / "fills.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(results[0]))
         writer.writeheader()

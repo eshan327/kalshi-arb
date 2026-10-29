@@ -3,6 +3,8 @@ import json
 import time
 from datetime import UTC, datetime
 
+import pytest
+
 from data import streamer
 
 
@@ -180,6 +182,77 @@ def test_gold_recorder_subscribes_to_market_without_cf(monkeypatch):
             channels = [cmd["params"]["channels"][0] for cmd in ws.sent
                         if cmd["cmd"] == "subscribe"]
             assert channels == ["market_lifecycle_v2", "orderbook_delta", "trade"]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("failure", [PermissionError("capture denied"), OSError("disk full")])
+def test_capture_failures_terminate_instead_of_reconnecting(monkeypatch, failure):
+    calls = []
+
+    async def fail(*args):
+        calls.append(args)
+        raise failure
+
+    monkeypatch.setattr(streamer, "_session", fail)
+    with pytest.raises(type(failure), match=str(failure)):
+        asyncio.run(asyncio.wait_for(streamer.run_market_streamer("capture.jsonl"), 0.1))
+    assert len(calls) == 1
+
+
+def test_network_failures_still_reconnect(monkeypatch):
+    calls = []
+
+    async def session(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise ConnectionError("network disconnected")
+        raise PermissionError("capture denied")
+
+    async def no_wait(*args):
+        pass
+
+    monkeypatch.setattr(streamer, "_session", session)
+    monkeypatch.setattr(streamer.asyncio, "sleep", no_wait)
+    with pytest.raises(PermissionError, match="capture denied"):
+        asyncio.run(streamer.run_market_streamer("capture.jsonl"))
+    assert len(calls) == 2
+
+
+def test_live_prediction_stream_ignores_stale_snapshots_and_wrong_subscriptions(monkeypatch):
+    from core.markets import get_market_profile
+
+    async def check():
+        ws = FakeSocket()
+
+        async def connect():
+            return ws
+
+        monkeypatch.setattr(streamer, "connect", connect)
+        monkeypatch.setattr(streamer, "live_book", None)
+        monkeypatch.setattr(streamer, "_live_market_info", {})
+        monkeypatch.setattr(streamer, "_discover", lambda _: {
+            "ticker": "TEST", "close_time": datetime.fromtimestamp(time.time() + 900, UTC).isoformat(),
+        })
+        task = asyncio.create_task(streamer._session(get_market_profile("GOLD")))
+        try:
+            await until(lambda: streamer.live_book is not None and streamer.live_book.initialized)
+            await ws.messages.put({"type": "orderbook_delta", "sid": ws.book_sid, "seq": 11,
+                                   "msg": {"market_ticker": "TEST", "side": "no",
+                                           "price_dollars": "0.55", "delta_fp": "-3"}})
+            await ws.snapshot("TEST", 10)
+            await ws.messages.put({"type": "orderbook_snapshot", "sid": ws.book_sid + 100, "seq": 100,
+                                   "msg": {"market_ticker": "TEST", "yes_dollars_fp": [["0.01", "1"]],
+                                           "no_dollars_fp": [["0.55", "3"]]}})
+            await ws.messages.put({"type": "orderbook_delta", "sid": ws.book_sid, "seq": 12,
+                                   "msg": {"market_ticker": "TEST", "side": "yes",
+                                           "price_dollars": "0.40", "delta_fp": "1"}})
+            await until(lambda: streamer.live_book.expected_seq == 13)
+            assert streamer.live_book.yes == {40.0: 3.0}
+            assert streamer.live_book.no == {}
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

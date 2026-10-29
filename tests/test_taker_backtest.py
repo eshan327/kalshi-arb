@@ -9,16 +9,18 @@ from data.capture import iter_capture, load_quote_tapes
 from data.orderbook import OrderBook
 from taker_backtest import run_backtest, walk_asks
 
+ENDPOINT = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+
 
 def test_taker_replay_uses_arrival_depth_partial_fills_and_sequence_gaps(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     markets = [
-        {"ticker": ticker, "close_time": datetime.fromtimestamp(close, UTC).isoformat(), "result": result}
+        {"ticker": ticker, "close_time": datetime.fromtimestamp(close, UTC).isoformat(), "result": result, "price_ranges": [{"start": "0", "end": "1", "step": "0.01"}]}
         for ticker, close, result in [("A", 1100, "yes"), ("B", 1200, "no"), ("C", 1200, "yes")]
     ]
     markets[0]["settlement_ts"] = datetime.fromtimestamp(1105, UTC).isoformat()
-    (source / "source.json").write_text(json.dumps({"markets": markets}))
+    (source / "source.json").write_text(json.dumps({"markets": markets, "environment": "prod", "ws_endpoint": ENDPOINT}))
     signals = tmp_path / "signals.csv"
     with signals.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["market_ticker", "decision_ts", "side", "contracts", "limit_price_cents"])
@@ -32,9 +34,9 @@ def test_taker_replay_uses_arrival_depth_partial_fills_and_sequence_gaps(tmp_pat
     def row(ts, kind, ticker=None, seq=None, **msg):
         if ticker is not None:
             msg["market_ticker"] = ticker
-        data = {"type": kind, "seq": seq, "msg": msg}
+        data = {"type": kind, "sid": 1, "seq": seq, "msg": msg}
         if kind == "session_start":
-            data["book_price_mode"] = "native_bids"
+            data.update(book_price_mode="native_bids", environment="prod", endpoint=ENDPOINT)
         return {"received_ns": round(ts * 1e9), "session": "s1", "data": data}
     with capture.open("w") as handle:
         for item in [
@@ -44,6 +46,7 @@ def test_taker_replay_uses_arrival_depth_partial_fills_and_sequence_gaps(tmp_pat
             row(1000.05, "orderbook_snapshot", "C", 1, yes_dollars_fp=[["0.35", "5"]], no_dollars_fp=[["0.58", "1"]]),
             row(1000.08, "orderbook_delta", "C", 3, side="no", price_dollars="0.58", delta_fp="1"),
             row(1000.15, "orderbook_delta", "A", 2, side="no", price_dollars="0.58", delta_fp="-1"),
+            row(1001.0, "session_end"),
         ]:
             handle.write(json.dumps(item) + "\n")
     result = run_backtest(input_dir=source, capture_path=capture, signals_path=signals,
@@ -68,7 +71,7 @@ def test_taker_replay_uses_arrival_depth_partial_fills_and_sequence_gaps(tmp_pat
 
     book = OrderBook("NO")
     book.load_ws_snapshot({"yes_dollars_fp": [["0.35", "2"]],
-                           "no_dollars_fp": [["0.42", "1"]]}, 1)
+                           "no_dollars_fp": [["0.42", "1"]]}, 1, 1)
     filled, cost, _, levels = walk_asks(book, "no", Decimal("1"), Decimal("65"), Decimal("1"))
     assert filled == 1 and cost == Decimal("0.65")
     assert levels[0]["price_cents"] == "65.0"
@@ -77,26 +80,26 @@ def test_taker_replay_uses_arrival_depth_partial_fills_and_sequence_gaps(tmp_pat
 def test_capture_reader_rejects_out_of_order_receipts(tmp_path):
     capture = tmp_path / "capture.jsonl"
     capture.write_text(''.join(json.dumps({
-        "received_ns": ns, "session": "s", "data": {"type": "session_start", "book_price_mode": "native_bids"},
+        "received_ns": ns, "session": "s", "data": {"type": "session_start", "book_price_mode": "native_bids", "environment": "prod", "endpoint": ENDPOINT},
     }) + "\n" for ns in (2, 1)))
     with pytest.raises(ValueError, match="monotonic"):
-        list(iter_capture(capture))
+        list(iter_capture(capture, environment="prod", endpoint=ENDPOINT))
     with pytest.raises(ValueError, match="monotonic"):
-        load_quote_tapes(capture)
+        load_quote_tapes(capture, environment="prod", endpoint=ENDPOINT)
 
-    capture.write_text(json.dumps({"received_ns": 1, "session": "s", "data": {"type": "session_start"}}) + "\n")
+    capture.write_text(json.dumps({"received_ns": 1, "session": "s", "data": {"type": "session_start", "environment": "prod", "endpoint": ENDPOINT}}) + "\n")
     with pytest.raises(ValueError, match="older book price mode"):
-        load_quote_tapes(capture)
+        load_quote_tapes(capture, environment="prod", endpoint=ENDPOINT)
 
 
 def test_prediction_book_uses_no_bid_for_yes_ask():
     book = OrderBook("A")
     book.load_ws_snapshot({"yes_dollars_fp": [["0.42", "2"]],
-                           "no_dollars_fp": [["0.56", "3"]]}, 1)
+                           "no_dollars_fp": [["0.56", "3"]]}, 1, 1)
     assert book.get_best_prices() == (42.0, 44.0, 56.0, 58.0)
     book.apply_delta_with_seq(2, {"side": "no", "price_dollars": "0.56",
-                                  "delta_fp": "-1"})
+                                  "delta_fp": "-1"}, 1)
     assert book.no[56.0] == 2.0
     book.apply_delta_with_seq(3, {"side": "no", "price_dollars": "0.56",
-                                  "delta_fp": "-3"})
+                                  "delta_fp": "-3"}, 1)
     assert book.needs_resync

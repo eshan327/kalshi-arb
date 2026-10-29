@@ -7,6 +7,9 @@ import random
 import time
 from datetime import UTC, datetime
 
+from websockets.exceptions import ConnectionClosed, InvalidStatus
+
+from core.config import WS_BASE_URL
 from core.markets import get_active_market_profile, parse_iso8601_to_epoch
 from data.capture import FeedCapture
 from data.benchmark import (
@@ -106,7 +109,7 @@ async def _session(profile, capture_path: str | None = None) -> None:
         if profile.high_frequency:
             await subscribe("cfbenchmarks_value_5hz", index_ids=[profile.index_id])
         await subscribe("market_lifecycle_v2")
-        capture = FeedCapture(capture_path, f"{time.time_ns()}-{_stream_epoch}")
+        capture = FeedCapture(capture_path, f"{time.time_ns()}-{_stream_epoch}", endpoint=WS_BASE_URL)
         history_task = asyncio.create_task(_seed_index(profile)) if profile.index_id else None
         discovery = asyncio.create_task(asyncio.to_thread(_discover, profile))
         discover_again = False
@@ -233,24 +236,26 @@ async def _session(profile, capture_path: str | None = None) -> None:
                         logger.warning("CF 5 Hz index %s unavailable", profile.index_id)
                 elif kind in {"orderbook_snapshot", "orderbook_delta"}:
                     book = live_book
-                    if book is None or msg.get("market_ticker") != book.market_ticker:
+                    if (book is None or msg.get("market_ticker") != book.market_ticker
+                        or sid != subscriptions.get("orderbook_delta")):
                         continue
                     if kind == "orderbook_snapshot":
                         if not isinstance(seq, int):
                             raise ValueError("Snapshot has no sequence")
-                        book.load_ws_snapshot(msg, seq)
+                        if not book.load_ws_snapshot(msg, seq, sid):
+                            continue
                         snapshot_deadline = None
                         if book.needs_resync:
-                            raise ValueError("Invalid snapshot")
+                            raise ConnectionError("Invalid snapshot; reconnecting")
                     elif book.initialized:
-                        if not book.apply_delta_with_seq(seq, msg) or book.needs_resync:
+                        if not book.apply_delta_with_seq(seq, msg, sid) or book.needs_resync:
                             if (
                                 isinstance(seq, int)
                                 and seq < (book.expected_seq or 0)
                                 and not book.needs_resync
                             ):
                                 continue
-                            book.reset()
+                            book.initialized = False
                             snapshot_deadline = time.monotonic() + 3
                             await request_orderbook_snapshot(
                                 ws, book.market_ticker, subscriptions["orderbook_delta"]
@@ -290,7 +295,11 @@ async def run_market_streamer(capture_path: str | None = None, profile=None) -> 
             await _session(profile, capture_path)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except InvalidStatus as exc:
+            if exc.response.status_code not in {429, 500, 502, 503, 504}:
+                raise
+            logger.warning("Kalshi handshake unavailable: %s", exc)
+        except (ConnectionClosed, ConnectionError, TimeoutError) as exc:
             logger.warning("Kalshi stream reconnecting: %s", exc)
         finally:
             if live_book:

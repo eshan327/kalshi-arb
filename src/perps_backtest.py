@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from core.markets import parse_iso8601_to_epoch
 from data.capture import iter_capture
+from data.kalshi_orders import OrderClient
 
 
 def number(value, *, positive=False) -> Decimal:
@@ -26,8 +27,9 @@ def number(value, *, positive=False) -> Decimal:
 
 
 class Book:
-    def __init__(self, ticker: str):
+    def __init__(self, ticker: str, quantity_step: Decimal):
         self.ticker = ticker
+        self.quantity_step = quantity_step
         self.session = None
         self.sid = None
         self.seq = None
@@ -104,7 +106,7 @@ class Book:
         for price in sorted(levels, reverse=side == "sell"):
             if (side == "buy" and price > limit) or (side == "sell" and price < limit):
                 break
-            available = (levels[price] * fraction).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+            available = (levels[price] * fraction).quantize(self.quantity_step, rounding=ROUND_DOWN)
             take = min(quantity - filled, available)
             filled += take
             notional += take * price
@@ -113,7 +115,9 @@ class Book:
         return filled, notional
 
 
-def _signals(path: Path, ticker: str) -> list[dict]:
+def _signals(path: Path, market: dict) -> list[dict]:
+    ticker = market["ticker"]
+    client = OrderClient("perps")
     required = {"ticker", "entry_ts", "exit_ts", "side", "contracts",
                 "entry_limit_dollars", "exit_limit_dollars"}
     with path.open(newline="") as handle:
@@ -128,6 +132,10 @@ def _signals(path: Path, ticker: str) -> list[dict]:
                 or not math.isfinite(entry) or not math.isfinite(exit_)
                 or entry <= 0 or exit_ <= entry or qty != qty.quantize(Decimal("0.01"))):
                 raise ValueError("Invalid Perps signal")
+            client.validate_terms(market, "bid" if row["side"] == "long" else "ask",
+                                  qty, row["entry_limit_dollars"])
+            client.validate_terms(market, "ask" if row["side"] == "long" else "bid",
+                                  qty, row["exit_limit_dollars"])
             rows.append({"ticker": ticker, "entry_ts": entry, "exit_ts": exit_,
                          "side": row["side"], "contracts": qty,
                          "entry_limit": number(row["entry_limit_dollars"], positive=True),
@@ -163,14 +171,15 @@ def run_backtest(*, history_dir: Path, capture_path: Path, signals_path: Path,
         or not taker_fee_rate.is_finite() or not 0 <= taker_fee_rate < 1):
         raise ValueError("Invalid replay assumptions")
     manifest = json.loads((history_dir / "manifest.json").read_text())
-    if manifest.get("environment") != "prod":
-        raise ValueError("Perps replay needs a production historical export")
+    if manifest.get("environment") != "prod" or not manifest.get("ws_endpoint"):
+        raise ValueError("Perps replay needs a production export with ws_endpoint; export history again")
     ticker = manifest["ticker"]
-    asset_class = manifest["market"]["asset_class"]
-    signals = _signals(signals_path, ticker)
-    tick_size = number(manifest["market"]["tick_size"], positive=True)
-    if any(row[key] % tick_size for row in signals for key in ("entry_limit", "exit_limit")):
-        raise ValueError("Perps limits must use the market tick size")
+    market = manifest["market"]
+    if market.get("ticker") != ticker:
+        raise ValueError("Perps market ticker mismatch")
+    asset_class = market["asset_class"]
+    signals = _signals(signals_path, market)
+    quantity_step = Decimal("0.01") if market["fractional_trading_enabled"] else Decimal("1")
     first = parse_iso8601_to_epoch(manifest["start"])
     last = parse_iso8601_to_epoch(manifest["end"])
     if any(row["entry_ts"] < first or row["exit_ts"] + latency_ms / 1000 > last for row in signals):
@@ -186,9 +195,9 @@ def run_backtest(*, history_dir: Path, capture_path: Path, signals_path: Path,
         events.append((timestamp, rate, mark))
     events.sort()
     event_times = {event[0] for event in events}
-    capture = iter_capture(capture_path)
+    capture = iter_capture(capture_path, environment=manifest["environment"], endpoint=manifest["ws_endpoint"])
     upcoming = next(capture, None)
-    book = Book(ticker)
+    book = Book(ticker, quantity_step)
 
     def quote(ts: float, side: str, qty: Decimal, limit: Decimal):
         nonlocal upcoming
